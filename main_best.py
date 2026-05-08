@@ -519,6 +519,93 @@ def load_cache(path: str):
     with open(path, "rb") as f:
         return pickle.load(f)
 
+
+def parse_result_label(label: str, args: argparse.Namespace) -> dict:
+    label_upper = str(label).upper()
+    ordered_opts = sorted([str(o) for o in args.optimizers], key=len, reverse=True)
+    method = next(
+        (
+            opt
+            for opt in ordered_opts
+            if label_upper == opt.upper() or label_upper.startswith(f"{opt.upper()}_")
+        ),
+        str(label),
+    )
+    rest = label_upper[len(method):].lstrip("_") if method != str(label) else ""
+
+    estimator = ""
+    for est in sorted([str(e) for e in args.estimators], key=len, reverse=True):
+        est_upper = est.upper()
+        if rest == est_upper:
+            estimator = est.lower()
+            rest = ""
+            break
+        suffix = f"_{est_upper}"
+        if rest.endswith(suffix):
+            estimator = est.lower()
+            rest = rest[: -len(suffix)]
+            break
+
+    transfer_function = ""
+    for tf in sorted(SUPPORTED_TRANSFER_FUNCTIONS, key=len, reverse=True):
+        tf_upper = tf.upper()
+        if rest == tf_upper or rest.startswith(f"{tf_upper}_") or f"_{tf_upper}" in rest:
+            transfer_function = tf.lower()
+            break
+
+    return {"method": method, "transfer_function": transfer_function, "estimator": estimator}
+
+
+def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.DataFrame, List[str], Dict[str, str], Dict[str, str]]:
+    if df.empty:
+        return df.copy(), [], {}, {}
+
+    plot_df = df.copy()
+    if "FuncionTransferencia" not in plot_df.columns:
+        plot_df["FuncionTransferencia"] = ""
+    plot_df["FuncionTransferencia"] = plot_df["FuncionTransferencia"].fillna("").astype(str).str.lower()
+
+    tf_counts = plot_df[plot_df["FuncionTransferencia"] != ""].groupby("Optimizador")["FuncionTransferencia"].nunique()
+    variant_methods = set(tf_counts[tf_counts > 1].index)
+
+    def make_group(row):
+        opt = str(row["Optimizador"])
+        tf = str(row["FuncionTransferencia"]).lower()
+        return f"{opt}_{tf.upper()}" if opt in variant_methods and tf else opt
+
+    plot_df["GrupoGrafica"] = plot_df.apply(make_group, axis=1)
+    group_meta = (
+        plot_df[["GrupoGrafica", "Optimizador", "FuncionTransferencia"]]
+        .drop_duplicates()
+        .set_index("GrupoGrafica")
+        .to_dict("index")
+    )
+
+    opts = []
+    for opt in opt_order:
+        opt_groups = sorted(
+            [g for g, meta in group_meta.items() if meta["Optimizador"] == opt],
+            key=lambda g: (str(group_meta[g]["FuncionTransferencia"]), g),
+        )
+        opts.extend(opt_groups)
+    opts.extend(sorted(g for g in group_meta if g not in set(opts)))
+
+    colors = muted_color_palette(len(opts))
+    color_map = {}
+    label_map = {}
+    for i, group in enumerate(opts):
+        meta = group_meta[group]
+        method = meta["Optimizador"]
+        tf = meta["FuncionTransferencia"]
+        if method not in variant_methods and method in CHART_PALETTE:
+            color_map[group] = CHART_PALETTE[method]
+        else:
+            color_map[group] = colors[i]
+        base_label = CHART_LABELS.get(method, method)
+        label_map[group] = f"{base_label} {tf.upper()}" if tf and method in variant_methods else base_label
+
+    return plot_df, opts, color_map, label_map
+
 def plot_bar(values: np.ndarray, labels: List[str], ylabel: str, title: str, out_path: str):
     colors = muted_color_palette(len(labels))
     plt.figure(figsize=(10, 5), facecolor="white")
@@ -607,13 +694,11 @@ def export_global_excel(results_struct: Dict[str, Dict], dataset_names: List[str
 
 def generate_summary_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace) -> pd.DataFrame:
     rows = []
-    ordered_opts = [str(o) for o in args.optimizers]
     for dataset_name, alg_data in results_struct.items():
         for label, row in alg_data.items():
-            method = next((o for o in ordered_opts if label.upper().startswith(o.upper())), label)
-            estimator = None
-            if len(args.estimators) > 1 and "_" in label:
-                estimator = label.split("_")[-1].lower()
+            parsed = parse_result_label(label, args)
+            method = parsed["method"]
+            estimator = parsed["estimator"] or None
             estimator = estimator or (row.get("Estimator") if isinstance(row, dict) else None) or (
                 args.estimators[0] if len(args.estimators) == 1 else ""
             )
@@ -622,6 +707,8 @@ def generate_summary_dataframe(results_struct: Dict[str, Dict], args: argparse.N
                     "Archivo": dataset_name,
                     "Estimador": estimator,
                     "Optimizador": method,
+                    "FuncionTransferencia": parsed["transfer_function"],
+                    "Configuracion": label,
                     "F1_test": float(row.get("F1Mean", np.nan)),
                     "AS_test": float(row.get("AccMean", np.nan)) / 100.0,
                     "PS_test": float(row.get("PSMean", np.nan)),
@@ -637,6 +724,10 @@ def _legend_patches(opts: List[str]) -> List[mpatches.Patch]:
     return [mpatches.Patch(color=CHART_PALETTE.get(o, "#888"), label=CHART_LABELS.get(o, o)) for o in opts]
 
 
+def _plot_legend_patches(opts: List[str], color_map: Dict[str, str], label_map: Dict[str, str]) -> List[mpatches.Patch]:
+    return [mpatches.Patch(color=color_map.get(o, "#888"), label=label_map.get(o, o)) for o in opts]
+
+
 def _save_chart(fig, out_dir: str, filename: str):
     path = os.path.join(out_dir, filename)
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -649,10 +740,10 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
 
     plot_df = df.copy()
     plot_df["Estimador"] = plot_df["Estimador"].astype(str).str.lower()
-
-    opts = [o for o in opt_order if o in set(plot_df["Optimizador"].unique())]
+    plot_df, opts, color_map, label_map = prepare_plot_groups(plot_df, opt_order)
     if not opts:
         return None
+    method_by_group = plot_df.drop_duplicates("GrupoGrafica").set_index("GrupoGrafica")["Optimizador"].to_dict()
 
     metric_cols = ["AS_test", "PS_test", "RS_test", "F1_test"]
     metric_labels = ["Accuracy", "Precision", "Recall", "F1-Score"]
@@ -670,7 +761,7 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
     if not estimators:
         return None
 
-    grouped = plot_df.groupby(["Estimador", "Optimizador"])[metric_cols].mean()
+    grouped = plot_df.groupby(["Estimador", "GrupoGrafica"])[metric_cols].mean()
     n_rows = len(estimators)
     n_cols = len(metric_cols)
     fig_w = max(16.0, 4.2 * n_cols)
@@ -685,8 +776,8 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
     )
 
     x = np.arange(len(opts))
-    colors = [CHART_PALETTE.get(opt, "#888888") for opt in opts]
-    xlabels = [CHART_LABELS.get(opt, opt) for opt in opts]
+    colors = [color_map.get(opt, "#888888") for opt in opts]
+    xlabels = [label_map.get(opt, opt) for opt in opts]
 
     for r, estimator in enumerate(estimators):
         for c, (metric, metric_label) in enumerate(zip(metric_cols, metric_labels)):
@@ -698,8 +789,8 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
                 else np.nan
                 for opt in opts
             ]
-            edges = ["black" if opt == "DSADE" else "none" for opt in opts]
-            widths = [1.8 if opt == "DSADE" else 0.0 for opt in opts]
+            edges = ["black" if method_by_group.get(opt) == "DSADE" else "none" for opt in opts]
+            widths = [1.8 if method_by_group.get(opt) == "DSADE" else 0.0 for opt in opts]
             bars = ax.bar(x, vals, color=colors, edgecolor=edges, linewidth=widths, width=0.68)
 
             mean_val = float(np.nanmean(vals)) if np.isfinite(vals).any() else np.nan
@@ -752,8 +843,8 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
                     bbox=dict(boxstyle="round,pad=0.22", facecolor=face, edgecolor=edge),
                 )
 
-    legend = _legend_patches(opts)
-    if "DSADE" in opts:
+    legend = _plot_legend_patches(opts, color_map, label_map)
+    if any(method_by_group.get(opt) == "DSADE" for opt in opts):
         legend.append(mpatches.Patch(facecolor="#333333", edgecolor="black", label="DSADE: borde negro"))
     fig.legend(handles=legend, loc="lower center", ncol=min(len(legend), 6), fontsize=9, framealpha=0.95)
     fig.tight_layout(rect=[0.0, 0.04, 1.0, 0.97])
@@ -766,32 +857,34 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     if df.empty:
         return []
     os.makedirs(out_dir, exist_ok=True)
-    opts = [o for o in opt_order if o in set(df["Optimizador"].unique())]
+    plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
     if not opts:
         return []
+    method_by_group = plot_df.drop_duplicates("GrupoGrafica").set_index("GrupoGrafica")["Optimizador"].to_dict()
 
     saved = []
     metricas = ["F1_test", "AS_test", "PS_test", "RS_test"]
     met_labels = ["F1-score", "Accuracy", "Precision", "Recall"]
-    medias = df.groupby("Optimizador")[metricas].mean()
+    medias = plot_df.groupby("GrupoGrafica")[metricas].mean()
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(max(12, 1.25 * len(opts) + 7), 6))
     x = np.arange(len(metricas))
-    w = 0.13
     n = len(opts)
+    w = min(0.75 / max(1, n), 0.13)
     for i, opt in enumerate(opts):
         offset = (i - n / 2 + 0.5) * w
         vals = [medias.loc[opt, m] for m in metricas]
+        is_dsade = method_by_group.get(opt) == "DSADE"
         bars = ax.bar(
             x + offset,
             vals,
             w,
-            color=CHART_PALETTE.get(opt, "#888"),
-            alpha=0.95 if opt == "DSADE" else 0.70,
-            linewidth=2 if opt == "DSADE" else 0.5,
-            edgecolor=CHART_PALETTE.get(opt, "#888"),
+            color=color_map.get(opt, "#888"),
+            alpha=0.95 if is_dsade else 0.70,
+            linewidth=2 if is_dsade else 0.5,
+            edgecolor=color_map.get(opt, "#888"),
         )
-        if opt == "DSADE":
+        if is_dsade:
             for bar, v in zip(bars, vals):
                 ax.text(bar.get_x() + bar.get_width() / 2, v + 0.003, f"{v:.4f}", ha="center", va="bottom", fontsize=7.5, fontweight="bold")
     ax.set_xticks(x)
@@ -799,20 +892,20 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     ax.set_ylim(0.0, 1.03)
     ax.set_ylabel("Average value", fontsize=11)
     ax.set_title("Average detection metrics per optimizer", fontsize=13, fontweight="bold", pad=12)
-    ax.legend(handles=_legend_patches(opts), loc="lower right", fontsize=9, framealpha=0.9)
+    ax.legend(handles=_plot_legend_patches(opts, color_map, label_map), loc="lower right", fontsize=9, framealpha=0.9)
     ax.set_axisbelow(True)
     fig.tight_layout()
     _save_chart(fig, out_dir, "01_metricas_globales.png")
     saved.append("01_metricas_globales.png")
 
-    smells = sorted(df["Archivo"].unique())
-    pivot_smell = df.groupby(["Archivo", "Optimizador"])["F1_test"].mean().unstack()
-    fig, ax = plt.subplots(figsize=(12, 6))
+    smells = sorted(plot_df["Archivo"].unique())
+    pivot_smell = plot_df.groupby(["Archivo", "GrupoGrafica"])["F1_test"].mean().unstack()
+    fig, ax = plt.subplots(figsize=(max(12, 0.35 * len(smells) * max(1, len(opts)) + 5), 6))
     x = np.arange(len(smells))
     w = 0.75 / max(1, len(opts))
     for i, opt in enumerate(opts):
         vals = [pivot_smell.loc[s, opt] if (s in pivot_smell.index and opt in pivot_smell.columns) else np.nan for s in smells]
-        ax.bar(x + (i - len(opts) / 2 + 0.5) * w, vals, w, color=CHART_PALETTE.get(opt, "#888"), alpha=0.85, label=CHART_LABELS.get(opt, opt))
+        ax.bar(x + (i - len(opts) / 2 + 0.5) * w, vals, w, color=color_map.get(opt, "#888"), alpha=0.85, label=label_map.get(opt, opt))
     ax.set_xticks(x)
     ax.set_xticklabels(smells, rotation=35, ha="right")
     ax.set_ylim(0.0, 1.05)
@@ -823,53 +916,55 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     _save_chart(fig, out_dir, "02_f1_por_smell.png")
     saved.append("02_f1_por_smell.png")
 
-    ests = sorted(df["Estimador"].unique())
-    pivot = df.groupby(["Estimador", "Optimizador"])["F1_test"].mean().unstack()
-    fig, ax = plt.subplots(figsize=(10, 6))
+    ests = sorted(plot_df["Estimador"].unique())
+    pivot = plot_df.groupby(["Estimador", "GrupoGrafica"])["F1_test"].mean().unstack()
+    fig, ax = plt.subplots(figsize=(max(10, 1.0 * len(opts) + 5), 6))
     x = np.arange(len(ests))
-    w = 0.13
     n = len(opts)
+    w = min(0.75 / max(1, n), 0.13)
     for i, opt in enumerate(opts):
         offset = (i - n / 2 + 0.5) * w
         vals = [pivot.loc[e, opt] if (e in pivot.index and opt in pivot.columns) else np.nan for e in ests]
-        ax.bar(x + offset, vals, w, color=CHART_PALETTE.get(opt, "#888"), alpha=0.95 if opt == "DSADE" else 0.70)
+        ax.bar(x + offset, vals, w, color=color_map.get(opt, "#888"), alpha=0.95 if method_by_group.get(opt) == "DSADE" else 0.70)
     ax.set_xticks(x)
     ax.set_xticklabels([e.upper() for e in ests], fontsize=11)
     ax.set_ylim(0.0, 1.05)
     ax.set_ylabel("Average F1-test", fontsize=11)
     ax.set_title("Average F1-score per classifier and optimizer", fontsize=13, fontweight="bold", pad=12)
-    ax.legend(handles=_legend_patches(opts), loc="lower right", fontsize=9, framealpha=0.9)
+    ax.legend(handles=_plot_legend_patches(opts, color_map, label_map), loc="lower right", fontsize=9, framealpha=0.9)
     fig.tight_layout()
     _save_chart(fig, out_dir, "03_f1_por_estimador.png")
     saved.append("03_f1_por_estimador.png")
 
-    pivot = df.groupby(["Archivo", "Optimizador"])["F1_test"].mean().unstack()
-    mat = pivot[opts].loc[smells].values
-    fig, ax = plt.subplots(figsize=(10, 5))
+    pivot = plot_df.groupby(["Archivo", "GrupoGrafica"])["F1_test"].mean().unstack()
+    mat = pivot.reindex(index=smells, columns=opts).values
+    fig, ax = plt.subplots(figsize=(max(10, 0.75 * len(opts) + 4), max(5, 0.35 * len(smells) + 2)))
     im = ax.imshow(mat, cmap="Blues", vmin=0.0, vmax=1.0, aspect="auto")
     plt.colorbar(im, ax=ax, label="F1-test", shrink=0.8)
     ax.set_xticks(range(len(opts)))
-    ax.set_xticklabels([CHART_LABELS.get(o, o) for o in opts], fontsize=11)
+    ax.set_xticklabels([label_map.get(o, o) for o in opts], fontsize=9, rotation=45, ha="right")
     ax.set_yticks(range(len(smells)))
     ax.set_yticklabels(smells, fontsize=10)
     ax.set_title("Heatmap F1-test: code smell x optimizer", fontsize=13, fontweight="bold", pad=12)
     for i in range(len(smells)):
         for j, opt in enumerate(opts):
             v = mat[i, j]
+            if not np.isfinite(v):
+                continue
             color = "white" if v > 0.80 else "#333"
-            ax.text(j, i, f"{v:.4f}", ha="center", va="center", fontsize=9, color=color, fontweight="bold" if opt == "DSADE" else "normal")
+            ax.text(j, i, f"{v:.4f}", ha="center", va="center", fontsize=9, color=color, fontweight="bold" if method_by_group.get(opt) == "DSADE" else "normal")
     fig.tight_layout()
     _save_chart(fig, out_dir, "04_heatmap.png")
     saved.append("04_heatmap.png")
 
-    data_box = [df[df["Optimizador"] == o]["F1_test"].values for o in opts]
-    fig, ax = plt.subplots(figsize=(11, 6))
+    data_box = [plot_df[plot_df["GrupoGrafica"] == o]["F1_test"].values for o in opts]
+    fig, ax = plt.subplots(figsize=(max(11, 0.65 * len(opts) + 5), 6))
     bp = ax.boxplot(data_box, patch_artist=True, widths=0.5)
     for patch, opt in zip(bp["boxes"], opts):
-        patch.set_facecolor(CHART_PALETTE.get(opt, "#888"))
+        patch.set_facecolor(color_map.get(opt, "#888"))
         patch.set_alpha(0.75)
     ax.set_xticks(range(1, len(opts) + 1))
-    ax.set_xticklabels([CHART_LABELS.get(o, o) for o in opts], fontsize=11)
+    ax.set_xticklabels([label_map.get(o, o) for o in opts], fontsize=9, rotation=35, ha="right")
     ax.set_ylim(0.0, 1.12)
     ax.set_ylabel("F1-test", fontsize=11)
     ax.set_title("F1-test distribution per optimizer")
@@ -879,15 +974,16 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
 
     fig, ax = plt.subplots(figsize=(11, 7))
     for opt in opts:
-        sub = df[df["Optimizador"] == opt]
+        sub = plot_df[plot_df["GrupoGrafica"] == opt]
+        is_dsade = method_by_group.get(opt) == "DSADE"
         ax.scatter(
             sub["N_Features_Selected"],
             sub["F1_test"],
-            c=CHART_PALETTE.get(opt, "#888"),
-            s=120 if opt == "DSADE" else 60,
-            alpha=0.90 if opt == "DSADE" else 0.65,
-            marker="*" if opt == "DSADE" else "o",
-            label=CHART_LABELS.get(opt, opt),
+            color=color_map.get(opt, "#888"),
+            s=120 if is_dsade else 60,
+            alpha=0.90 if is_dsade else 0.65,
+            marker="*" if is_dsade else "o",
+            label=label_map.get(opt, opt),
         )
     ax.set_xlabel("Number of selected features", fontsize=11)
     ax.set_ylabel("F1-test", fontsize=11)
@@ -898,7 +994,7 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     _save_chart(fig, out_dir, "06_scatter_features_f1.png")
     saved.append("06_scatter_features_f1.png")
 
-    medias = df.groupby("Optimizador")[["F1_test", "AS_test", "PS_test", "RS_test", "N_Features_Selected"]].mean()
+    medias = plot_df.groupby("GrupoGrafica")[["F1_test", "AS_test", "PS_test", "RS_test", "N_Features_Selected"]].mean()
     max_feat = max(float(medias["N_Features_Selected"].max()), 1.0)
     categories = ["F1-test", "Accuracy", "Precision", "Recall", "Feat.\\nEfficiency"]
     n_cat = len(categories)
@@ -909,8 +1005,9 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
         row = medias.loc[opt]
         vals = [row["F1_test"], row["AS_test"], row["PS_test"], row["RS_test"], 1 - row["N_Features_Selected"] / max_feat]
         vals += vals[:1]
-        ax.plot(angles, vals, color=CHART_PALETTE.get(opt, "#888"), linewidth=2.5 if opt == "DSADE" else 1.2, linestyle="-" if opt == "DSADE" else "--", label=CHART_LABELS.get(opt, opt))
-        ax.fill(angles, vals, color=CHART_PALETTE.get(opt, "#888"), alpha=0.15 if opt == "DSADE" else 0.06)
+        is_dsade = method_by_group.get(opt) == "DSADE"
+        ax.plot(angles, vals, color=color_map.get(opt, "#888"), linewidth=2.5 if is_dsade else 1.2, linestyle="-" if is_dsade else "--", label=label_map.get(opt, opt))
+        ax.fill(angles, vals, color=color_map.get(opt, "#888"), alpha=0.15 if is_dsade else 0.06)
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(categories, fontsize=11)
     ax.set_ylim(0.0, 1.05)
@@ -920,11 +1017,11 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     _save_chart(fig, out_dir, "07_radar.png")
     saved.append("07_radar.png")
 
-    feat_med = df.groupby("Optimizador")["N_Features_Selected"].mean()
-    rt_med = df.groupby("Optimizador")["Runtime"].mean()
+    feat_med = plot_df.groupby("GrupoGrafica")["N_Features_Selected"].mean()
+    rt_med = plot_df.groupby("GrupoGrafica")["Runtime"].mean()
     feat_vals = [feat_med[o] for o in opts]
     rt_vals = [rt_med[o] for o in opts]
-    colors = [CHART_PALETTE.get(o, "#888") for o in opts]
+    colors = [color_map.get(o, "#888") for o in opts]
     x = np.arange(len(opts))
     w = 0.38
     fig, ax1 = plt.subplots(figsize=(10, 6))
@@ -932,7 +1029,7 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     ax1.bar(x - w / 2, feat_vals, w, color=colors, alpha=0.85, zorder=3)
     ax2.bar(x + w / 2, rt_vals, w, color=colors, alpha=0.45, hatch="///", zorder=3)
     ax1.set_xticks(x)
-    ax1.set_xticklabels([CHART_LABELS.get(o, o) for o in opts], fontsize=11)
+    ax1.set_xticklabels([label_map.get(o, o) for o in opts], fontsize=9, rotation=35, ha="right")
     ax1.set_ylabel("Average selected features", fontsize=11)
     ax2.set_ylabel("Average runtime (seconds)", fontsize=11, color="#555")
     ax1.set_title("Selected features and runtime per optimizer", fontsize=13, fontweight="bold", pad=12)
