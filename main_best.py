@@ -21,54 +21,53 @@ from mealpy.swarm_based.DMOA import OriginalDMOA
 from sklearn.base import clone
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
+from dbo_optimizer import DBOOptimizer
 from dsade_optimizer import DSADE
 
-# DEFAULT_OPTIMIZERS = [
-#     "OriginalPSO",
-#     "OriginalGWO",
-#     "OriginalWOA",
-#     "OriginalDE",
-#     "JADE",
-#     "SADE",
-#     "OriginalBRO",
-#     "OriginalDMOA",
-#     "OriginalFOX",
-#     "OriginalRIME",
-#     "DSADE",
-# ]
+DEFAULT_OPTIMIZERS = [
+    "MaCRO-DE",
+    "OriginalBRO",
+    "DBO",
+    "OriginalDE",
+    "OriginalDMOA",
+    "JADE",
+    "SADE",
+    "OriginalGWO",
+    "OriginalPSO",
+    "OriginalWOA",
+]
+DEFAULT_ESTIMATORS = ["knn","svm"]
+DEFAULT_TRANSFER_FUNCTIONS = ["vstf_01"]
 
 #Test
-DEFAULT_OPTIMIZERS = ["DSADE"]
-DEFAULT_ESTIMATORS = ["knn"]
-# DEFAULT_TRANSFER_FUNCTIONS = ["vstf_01"]
-DEFAULT_TRANSFER_FUNCTIONS = [
-    "vstf_01",
-    "vstf_02",
-    "vstf_03",
-    "vstf_04",
-    "sstf_01",
-    "sstf_02",
-    "sstf_03",
-    "sstf_04",
-]
+# DEFAULT_OPTIMIZERS = ["DSADE"]
+# DEFAULT_TRANSFER_FUNCTIONS = [
+#     "vstf_01",
+#     "vstf_02",
+#     "vstf_03",
+#     "vstf_04",
+#     "sstf_01",
+#     "sstf_02",
+#     "sstf_03",
+#     "sstf_04",
+# ]
 
 TEST_datasets_clasific_14 = [
-    "Blood",
     "BreastCancer",
-    "BreastEW",
-    "Glass",
     "HeartEW",
     "Ionosphere",
-    "Iris",
+    "Glass",
     "Lymphography",
     "Sonar",
     "Tic-tac-toe",
-    "WaveformEW",
     "Wine",
     "Zoo",
 ]
 CHART_PALETTE = {
     "DSADE": "#3266ad",
+    "MaCRO-DE": "#3266ad",
+    "MACRO-DE": "#3266ad",
+    "DBO": "#00a6a6",
     "OriginalGWO": "#e06c00",
     "OriginalWOA": "#2a9d5c",
     "OriginalCA": "#c44569",
@@ -86,7 +85,10 @@ CHART_PALETTE = {
     "OriginalGOA": "#8a5a44",
 }
 CHART_LABELS = {
-    "DSADE": "DSADE",
+    "DSADE": "MaCRO-DE",
+    "MaCRO-DE": "MaCRO-DE",
+    "MACRO-DE": "MaCRO-DE",
+    "DBO": "DBO",
     "OriginalGWO": "GWO",
     "OriginalWOA": "WOA",
     "OriginalCA": "CA",
@@ -98,7 +100,7 @@ CHART_LABELS = {
     "OriginalFOX": "FOX",
     "OriginalRIME": "RIME",
     "OriginalBRO": "BRO",
-    "OriginalDMOA": "DMOA",
+    "OriginalDMOA": "DMO",
     "OriginalMGO": "MGO",
     "OriginalHHO": "HHO",
     "OriginalGOA": "GOA",
@@ -124,14 +126,14 @@ class Paths:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Framework de comparacion FS (multi-dataset, multi-run, cache)")
-    parser.add_argument("--exp-id", type=int, default=626, help="ID numerico del experimento")
+    parser.add_argument("--exp-id", type=int, default=628, help="ID numerico del experimento")
     parser.add_argument("--dataset-source", default="mafese", choices=["mafese"], help="Origen de datasets")
     parser.add_argument("--dataset-suite", default="test14", choices=["test14"], help="Suite de datasets")
     parser.add_argument("--optimizers", nargs="+", default=list(DEFAULT_OPTIMIZERS), help="Lista de optimizadores")
     parser.add_argument("--estimators", nargs="+", default=DEFAULT_ESTIMATORS, help="Lista de clasificadores")
     parser.add_argument("--transfer-functions", nargs="+", default=DEFAULT_TRANSFER_FUNCTIONS, help="Lista de transfer functions")
     parser.add_argument("--runs", type=int, default=20, help="Ejecuciones independientes por combinacion")
-    parser.add_argument("--epochs", type=int, default=50, help="Iteraciones del optimizador")
+    parser.add_argument("--epochs", type=int, default=100, help="Iteraciones del optimizador")
     parser.add_argument("--pop-size", type=int, default=50, help="Tamano de poblacion")
     parser.add_argument("--test-size", type=float, default=0.2, help="Holdout ratio")
     parser.add_argument("--random-state", type=int, default=2, help="Semilla de split")
@@ -234,7 +236,7 @@ class SafeOriginalDMOA(OriginalDMOA):
 
 
 def build_optimizer(name: str, args: argparse.Namespace):
-    if name.upper() == "DSADE":
+    if name.upper() in {"DSADE", "MACRO-DE"}:
         return DSADE(
             epoch=args.epochs,
             pop_size=args.pop_size,
@@ -243,6 +245,8 @@ def build_optimizer(name: str, args: argparse.Namespace):
             pcr=args.dsade_pcr,
             mahalanobis_q=args.dsade_mahal_q,
         )
+    if name.upper() == "DBO":
+        return DBOOptimizer(epoch=args.epochs, pop_size=args.pop_size)
     if name.upper() == "ORIGINALDMOA":
         return SafeOriginalDMOA(epoch=args.epochs, pop_size=args.pop_size)
     return name
@@ -522,7 +526,11 @@ def load_cache(path: str):
 
 def parse_result_label(label: str, args: argparse.Namespace) -> dict:
     label_upper = str(label).upper()
-    ordered_opts = sorted([str(o) for o in args.optimizers], key=len, reverse=True)
+    ordered_opts = sorted(
+        list(dict.fromkeys([str(o) for o in args.optimizers] + ["MaCRO-DE", "MACRO-DE", "DSADE", "DBO"])),
+        key=len,
+        reverse=True,
+    )
     method = next(
         (
             opt
@@ -556,6 +564,17 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
     return {"method": method, "transfer_function": transfer_function, "estimator": estimator}
 
 
+def optimizer_display_label(name: str) -> str:
+    return CHART_LABELS.get(str(name), str(name))
+
+
+def optimizer_order_key(name: str) -> tuple:
+    label = optimizer_display_label(name).upper()
+    if label == "MACRO-DE":
+        return (0, "")
+    return (1, label)
+
+
 def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.DataFrame, List[str], Dict[str, str], Dict[str, str]]:
     if df.empty:
         return df.copy(), [], {}, {}
@@ -581,14 +600,17 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.Data
         .to_dict("index")
     )
 
+    method_order = list(dict.fromkeys([str(o) for o in opt_order] + [str(meta["Optimizador"]) for meta in group_meta.values()]))
+    method_order = sorted([opt for opt in method_order if opt in {meta["Optimizador"] for meta in group_meta.values()}], key=optimizer_order_key)
+
     opts = []
-    for opt in opt_order:
+    for opt in method_order:
         opt_groups = sorted(
             [g for g, meta in group_meta.items() if meta["Optimizador"] == opt],
             key=lambda g: (str(group_meta[g]["FuncionTransferencia"]), g),
         )
         opts.extend(opt_groups)
-    opts.extend(sorted(g for g in group_meta if g not in set(opts)))
+    opts.extend(sorted((g for g in group_meta if g not in set(opts)), key=lambda g: optimizer_order_key(group_meta[g]["Optimizador"])))
 
     colors = muted_color_palette(len(opts))
     color_map = {}
@@ -845,7 +867,7 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
 
     legend = _plot_legend_patches(opts, color_map, label_map)
     if any(method_by_group.get(opt) == "DSADE" for opt in opts):
-        legend.append(mpatches.Patch(facecolor="#333333", edgecolor="black", label="DSADE: borde negro"))
+        legend.append(mpatches.Patch(facecolor="#333333", edgecolor="black", label="MaCRO-DE: borde negro"))
     fig.legend(handles=legend, loc="lower center", ncol=min(len(legend), 6), fontsize=9, framealpha=0.95)
     fig.tight_layout(rect=[0.0, 0.04, 1.0, 0.97])
     filename = "09_resultados_clasificador_metrica_todos_datasets.png"
@@ -1047,6 +1069,274 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
         saved.append(grid_chart)
     return saved
 
+def build_run_level_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace, estimator_filter: str = "knn") -> pd.DataFrame:
+    rows = []
+    for dataset_name, alg_data in results_struct.items():
+        for label, row in alg_data.items():
+            parsed = parse_result_label(label, args)
+            estimator = parsed["estimator"] or row.get("Estimator", "")
+            if str(estimator).lower() != estimator_filter.lower():
+                continue
+            runs_by_metric = {
+                "AS_test": np.asarray(row.get("AccRuns", []), dtype=float) / 100.0,
+                "F1_test": np.asarray(row.get("F1Runs", []), dtype=float),
+                "PS_test": np.asarray(row.get("PSRuns", []), dtype=float),
+                "RS_test": np.asarray(row.get("RSRuns", []), dtype=float),
+                "N_Features_Selected": np.asarray(row.get("FeatRuns", []), dtype=float),
+                "Runtime": np.asarray(row.get("TimeRuns", []), dtype=float),
+            }
+            n_runs = max((values.size for values in runs_by_metric.values()), default=0)
+            for run_idx in range(n_runs):
+                out = {
+                    "Archivo": dataset_name,
+                    "Estimador": estimator_filter.lower(),
+                    "Optimizador": parsed["method"],
+                    "FuncionTransferencia": parsed["transfer_function"],
+                    "Configuracion": label,
+                    "Run": run_idx + 1,
+                }
+                for metric, values in runs_by_metric.items():
+                    out[metric] = float(values[run_idx]) if run_idx < values.size else np.nan
+                rows.append(out)
+    return pd.DataFrame(rows)
+
+
+def build_curve_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace, estimator_filter: str = "knn") -> pd.DataFrame:
+    rows = []
+    for dataset_name, alg_data in results_struct.items():
+        for label, row in alg_data.items():
+            parsed = parse_result_label(label, args)
+            estimator = parsed["estimator"] or row.get("Estimator", "")
+            if str(estimator).lower() != estimator_filter.lower():
+                continue
+            rows.append(
+                {
+                    "Archivo": dataset_name,
+                    "Estimador": estimator_filter.lower(),
+                    "Optimizador": parsed["method"],
+                    "FuncionTransferencia": parsed["transfer_function"],
+                    "Configuracion": label,
+                    "Curve": np.asarray(row.get("Curve", []), dtype=float),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _grid_shape(n_items: int) -> tuple[int, int]:
+    n_cols = min(4, max(1, int(np.ceil(np.sqrt(max(1, n_items))))))
+    n_rows = int(np.ceil(max(1, n_items) / n_cols))
+    return n_rows, n_cols
+
+
+def generate_seven_global_charts(
+    df: pd.DataFrame,
+    results_struct: Dict[str, Dict],
+    out_dir: str,
+    opt_order: List[str],
+    args: argparse.Namespace,
+    estimator_filter: str = "knn",
+):
+    if df.empty:
+        return []
+    os.makedirs(out_dir, exist_ok=True)
+    saved = []
+
+    chart1 = generate_classifier_metric_grid_chart(df, out_dir, opt_order)
+    if chart1:
+        new_chart1 = "01_resultados_clasificador_todos_datasets.png"
+        os.replace(os.path.join(out_dir, chart1), os.path.join(out_dir, new_chart1))
+        saved.append(new_chart1)
+
+    knn_df = df[df["Estimador"].astype(str).str.lower() == estimator_filter.lower()].copy()
+    if knn_df.empty:
+        return saved
+    plot_df, opts, color_map, label_map = prepare_plot_groups(knn_df, opt_order)
+    if not opts:
+        return saved
+    method_by_group = plot_df.drop_duplicates("GrupoGrafica").set_index("GrupoGrafica")["Optimizador"].to_dict()
+    datasets = sorted(plot_df["Archivo"].dropna().unique())
+    n_rows, n_cols = _grid_shape(len(datasets))
+
+    categories = ["Accuracy", "Precision", "Recall", "F1-Score", "Feat.\nEfficiency"]
+    angles = [n / 5.0 * 2 * np.pi for n in range(5)]
+    angles += angles[:1]
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(5.0 * n_cols, 4.8 * n_rows),
+        subplot_kw=dict(polar=True),
+        squeeze=False,
+    )
+    for idx, dataset in enumerate(datasets):
+        ax = axes[idx // n_cols, idx % n_cols]
+        sub = plot_df[plot_df["Archivo"] == dataset]
+        medias = sub.groupby("GrupoGrafica")[["AS_test", "PS_test", "RS_test", "F1_test", "N_Features_Selected"]].mean()
+        max_feat = max(float(medias["N_Features_Selected"].max()), 1.0)
+        for opt in opts:
+            if opt not in medias.index:
+                continue
+            row = medias.loc[opt]
+            vals = [row["AS_test"], row["PS_test"], row["RS_test"], row["F1_test"], 1 - row["N_Features_Selected"] / max_feat]
+            vals += vals[:1]
+            is_dsade = method_by_group.get(opt) == "DSADE"
+            ax.plot(angles, vals, color=color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.1, linestyle="-" if is_dsade else "--")
+            ax.fill(angles, vals, color=color_map.get(opt, "#888"), alpha=0.12 if is_dsade else 0.04)
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(categories, fontsize=8)
+        ax.set_ylim(0.0, 1.0)
+        ax.set_title(dataset, fontsize=11, fontweight="bold", pad=14)
+    for idx in range(len(datasets), n_rows * n_cols):
+        axes[idx // n_cols, idx % n_cols].set_visible(False)
+    fig.suptitle("Radar por dataset (KNN)", fontsize=18, fontweight="bold")
+    fig.legend(handles=_plot_legend_patches(opts, color_map, label_map), loc="lower center", ncol=min(len(opts), 6), fontsize=9)
+    fig.tight_layout(rect=[0.0, 0.05, 1.0, 0.96])
+    _save_chart(fig, out_dir, "02_radar_por_dataset_knn.png")
+    saved.append("02_radar_por_dataset_knn.png")
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.6 * n_rows), squeeze=False)
+    for idx, dataset in enumerate(datasets):
+        ax1 = axes[idx // n_cols, idx % n_cols]
+        ax2 = ax1.twinx()
+        sub = plot_df[plot_df["Archivo"] == dataset].groupby("GrupoGrafica")[["N_Features_Selected", "Runtime"]].mean()
+        x = np.arange(len(opts))
+        feat_vals = [sub.loc[o, "N_Features_Selected"] if o in sub.index else np.nan for o in opts]
+        rt_vals = [sub.loc[o, "Runtime"] if o in sub.index else np.nan for o in opts]
+        colors = [color_map.get(o, "#888") for o in opts]
+        ax1.bar(x - 0.18, feat_vals, 0.36, color=colors, alpha=0.85)
+        ax2.bar(x + 0.18, rt_vals, 0.36, color=colors, alpha=0.40, hatch="///")
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([label_map.get(o, o) for o in opts], rotation=45, ha="right", fontsize=7)
+        ax1.set_ylabel("Features", fontsize=9)
+        ax2.set_ylabel("Runtime (s)", fontsize=9)
+        ax1.set_title(dataset, fontsize=11, fontweight="bold")
+        ax1.grid(axis="y", alpha=0.25)
+    for idx in range(len(datasets), n_rows * n_cols):
+        axes[idx // n_cols, idx % n_cols].set_visible(False)
+    fig.suptitle("Selected features and runtime por dataset (KNN)", fontsize=18, fontweight="bold")
+    fig.tight_layout(rect=[0.0, 0.02, 1.0, 0.96])
+    _save_chart(fig, out_dir, "03_features_runtime_por_dataset_knn.png")
+    saved.append("03_features_runtime_por_dataset_knn.png")
+
+    run_df = build_run_level_dataframe(results_struct, args, estimator_filter)
+    run_source = run_df if not run_df.empty else plot_df
+    run_plot_df, run_opts, run_color_map, run_label_map = prepare_plot_groups(run_source, opt_order)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.6 * n_rows), squeeze=False)
+    for idx, dataset in enumerate(datasets):
+        ax = axes[idx // n_cols, idx % n_cols]
+        sub = run_plot_df[run_plot_df["Archivo"] == dataset]
+        data_box = [sub[sub["GrupoGrafica"] == opt]["AS_test"].dropna().values for opt in run_opts]
+        bp = ax.boxplot(data_box, patch_artist=True, widths=0.55, showmeans=True)
+        for patch, opt in zip(bp["boxes"], run_opts):
+            patch.set_facecolor(run_color_map.get(opt, "#888"))
+            patch.set_alpha(0.60)
+        ax.set_xticks(range(1, len(run_opts) + 1))
+        ax.set_xticklabels([run_label_map.get(o, o) for o in run_opts], rotation=45, ha="right", fontsize=7)
+        ax.set_ylim(0.0, 1.08)
+        ax.set_ylabel("Accuracy (test)", fontsize=9)
+        ax.set_title(dataset, fontsize=11, fontweight="bold")
+        ax.grid(axis="y", alpha=0.25)
+    for idx in range(len(datasets), n_rows * n_cols):
+        axes[idx // n_cols, idx % n_cols].set_visible(False)
+    fig.suptitle("Accuracy por dataset - todos los algoritmos (KNN)", fontsize=18, fontweight="bold")
+    fig.tight_layout(rect=[0.0, 0.02, 1.0, 0.96])
+    _save_chart(fig, out_dir, "04_boxplot_accuracy_por_dataset_knn.png")
+    saved.append("04_boxplot_accuracy_por_dataset_knn.png")
+
+    curve_df = build_curve_dataframe(results_struct, args, estimator_filter)
+    if curve_df.empty:
+        curve_plot_df = pd.DataFrame()
+        curve_opts, curve_color_map, curve_label_map = opts, color_map, label_map
+    else:
+        curve_plot_df, curve_opts, curve_color_map, curve_label_map = prepare_plot_groups(curve_df, opt_order)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.4 * n_rows), squeeze=False)
+    for idx, dataset in enumerate(datasets):
+        ax = axes[idx // n_cols, idx % n_cols]
+        sub = curve_plot_df[curve_plot_df["Archivo"] == dataset] if not curve_plot_df.empty else pd.DataFrame()
+        plotted = False
+        for opt in curve_opts:
+            rows_opt = sub[sub["GrupoGrafica"] == opt] if not sub.empty else pd.DataFrame()
+            if rows_opt.empty:
+                continue
+            curve = np.asarray(rows_opt.iloc[0]["Curve"], dtype=float)
+            if curve.size == 0:
+                continue
+            is_dsade = rows_opt.iloc[0]["Optimizador"] == "DSADE"
+            ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.4, linestyle="-" if is_dsade else "--")
+            plotted = True
+        if not plotted:
+            ax.text(0.5, 0.5, "Sin curvas", transform=ax.transAxes, ha="center", va="center", color="#777")
+        ax.set_title(dataset, fontsize=11, fontweight="bold")
+        ax.set_xlabel("Iteration", fontsize=9)
+        ax.set_ylabel("Fitness", fontsize=9)
+        ax.grid(alpha=0.25)
+    for idx in range(len(datasets), n_rows * n_cols):
+        axes[idx // n_cols, idx % n_cols].set_visible(False)
+    fig.suptitle("Convergence por dataset (KNN)", fontsize=18, fontweight="bold")
+    fig.legend(handles=_plot_legend_patches(curve_opts, curve_color_map, curve_label_map), loc="lower center", ncol=min(len(curve_opts), 6), fontsize=9)
+    fig.tight_layout(rect=[0.0, 0.05, 1.0, 0.96])
+    _save_chart(fig, out_dir, "05_convergence_por_dataset_knn.png")
+    saved.append("05_convergence_por_dataset_knn.png")
+
+    pivot = plot_df.groupby(["GrupoGrafica", "Archivo"])["F1_test"].mean().unstack()
+    mat = pivot.reindex(index=opts, columns=datasets).values
+    fig, ax = plt.subplots(figsize=(max(10, 0.9 * len(datasets) + 4), max(5, 0.45 * len(opts) + 2)))
+    im = ax.imshow(mat, cmap="Blues", vmin=0.0, vmax=1.0, aspect="auto")
+    plt.colorbar(im, ax=ax, label="F1-Score (test)", shrink=0.8)
+    ax.set_xticks(range(len(datasets)))
+    ax.set_xticklabels(datasets, rotation=35, ha="right")
+    ax.set_yticks(range(len(opts)))
+    ax.set_yticklabels([label_map.get(o, o) for o in opts])
+    ax.set_xlabel("Dataset")
+    ax.set_ylabel("Metaheuristics")
+    ax.set_title("F1-Score - Metaheuristics vs Datasets (KNN)", fontsize=16, fontweight="bold", pad=12)
+    for i in range(len(opts)):
+        for j in range(len(datasets)):
+            value = mat[i, j]
+            if np.isfinite(value):
+                ax.text(j, i, f"{value:.4f}", ha="center", va="center", color="white" if value > 0.80 else "#222", fontsize=8)
+    fig.tight_layout()
+    _save_chart(fig, out_dir, "06_heatmap_f1_knn.png")
+    saved.append("06_heatmap_f1_knn.png")
+
+    data_violin = [run_plot_df[run_plot_df["GrupoGrafica"] == opt]["RS_test"].dropna().values for opt in run_opts]
+    fig, ax = plt.subplots(figsize=(max(12, 0.85 * len(run_opts) + 5), 6.5))
+    parts = ax.violinplot(data_violin, showmeans=False, showmedians=False, widths=0.78)
+    for body, opt in zip(parts["bodies"], run_opts):
+        body.set_facecolor(run_color_map.get(opt, "#888"))
+        body.set_edgecolor(run_color_map.get(opt, "#888"))
+        body.set_alpha(0.22)
+    for i, (opt, values) in enumerate(zip(run_opts, data_violin), start=1):
+        if values.size == 0:
+            continue
+        jitter = np.linspace(-0.08, 0.08, values.size) if values.size > 1 else np.array([0.0])
+        ax.scatter(np.full(values.size, i) + jitter, values, color=run_color_map.get(opt, "#888"), edgecolor="white", linewidth=0.5, s=35, zorder=3)
+        mean_val = float(np.nanmean(values))
+        median_val = float(np.nanmedian(values))
+        ax.scatter(i, mean_val, marker="D", color=run_color_map.get(opt, "#888"), edgecolor="white", s=80, zorder=4)
+        ax.hlines(median_val, i - 0.22, i + 0.22, colors="#555", linestyles="--", linewidth=1.2)
+        ax.text(i, mean_val + 0.018, f"{mean_val:.3f}", ha="center", va="bottom", fontsize=8, color="#333")
+    ax.set_xticks(range(1, len(run_opts) + 1))
+    ax.set_xticklabels([run_label_map.get(o, o) for o in run_opts], rotation=35, ha="right")
+    ax.set_ylabel("Recall (test)")
+    ax.set_ylim(0.0, 1.08)
+    ax.set_title("Violin Plot - Recall por Metaheuristico (KNN)", fontsize=16, pad=12)
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(
+        handles=[
+            plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="#555", label="Media"),
+            plt.Line2D([0], [0], color="#555", linestyle="--", label="Mediana"),
+            plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#555", label="Valor por dataset/run"),
+        ],
+        loc="lower right",
+        framealpha=0.9,
+    )
+    fig.tight_layout()
+    _save_chart(fig, out_dir, "07_violin_recall_knn.png")
+    saved.append("07_violin_recall_knn.png")
+    return saved
+
+
 def main():
     args = parse_args()
     logging.disable(logging.INFO)
@@ -1180,42 +1470,13 @@ def main():
 
             results_struct[dataset_name].update(cls_payload)
 
-            labels_this = list(cls_payload.keys())
-            if not labels_this:
-                continue
-
-            acc_vec = np.array([cls_payload[l]["AccMean"] for l in labels_this], dtype=float)
-            f1_vec = np.array([cls_payload[l]["F1Mean"] for l in labels_this], dtype=float)
-            curves_by_label = {l: cls_payload[l]["Curve"] for l in labels_this}
-
-            plot_bar(
-                acc_vec,
-                labels_this,
-                "Mean Accuracy (%)",
-                f"Mean Accuracy - {dataset_name} ({estimator.upper()}) [{paths.exp_tag}]",
-                os.path.join(paths.fig_dir, f"{paths.exp_tag}_{dataset_name}_Accuracy_{estimator.lower()}.svg"),
-            )
-            plot_bar(
-                f1_vec,
-                labels_this,
-                "Mean F1-score",
-                f"Mean F1-score - {dataset_name} ({estimator.upper()}) [{paths.exp_tag}]",
-                os.path.join(paths.fig_dir, f"{paths.exp_tag}_{dataset_name}_F1_{estimator.lower()}.svg"),
-            )
-            plot_lines(
-                curves_by_label,
-                f"Mean Convergence - {dataset_name} ({estimator.upper()}) [{paths.exp_tag}]",
-                "Objective Function Value (minimized)",
-                os.path.join(paths.fig_dir, f"{paths.exp_tag}_{dataset_name}_Convergence_{estimator.lower()}.svg"),
-            )
-
     excel_path = os.path.join(paths.res_dir, f"Global_Results_{paths.exp_tag}.xlsx")
     exported = export_global_excel(results_struct, dataset_names, excel_path)
     summary_df = generate_summary_dataframe(results_struct, args)
     summary_csv = os.path.join(paths.res_dir, f"RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
     summary_df.to_csv(summary_csv, index=False)
     chart_dir = paths.fig_dir
-    generated_charts = generate_notebook_style_charts(summary_df, chart_dir, list(args.optimizers))
+    generated_charts = generate_seven_global_charts(summary_df, results_struct, chart_dir, list(args.optimizers), args)
 
     print("Completed.")
     print(f"Cache dir: {paths.cache_dir}")
