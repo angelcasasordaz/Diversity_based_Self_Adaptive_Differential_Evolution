@@ -23,11 +23,13 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 
 from dbo_optimizer import DBOOptimizer
 from dsade_optimizer import DSADE
+from dsade_awad_optimizer import DSADE_AWAD
 from macro_de_optimizer import MaCRO_DE
 
 DEFAULT_OPTIMIZERS = [
     "DSADE",
-    # "MaCRO-DE",
+    "DSADE_AWAD",
+    "MaCRO-DE",
     "OriginalBRO",
     "DBO",
     "OriginalDE",
@@ -53,6 +55,7 @@ TEST_datasets_clasific_14 = [
 ]
 CHART_PALETTE = {
     "DSADE": "#3266ad",
+    "DSADE_AWAD": "#d1495b",
     "MaCRO-DE": "#3266ad",
     "DBO": "#00a6a6",
     "OriginalGWO": "#e06c00",
@@ -73,6 +76,7 @@ CHART_PALETTE = {
 }
 CHART_LABELS = {
     "DSADE": "DSADE",
+    "DSADE_AWAD": "DSADE-AWAD",
     "MaCRO-DE": "MaCRO-DE",
     "DBO": "DBO",
     "OriginalGWO": "GWO",
@@ -224,6 +228,15 @@ class SafeOriginalDMOA(OriginalDMOA):
 def build_optimizer(name: str, args: argparse.Namespace):
     if name.upper() in {"DSA-DE", "DSADE"}:
         return DSADE(
+            epoch=args.epochs,
+            pop_size=args.pop_size,
+            beta_min=args.dsade_beta_min,
+            beta_max=args.dsade_beta_max,
+            pcr=args.dsade_pcr,
+            mahalanobis_q=args.dsade_mahal_q,
+        )
+    if name.upper() in {"DSADE_AWAD", "DSADE-AWAD"}:
+        return DSADE_AWAD(
             epoch=args.epochs,
             pop_size=args.pop_size,
             beta_min=args.dsade_beta_min,
@@ -552,7 +565,7 @@ def payload_completed_runs(payload: dict) -> int:
 def parse_result_label(label: str, args: argparse.Namespace) -> dict:
     label_upper = str(label).upper()
     ordered_opts = sorted(
-        list(dict.fromkeys([str(o) for o in args.optimizers] + ["DSA-DE", "DSADE", "MaCRO-DE", "MACRO-DE", "DBO"])),
+        list(dict.fromkeys([str(o) for o in args.optimizers] + ["DSA-DE", "DSADE", "DSADE_AWAD", "DSADE-AWAD", "MaCRO-DE", "MACRO-DE", "DBO"])),
         key=len,
         reverse=True,
     )
@@ -597,10 +610,12 @@ def optimizer_order_key(name: str) -> tuple:
     label = optimizer_display_label(name).upper()
     if label == "DSA-DE":
         return (0, "")
-    return (1, label)
+    if label in {"DSADE-AWAD", "DSADE_AWAD"}:
+        return (1, "")
+    return (2, label)
 
 def is_dsade_method(name: str) -> bool:
-    return str(name).upper() in {"DSA-DE", "DSADE"}
+    return str(name).upper() in {"DSA-DE", "DSADE", "DSADE_AWAD", "DSADE-AWAD"}
 
 
 def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.DataFrame, List[str], Dict[str, str], Dict[str, str]]:
