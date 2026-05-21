@@ -27,9 +27,9 @@ from dsade_awad_optimizer import DSADE_AWAD
 from macro_de_optimizer import MaCRO_DE
 
 DEFAULT_OPTIMIZERS = [
-    "DSADE",
     "DSADE_AWAD",
-    "MaCRO-DE",
+    # "DSADE",
+    # "MaCRO-DE",
     "OriginalBRO",
     "DBO",
     "OriginalDE",
@@ -122,8 +122,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--optimizers", nargs="+", default=list(DEFAULT_OPTIMIZERS), help="Lista de optimizadores")
     parser.add_argument("--estimators", nargs="+", default=DEFAULT_ESTIMATORS, help="Lista de clasificadores")
     parser.add_argument("--transfer-functions", nargs="+", default=DEFAULT_TRANSFER_FUNCTIONS, help="Lista de transfer functions")
-    parser.add_argument("--runs", type=int, default=5, help="Ejecuciones independientes por combinacion")
-    parser.add_argument("--epochs", type=int, default=50, help="Iteraciones del optimizador")
+    parser.add_argument("--runs", type=int, default=20, help="Ejecuciones independientes por combinacion")
+    parser.add_argument("--epochs", type=int, default=100, help="Iteraciones del optimizador")
     parser.add_argument("--pop-size", type=int, default=50, help="Tamano de poblacion")
     parser.add_argument("--test-size", type=float, default=0.2, help="Holdout ratio")
     parser.add_argument("--random-state", type=int, default=2, help="Semilla de split")

@@ -13,7 +13,6 @@ class MaCRO_DE(Optimizer):
     - AWAD diversity monitoring
     - Diversity-adaptive parameter control
     - Mahalanobis-based mutation pool selection
-    - Diversity-aware survivor selection
     """
 
     def __init__(
@@ -335,10 +334,6 @@ class MaCRO_DE(Optimizer):
 
                 parent = self.pop[idx]
 
-                # =====================================================
-                # Standard DE greedy selection
-                # =====================================================
-
                 if self.compare_target(
                     candidate.target,
                     parent.target,
@@ -346,36 +341,6 @@ class MaCRO_DE(Optimizer):
                 ):
 
                     self.pop[idx] = candidate
-
-                else:
-
-                    # =================================================
-                    # Diversity-aware selection
-                    # =================================================
-
-                    pop_pos = self._positions(self.pop)
-
-                    parent_pop = pop_pos.copy()
-                    parent_pop[idx] = parent.solution
-
-                    parent_div = self._awad(
-                        parent_pop,
-                        self.problem.lb,
-                        self.problem.ub
-                    )
-
-                    offspring_pop = pop_pos.copy()
-                    offspring_pop[idx] = candidate.solution
-
-                    offspring_div = self._awad(
-                        offspring_pop,
-                        self.problem.lb,
-                        self.problem.ub
-                    )
-
-                    if offspring_div > parent_div:
-
-                        self.pop[idx] = candidate
 
             else:
 
@@ -385,52 +350,11 @@ class MaCRO_DE(Optimizer):
 
             pop_new = self.update_target_for_population(pop_new)
 
-            for idx in range(self.pop_size):
-
-                candidate = pop_new[idx]
-                parent = self.pop[idx]
-
-                # =====================================================
-                # Standard DE greedy selection
-                # =====================================================
-
-                if self.compare_target(
-                    candidate.target,
-                    parent.target,
-                    self.problem.minmax
-                ):
-
-                    self.pop[idx] = candidate
-
-                else:
-
-                    # =================================================
-                    # Diversity-aware selection
-                    # =================================================
-
-                    current_pop = self._positions(self.pop)
-
-                    parent_pop = current_pop.copy()
-                    parent_pop[idx] = parent.solution
-
-                    parent_div = self._awad(
-                        parent_pop,
-                        self.problem.lb,
-                        self.problem.ub
-                    )
-
-                    offspring_pop = current_pop.copy()
-                    offspring_pop[idx] = candidate.solution
-
-                    offspring_div = self._awad(
-                        offspring_pop,
-                        self.problem.lb,
-                        self.problem.ub
-                    )
-
-                    if offspring_div > parent_div:
-
-                        self.pop[idx] = candidate
+            self.pop = self.greedy_selection_population(
+                self.pop,
+                pop_new,
+                self.problem.minmax
+            )
 
         self.fmean_hist[epoch_idx] = (
             f_used_sum / self.pop_size
