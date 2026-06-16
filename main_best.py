@@ -27,30 +27,36 @@ from dsade_awad_optimizer import DSADE_AWAD
 from macro_de_optimizer import MaCRO_DE
 
 DEFAULT_OPTIMIZERS = [
-    "DSADE_AWAD",
+    # "DSADE_AWAD",
     # "DSADE",
-    # "MaCRO-DE",
+    "MaCRO-DE",
     "OriginalBRO",
     "DBO",
     "OriginalDE",
     "OriginalDMOA",
     "OriginalSHADE",
     "OriginalGWO",
+    "OriginalMGO",
     "OriginalPSO",
     "OriginalWOA",
+    "OriginalHHO",
+    "OriginalMFO",
 ]
 DEFAULT_ESTIMATORS = ["knn","svm"]
 DEFAULT_TRANSFER_FUNCTIONS = ["vstf_01"]
 
 TEST_datasets_clasific_14 = [
     "BreastCancer",
+    "BreastEW",
+    "Glass",
     "HeartEW",
     "Ionosphere",
-    "Glass",
     "Lymphography",
     "Sonar",
+    "SpectEW",
     "Tic-tac-toe",
     "Wine",
+    "WaveformEW",
     "Zoo",
 ]
 CHART_PALETTE = {
@@ -94,6 +100,7 @@ CHART_LABELS = {
     "OriginalMGO": "MGO",
     "OriginalHHO": "HHO",
     "OriginalGOA": "GOA",
+    "OriginalMFO": "MFO",
 }
 SUPPORTED_ESTIMATORS = ["knn", "svm", "rf", "adaboost", "xgb", "tree", "ann"]
 SUPPORTED_TRANSFER_FUNCTIONS = [
@@ -116,7 +123,7 @@ class Paths:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Framework de comparacion FS (multi-dataset, multi-run, cache)")
-    parser.add_argument("--exp-id", type=int, default=629, help="ID numerico del experimento")
+    parser.add_argument("--exp-id", type=int, default=628, help="ID numerico del experimento")
     parser.add_argument("--dataset-source", default="mafese", choices=["mafese"], help="Origen de datasets")
     parser.add_argument("--dataset-suite", default="test14", choices=["test14"], help="Suite de datasets")
     parser.add_argument("--optimizers", nargs="+", default=list(DEFAULT_OPTIMIZERS), help="Lista de optimizadores")
@@ -605,18 +612,18 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
 def optimizer_display_label(name: str) -> str:
     return CHART_LABELS.get(str(name), str(name))
 
-
 def optimizer_order_key(name: str) -> tuple:
     label = optimizer_display_label(name).upper()
-    if label == "DSA-DE":
+    if label == "MACRO-DE":
         return (0, "")
-    if label in {"DSADE-AWAD", "DSADE_AWAD"}:
+    if label == "DSA-DE":
         return (1, "")
-    return (2, label)
+    if label in {"DSADE-AWAD", "DSADE_AWAD"}:
+        return (2, "")
+    return (3, label)
 
 def is_dsade_method(name: str) -> bool:
-    return str(name).upper() in {"DSA-DE", "DSADE", "DSADE_AWAD", "DSADE-AWAD"}
-
+    return str(name).upper() in {"MACRO-DE", "DSA-DE", "DSADE", "DSADE_AWAD", "DSADE-AWAD"}
 
 def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.DataFrame, List[str], Dict[str, str], Dict[str, str]]:
     if df.empty:
@@ -1159,7 +1166,7 @@ def generate_seven_global_charts(
     out_dir: str,
     opt_order: List[str],
     args: argparse.Namespace,
-    estimator_filter: str = "svm",
+    estimator_filter: str = "svm", # Change here for knn
 ):
     if df.empty:
         return []
@@ -1204,8 +1211,25 @@ def generate_seven_global_charts(
             vals = [row["AS_test"], row["PS_test"], row["RS_test"], row["F1_test"], 1 - row["N_Features_Selected"] / max_feat]
             vals += vals[:1]
             is_dsade = is_dsade_method(method_by_group.get(opt))
-            ax.plot(angles, vals, color=color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.1, linestyle="-" if is_dsade else "--")
-            ax.fill(angles, vals, color=color_map.get(opt, "#888"), alpha=0.12 if is_dsade else 0.04)
+            is_macro = method_by_group.get(opt) == "MaCRO-DE"
+
+            ax.plot(
+                angles,
+                vals,
+                color=color_map.get(opt, "#888"),
+                linewidth=4.0 if is_macro else (2.4 if is_dsade else 1.1),
+                linestyle="-" if is_macro else ("-" if is_dsade else "--"),
+                zorder=10 if is_macro else 2
+            )
+
+            ax.fill(
+                angles,
+                vals,
+                color=color_map.get(opt, "#888"),
+                alpha=0.20 if is_macro else (0.12 if is_dsade else 0.04)
+            )
+            # ax.plot(angles, vals, color=color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.1, linestyle="-" if is_dsade else "--")
+            # ax.fill(angles, vals, color=color_map.get(opt, "#888"), alpha=0.12 if is_dsade else 0.04)
         ax.set_xticks(angles[:-1])
         ax.set_xticklabels(categories, fontsize=8)
         ax.set_ylim(0.0, 1.0)
@@ -1284,7 +1308,9 @@ def generate_seven_global_charts(
             if curve.size == 0:
                 continue
             is_dsade = is_dsade_method(rows_opt.iloc[0]["Optimizador"])
-            ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.4, linestyle="-" if is_dsade else "--")
+            is_macro = str(rows_opt.iloc[0]["Optimizador"]).upper() == "MACRO-DE"
+            ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_macro else (2.4 if is_dsade else 1.4), linestyle="-")
+            #ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.4, linestyle="-" if is_dsade else "--")
             plotted = True
         if not plotted:
             ax.text(0.5, 0.5, "Sin curvas", transform=ax.transAxes, ha="center", va="center", color="#777")
@@ -1308,6 +1334,18 @@ def generate_seven_global_charts(
     ax.set_xticklabels(datasets, rotation=35, ha="right")
     ax.set_yticks(range(len(opts)))
     ax.set_yticklabels([label_map.get(o, o) for o in opts])
+    # for tick, opt in zip(ax.get_yticklabels(), opts):
+    #     if str(method_by_group.get(opt)).upper() == "MACRO-DE":
+    #         tick.set_color("red")
+    #         tick.set_fontweight("bold")
+    macro_idx = next(
+        i for i, opt in enumerate(opts)
+        if str(method_by_group.get(opt)).upper() == "MACRO-DE"
+    )
+
+    rect = plt.Rectangle((-0.5, macro_idx - 0.5), len(datasets),1, fill=False, edgecolor="black", linewidth=2.5, zorder=100)
+
+    ax.add_patch(rect)
     ax.set_xlabel("Dataset")
     ax.set_ylabel("Metaheuristics")
     for i in range(len(opts)):
@@ -1333,8 +1371,8 @@ def generate_seven_global_charts(
         ax.scatter(np.full(values.size, i) + jitter, values, color=run_color_map.get(opt, "#888"), edgecolor="white", linewidth=0.5, s=35, zorder=3)
         mean_val = float(np.nanmean(values))
         median_val = float(np.nanmedian(values))
-        ax.scatter(i, mean_val, marker="D", color=run_color_map.get(opt, "#888"), edgecolor="white", s=80, zorder=4)
-        ax.hlines(median_val, i - 0.22, i + 0.22, colors="#555", linestyles="--", linewidth=1.2)
+        ax.scatter(i, mean_val, marker="D", color="black", edgecolor="white", linewidth=1.2, s=140, zorder=4)
+        ax.hlines(median_val, i - 0.25, i + 0.25, colors="black", linestyles="--", linewidth=1.2)
         ax.text(i, mean_val + 0.018, f"{mean_val:.3f}", ha="center", va="bottom", fontsize=8, color="#333")
     ax.set_xticks(range(1, len(run_opts) + 1))
     ax.set_xticklabels([run_label_map.get(o, o) for o in run_opts], rotation=35, ha="right")
@@ -1343,9 +1381,9 @@ def generate_seven_global_charts(
     ax.grid(axis="y", alpha=0.25)
     ax.legend(
         handles=[
-            plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="#555", label="Media"),
-            plt.Line2D([0], [0], color="#555", linestyle="--", label="Mediana"),
-            plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#555", label="Valor por dataset/run"),
+            plt.Line2D([0], [0], marker="D", color="w", markerfacecolor="#555", label="Mean"),
+            plt.Line2D([0], [0], color="#555", linestyle="--", label="Median"),
+            plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="#555", label="Value per dataset/run"),
         ],
         loc="lower right",
         framealpha=0.9,
@@ -1353,8 +1391,185 @@ def generate_seven_global_charts(
     fig.tight_layout()
     _save_chart(fig, out_dir, "07_violin_recall_knn.png")
     saved.append("07_violin_recall_knn.png")
+
+    generate_global_accuracy_boxplot(
+        run_plot_df,
+        out_dir,
+        opt_order
+    )
+    saved.append("08_global_accuracy_distribution.png")
+
+    generate_global_features_runtime(
+        plot_df,
+        out_dir,
+        opt_order
+    )
+    saved.append("09_global_features_runtime_tradeoff.png")
     return saved
 
+def generate_global_accuracy_boxplot(df, out_dir, opt_order):
+
+    plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
+
+    fig, ax = plt.subplots(
+        figsize=(max(12, 0.8 * len(opts) + 5), 6)
+    )
+
+    data_box = [
+        plot_df[plot_df["GrupoGrafica"] == opt]["AS_test"].values
+        for opt in opts
+    ]
+
+    bp = ax.boxplot(
+        data_box,
+        patch_artist=True,
+        widths=0.55,
+        showmeans=True
+    )
+
+    for patch, opt in zip(bp["boxes"], opts):
+
+        patch.set_facecolor(color_map.get(opt, "#888"))
+        patch.set_alpha(0.70)
+
+        if label_map.get(opt) == "MaCRO-DE":
+            patch.set_edgecolor("black")
+            patch.set_linewidth(3.0)
+
+    for i, opt in enumerate(opts):
+
+        vals = plot_df[
+            plot_df["GrupoGrafica"] == opt
+        ]["AS_test"]
+
+        if len(vals) > 0:
+            ax.text(
+                i + 1,
+                np.mean(vals) + 0.01,
+                f"{np.mean(vals):.3f}",
+                ha="center",
+                fontsize=10,
+                fontweight="bold"
+            )
+
+    ax.set_ylabel("Accuracy (test)")
+    ax.set_xlabel("Metaheuristics")
+    ax.set_ylim(0.50, 1.05)
+
+    ax.set_xticks(range(1, len(opts)+1))
+    ax.set_xticklabels(
+        [label_map[o] for o in opts],
+        rotation=45,
+        ha="right"
+    )
+
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+
+    _save_chart(
+        fig,
+        out_dir,
+        "08_global_accuracy_distribution.png"
+    )
+
+def generate_global_features_runtime(df, out_dir, opt_order):
+
+    plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
+
+    feat_med = (
+        plot_df.groupby("GrupoGrafica")
+        ["N_Features_Selected"]
+        .mean()
+    )
+
+    rt_med = (
+        plot_df.groupby("GrupoGrafica")
+        ["Runtime"]
+        .mean()
+    )
+
+    feat_vals = [feat_med[o] for o in opts]
+    rt_vals   = [rt_med[o] for o in opts]
+
+    x = np.arange(len(opts))
+    w = 0.38
+
+    fig, ax1 = plt.subplots(figsize=(12,6))
+
+    ax2 = ax1.twinx()
+
+    bars1 = ax1.bar(
+        x - w/2,
+        feat_vals,
+        w,
+        alpha=0.85
+    )
+
+    bars2 = ax2.bar(
+        x + w/2,
+        rt_vals,
+        w,
+        alpha=0.45,
+        hatch="///"
+    )
+
+    for bar, opt in zip(bars1, opts):
+
+        bar.set_color(color_map.get(opt, "#888"))
+
+        if label_map.get(opt) == "MaCRO-DE":
+            bar.set_edgecolor("black")
+            bar.set_linewidth(3)
+
+    for bar, opt in zip(bars2, opts):
+
+        bar.set_color(color_map.get(opt, "#888"))
+
+        if label_map.get(opt) == "MaCRO-DE":
+            bar.set_edgecolor("black")
+            bar.set_linewidth(3)
+
+    for i, v in enumerate(feat_vals):
+
+        ax1.text(
+            i - w/2,
+            v + 0.2,
+            f"{v:.2f}",
+            ha="center",
+            fontsize=9,
+            fontweight="bold"
+        )
+
+    for i, v in enumerate(rt_vals):
+
+        ax2.text(
+            i + w/2,
+            v + 0.5,
+            f"{v:.1f}s",
+            ha="center",
+            fontsize=9
+        )
+
+    ax1.set_ylabel("Average selected features")
+    ax2.set_ylabel("Average runtime (sec)")
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(
+        [label_map[o] for o in opts],
+        rotation=45,
+        ha="right"
+    )
+
+    ax1.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+
+    _save_chart(
+        fig,
+        out_dir,
+        "09_global_features_runtime_tradeoff.png"
+    )
 
 def main():
     args = parse_args()
