@@ -123,7 +123,7 @@ class Paths:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Framework de comparacion FS (multi-dataset, multi-run, cache)")
-    parser.add_argument("--exp-id", type=int, default=628, help="ID numerico del experimento")
+    parser.add_argument("--exp-id", type=int, default=629, help="ID numerico del experimento")
     parser.add_argument("--dataset-source", default="mafese", choices=["mafese"], help="Origen de datasets")
     parser.add_argument("--dataset-suite", default="test14", choices=["test14"], help="Suite de datasets")
     parser.add_argument("--optimizers", nargs="+", default=list(DEFAULT_OPTIMIZERS), help="Lista de optimizadores")
@@ -625,6 +625,9 @@ def optimizer_order_key(name: str) -> tuple:
 def is_dsade_method(name: str) -> bool:
     return str(name).upper() in {"MACRO-DE", "DSA-DE", "DSADE", "DSADE_AWAD", "DSADE-AWAD"}
 
+def is_exact_dsade_method(name: str) -> bool:
+    return str(name).upper() in {"DSA-DE", "DSADE"}
+
 def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.DataFrame, List[str], Dict[str, str], Dict[str, str]]:
     if df.empty:
         return df.copy(), [], {}, {}
@@ -906,7 +909,7 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
                 )
 
     legend = _plot_legend_patches(opts, color_map, label_map)
-    if any(is_dsade_method(method_by_group.get(opt)) for opt in opts):
+    if any(is_exact_dsade_method(method_by_group.get(opt)) for opt in opts):
         legend.append(mpatches.Patch(facecolor="#333333", edgecolor="black", label="DSA-DE: borde negro"))
     fig.legend(handles=legend, loc="lower center", ncol=min(len(legend), 6), fontsize=9, framealpha=0.95)
     fig.tight_layout(rect=[0.0, 0.04, 1.0, 1.0])
