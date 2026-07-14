@@ -26,6 +26,12 @@ from dsade_optimizer import DSADE
 from dsade_awad_optimizer import DSADE_AWAD
 from macro_de_optimizer import MaCRO_DE
 
+plt.rcParams.update({
+    "figure.facecolor": "white",
+    "axes.facecolor": "white",
+    "savefig.facecolor": "white",
+})
+
 DEFAULT_OPTIMIZERS = [
     # "DSADE_AWAD",
     # "DSADE",
@@ -137,6 +143,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-base", type=int, default=1234, help="Semilla base por run")
     parser.add_argument("--output-root", default=".", help="Raiz para Figures/Results")
     parser.add_argument("--reuse-cache", action="store_true", help="Usar cache si existe")
+    parser.add_argument("--figures-only", action="store_true", help="Regenerar solo graficas desde cache existente")
     parser.add_argument("--parallel", default="yes", choices=["yes", "no"], help="Ejecutar runs en paralelo: yes/no")
     parser.add_argument("--n-workers", type=int, default=12, help="Numero de procesos paralelos si --parallel yes")
     parser.add_argument("--dsade-beta-min", type=float, default=0.2)
@@ -560,6 +567,36 @@ def load_cache_safe(path: str, label: str):
         print(f"[cache-warning] No se pudo cargar {label} '{path}': {exc}")
         return None
 
+def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str) -> Dict[str, Dict]:
+    results_struct = {}
+    missing = []
+    for dataset_name in dataset_names:
+        results_struct[dataset_name] = {}
+        for estimator in args.estimators:
+            cache_file = os.path.join(
+                paths.cache_dir,
+                f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_results.pkl",
+            )
+            progress_file = os.path.join(
+                paths.cache_dir,
+                f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl",
+            )
+            payload = load_cache_safe(cache_file, "cache final")
+            if payload is None:
+                payload = load_cache_safe(progress_file, "checkpoint parcial")
+            if payload is None:
+                missing.append(f"{dataset_name}/{estimator}")
+                continue
+            results_struct[dataset_name].update(payload)
+
+    if missing:
+        raise FileNotFoundError(
+            "No se encontraron caches para: "
+            + ", ".join(missing)
+            + ". Ejecuta el experimento completo o revisa que los parametros coincidan con el cache existente."
+        )
+    return results_struct
+
 def payload_completed_runs(payload: dict) -> int:
     total = 0
     for row in payload.values():
@@ -691,6 +728,7 @@ def plot_bar(values: np.ndarray, labels: List[str], ylabel: str, title: str, out
     plt.ylabel(ylabel)
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
+    _force_white_background(plt.gcf())
     plt.savefig(out_path, dpi=600, facecolor="white")
     plt.close()
 
@@ -709,6 +747,7 @@ def plot_lines(curves_by_label: Dict[str, np.ndarray], title: str, ylabel: str, 
     plt.grid(alpha=0.3)
     plt.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=min(4, max(1, len(labels))), frameon=False)
     plt.tight_layout()
+    _force_white_background(plt.gcf())
     plt.savefig(out_path, dpi=600, facecolor="white")
     plt.close()
 
@@ -801,9 +840,17 @@ def _plot_legend_patches(opts: List[str], color_map: Dict[str, str], label_map: 
     return [mpatches.Patch(color=color_map.get(o, "#888"), label=label_map.get(o, o)) for o in opts]
 
 
+def _force_white_background(fig):
+    fig.patch.set_facecolor("white")
+    fig.patch.set_alpha(1.0)
+    for ax in fig.get_axes():
+        ax.set_facecolor("white")
+
+
 def _save_chart(fig, out_dir: str, filename: str):
     path = os.path.join(out_dir, filename)
-    fig.savefig(path, dpi=150, bbox_inches="tight")
+    _force_white_background(fig)
+    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -1574,6 +1621,20 @@ def generate_global_features_runtime(df, out_dir, opt_order):
         "09_global_features_runtime_tradeoff.png"
     )
 
+def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str):
+    results_struct = load_results_from_cache(paths, args, dataset_names, cache_sig)
+    summary_df = generate_summary_dataframe(results_struct, args)
+    summary_csv = os.path.join(paths.res_dir, f"RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
+    summary_df.to_csv(summary_csv, index=False)
+    generated_charts = generate_seven_global_charts(
+        summary_df,
+        results_struct,
+        paths.fig_dir,
+        list(args.optimizers),
+        args,
+    )
+    return summary_csv, generated_charts
+
 def main():
     args = parse_args()
     logging.disable(logging.INFO)
@@ -1597,6 +1658,18 @@ def main():
     print(f"Dataset suite: {args.dataset_suite} ({len(dataset_names)} datasets)")
     print(f"Datasets: {', '.join(dataset_names)}")
     print(f"Cache signature: {cache_sig}")
+
+    if args.figures_only:
+        summary_csv, generated_charts = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
+        print("Completed figures-only.")
+        print(f"Cache dir: {paths.cache_dir}")
+        print(f"Figures dir: {paths.fig_dir}")
+        print(f"Charts summary CSV: {summary_csv}")
+        if generated_charts:
+            print("Charts:")
+            for name in generated_charts:
+                print(f"  - {os.path.join(paths.fig_dir, name)}")
+        return
 
     results_struct = {}
     for dataset_name in dataset_names:
