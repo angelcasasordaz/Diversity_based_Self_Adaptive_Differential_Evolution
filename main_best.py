@@ -33,14 +33,32 @@ from algorithm_acronym_list import (
     resolve_optimizer_name,
 )
 
-plt.rcParams.update({
-    "figure.facecolor": "white",
-    "axes.facecolor": "white",
-    "savefig.facecolor": "white",
-})
+# ============================================================
+# EXPERIMENT CONFIGURATION
+# ============================================================
 
-DEFAULT_OPTIMIZERS = [
+DATASET_SOURCE = "codesmell"
+# Options:
+# "codesmell"
+# "mafese"
+
+CODE_SMELL_DATASET_DIR = "Original"
+
+CODE_SMELL_DATASETS = None
+# None -> run all CSV files in CODE_SMELL_DATASET_DIR.
+#
+# Example:
+# CODE_SMELL_DATASETS = [
+#     "FeatureEnvy",
+#     "LongMethod",
+#     "GodClass",
+# ]
+
+MAFESE_DATASET_SUITE = "test14"
+
+OPTIMIZERS = [
     "MaCRO-DE",
+    "DSADE",
     "DE",
     "PSO",
     "GWO",
@@ -51,10 +69,43 @@ DEFAULT_OPTIMIZERS = [
     "JADE",
     "SADE",
 ]
-DEFAULT_ESTIMATORS = ["knn","svm"]
-DEFAULT_TRANSFER_FUNCTIONS = ["vstf_01", "vstf_02", "vstf_03", "vstf_04", "sstf_01", "sstf_02", "sstf_03", "sstf_04"]
 
-TEST_datasets_clasific_14 = [
+ESTIMATORS = [
+    "knn",
+    "svm",
+]
+
+TRANSFER_FUNCTIONS = [
+    "vstf_01",
+]
+
+RUNS = 3
+EPOCHS = 10
+POP_SIZE = 50
+
+PARALLEL = True
+N_WORKERS = 12
+
+EXP_ID = 626
+TEST_SIZE = 0.2
+RANDOM_STATE = 2
+SEED_BASE = 1234
+OUTPUT_ROOT = "."
+REUSE_CACHE = False
+FIGURES_ONLY = False
+
+DSADE_BETA_MIN = 0.2
+DSADE_BETA_MAX = 0.8
+DSADE_PCR = 0.2
+DSADE_MAHAL_Q = 0.68
+
+plt.rcParams.update({
+    "figure.facecolor": "white",
+    "axes.facecolor": "white",
+    "savefig.facecolor": "white",
+})
+
+TEST_DATASETS_CLASSIFICATION_14 = [
     "BreastCancer",
     "BreastEW",
     "Glass",
@@ -68,78 +119,6 @@ TEST_datasets_clasific_14 = [
     "WaveformEW",
     "Zoo",
 ]
-CHART_PALETTE = {
-    "DSADE": "#3266ad",
-    "DSADE_AWAD": "#d1495b",
-    "MaCRO-DE": "#3266ad",
-    "DBO": "#00a6a6",
-    "GWO": "#e06c00",
-    "OriginalGWO": "#e06c00",
-    "WOA": "#2a9d5c",
-    "OriginalWOA": "#2a9d5c",
-    "CA": "#c44569",
-    "OriginalCA": "#c44569",
-    "PSO": "#9b59b6",
-    "OriginalPSO": "#9b59b6",
-    "DE": "#6a4c93",
-    "OriginalDE": "#6a4c93",
-    "JADE": "#2d6a4f",
-    "SADE": "#f4a261",
-    "SHADE": "#264653",
-    "OriginalSHADE": "#264653",
-    "FOX": "#1b9aaa",
-    "OriginalFOX": "#1b9aaa",
-    "RIME": "#e76f51",
-    "OriginalRIME": "#e76f51",
-    "BRO": "#577590",
-    "OriginalBRO": "#577590",
-    "DMOA": "#90be6d",
-    "OriginalDMOA": "#90be6d",
-    "MGO": "#f9844a",
-    "OriginalMGO": "#f9844a",
-    "HHO": "#4d4d4d",
-    "OriginalHHO": "#4d4d4d",
-    "GOA": "#8a5a44",
-    "OriginalGOA": "#8a5a44",
-    "MFO": "#595959",
-    "OriginalMFO": "#595959",
-}
-CHART_LABELS = {
-    "DSADE": "DSADE",
-    "DSADE_AWAD": "DSADE_AWAD",
-    "MaCRO-DE": "MaCRO-DE",
-    "DBO": "DBO",
-    "GWO": "GWO",
-    "OriginalGWO": "GWO",
-    "WOA": "WOA",
-    "OriginalWOA": "WOA",
-    "CA": "CA",
-    "OriginalCA": "CA",
-    "PSO": "PSO",
-    "OriginalPSO": "PSO",
-    "DE": "DE",
-    "OriginalDE": "DE",
-    "JADE": "JADE",
-    "SADE": "SADE",
-    "SHADE": "SHADE",
-    "OriginalSHADE": "SHADE",
-    "FOX": "FOX",
-    "OriginalFOX": "FOX",
-    "RIME": "RIME",
-    "OriginalRIME": "RIME",
-    "BRO": "BRO",
-    "OriginalBRO": "BRO",
-    "DMOA": "DMOA",
-    "OriginalDMOA": "DMOA",
-    "MGO": "MGO",
-    "OriginalMGO": "MGO",
-    "HHO": "HHO",
-    "OriginalHHO": "HHO",
-    "GOA": "GOA",
-    "OriginalGOA": "GOA",
-    "MFO": "MFO",
-    "OriginalMFO": "MFO",
-}
 SUPPORTED_ESTIMATORS = ["knn", "svm", "rf", "adaboost", "xgb", "tree", "ann"]
 SUPPORTED_TRANSFER_FUNCTIONS = [
     "vstf_01",
@@ -166,31 +145,31 @@ class DatasetSpec:
     path: Optional[Path] = None
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Framework de comparacion FS (multi-dataset, multi-run, cache)")
-    parser.add_argument("--exp-id", type=int, default=630, help="ID numerico del experimento")
-    parser.add_argument("--dataset-source", default="mafese", choices=["mafese", "codesmell"], help="Origen de datasets")
-    parser.add_argument("--dataset-suite", default="test14", choices=["test14"], help="Suite de datasets")
-    parser.add_argument("--dataset-dir", default="Original", help="Directorio con CSVs de Code Smell")
-    parser.add_argument("--datasets", nargs="*", default=None, help="Datasets Code Smell a ejecutar (nombres con o sin .csv)")
-    parser.add_argument("--optimizers", nargs="+", default=list(DEFAULT_OPTIMIZERS), help="Lista de optimizadores")
-    parser.add_argument("--estimators", nargs="+", default=DEFAULT_ESTIMATORS, help="Lista de clasificadores")
-    parser.add_argument("--transfer-functions", nargs="+", default=DEFAULT_TRANSFER_FUNCTIONS, help="Lista de transfer functions")
-    parser.add_argument("--runs", type=int, default=30, help="Ejecuciones independientes por combinacion")
-    parser.add_argument("--epochs", type=int, default=100, help="Iteraciones del optimizador")
-    parser.add_argument("--pop-size", type=int, default=50, help="Tamano de poblacion")
-    parser.add_argument("--test-size", type=float, default=0.2, help="Holdout ratio")
-    parser.add_argument("--random-state", type=int, default=2, help="Semilla de split")
-    parser.add_argument("--seed-base", type=int, default=1234, help="Semilla base por run")
-    parser.add_argument("--output-root", default=".", help="Raiz para Figures/Results")
-    parser.add_argument("--reuse-cache", action="store_true", help="Usar cache si existe")
-    parser.add_argument("--figures-only", action="store_true", help="Regenerar solo graficas desde cache existente")
-    parser.add_argument("--list-optimizers", action="store_true", help="Listar optimizadores disponibles y terminar")
-    parser.add_argument("--parallel", default="yes", choices=["yes", "no"], help="Ejecutar runs en paralelo: yes/no")
-    parser.add_argument("--n-workers", type=int, default=12, help="Numero de procesos paralelos si --parallel yes")
-    parser.add_argument("--dsade-beta-min", type=float, default=0.2)
-    parser.add_argument("--dsade-beta-max", type=float, default=0.8)
-    parser.add_argument("--dsade-pcr", type=float, default=0.2)
-    parser.add_argument("--dsade-mahal-q", type=float, default=0.68)
+    parser = argparse.ArgumentParser(description="Feature-selection comparison framework with cache and multi-run support")
+    parser.add_argument("--exp-id", type=int, default=EXP_ID, help="Numeric experiment ID")
+    parser.add_argument("--dataset-source", default=DATASET_SOURCE, choices=["mafese", "codesmell"], help="Dataset source")
+    parser.add_argument("--dataset-suite", default=MAFESE_DATASET_SUITE, choices=["test14"], help="MAFESE dataset suite")
+    parser.add_argument("--dataset-dir", default=CODE_SMELL_DATASET_DIR, help="Directory containing Code Smell CSV files")
+    parser.add_argument("--datasets", nargs="*", default=CODE_SMELL_DATASETS, help="Code Smell datasets to run, with or without .csv")
+    parser.add_argument("--optimizers", nargs="+", default=list(OPTIMIZERS), help="Optimizer names or acronyms")
+    parser.add_argument("--estimators", nargs="+", default=list(ESTIMATORS), help="Classifier names")
+    parser.add_argument("--transfer-functions", nargs="+", default=list(TRANSFER_FUNCTIONS), help="Transfer functions")
+    parser.add_argument("--runs", type=int, default=RUNS, help="Independent runs per combination")
+    parser.add_argument("--epochs", type=int, default=EPOCHS, help="Optimizer iterations")
+    parser.add_argument("--pop-size", type=int, default=POP_SIZE, help="Population size")
+    parser.add_argument("--test-size", type=float, default=TEST_SIZE, help="Holdout ratio")
+    parser.add_argument("--random-state", type=int, default=RANDOM_STATE, help="Train/test split seed")
+    parser.add_argument("--seed-base", type=int, default=SEED_BASE, help="Base seed for runs")
+    parser.add_argument("--output-root", default=OUTPUT_ROOT, help="Root directory for Figures and Results")
+    parser.add_argument("--reuse-cache", action="store_true", default=REUSE_CACHE, help="Reuse cache when available")
+    parser.add_argument("--figures-only", action="store_true", default=FIGURES_ONLY, help="Regenerate only charts from existing cache")
+    parser.add_argument("--list-optimizers", action="store_true", help="List available optimizers and exit")
+    parser.add_argument("--parallel", default="yes" if PARALLEL else "no", choices=["yes", "no"], help="Run independent runs in parallel: yes/no")
+    parser.add_argument("--n-workers", type=int, default=N_WORKERS, help="Number of parallel worker processes")
+    parser.add_argument("--dsade-beta-min", type=float, default=DSADE_BETA_MIN)
+    parser.add_argument("--dsade-beta-max", type=float, default=DSADE_BETA_MAX)
+    parser.add_argument("--dsade-pcr", type=float, default=DSADE_PCR)
+    parser.add_argument("--dsade-mahal-q", type=float, default=DSADE_MAHAL_Q)
     return parser.parse_args()
 
 def resolve_optimizers(args: argparse.Namespace) -> List[str]:
@@ -209,14 +188,14 @@ def validate_selection_options(args: argparse.Namespace) -> None:
     invalid_estimators = [e for e in args.estimators if e not in SUPPORTED_ESTIMATORS]
     if invalid_estimators:
         raise ValueError(
-            f"Clasificadores no soportados: {invalid_estimators}. "
-            f"Validos: {', '.join(SUPPORTED_ESTIMATORS)}"
+            f"Unsupported classifiers: {invalid_estimators}. "
+            f"Valid values: {', '.join(SUPPORTED_ESTIMATORS)}"
         )
     invalid_tf = [tf for tf in args.transfer_functions if tf not in SUPPORTED_TRANSFER_FUNCTIONS]
     if invalid_tf:
         raise ValueError(
-            f"Transfer functions no soportadas: {invalid_tf}. "
-            f"Validas: {', '.join(SUPPORTED_TRANSFER_FUNCTIONS)}"
+            f"Unsupported transfer functions: {invalid_tf}. "
+            f"Valid values: {', '.join(SUPPORTED_TRANSFER_FUNCTIONS)}"
         )
 
 def make_paths(args: argparse.Namespace) -> Paths:
@@ -230,68 +209,68 @@ def make_paths(args: argparse.Namespace) -> Paths:
 
 def resolve_mafese_dataset_names(args: argparse.Namespace) -> List[str]:
     if args.dataset_suite == "test14":
-        return list(TEST_datasets_clasific_14)
-    raise ValueError(f"Suite de datasets no soportada: {args.dataset_suite}")
+        return list(TEST_DATASETS_CLASSIFICATION_14)
+    raise ValueError(f"Unsupported dataset suite: {args.dataset_suite}")
 
 def resolve_codesmell_dataset_specs(args: argparse.Namespace) -> List[DatasetSpec]:
     dataset_dir = Path(args.dataset_dir)
     if not dataset_dir.exists():
-        raise FileNotFoundError(f"Directorio Code Smell no encontrado: {dataset_dir}")
+        raise FileNotFoundError(f"Code Smell dataset directory not found: {dataset_dir}")
     if not dataset_dir.is_dir():
-        raise NotADirectoryError(f"--dataset-dir debe ser un directorio: {dataset_dir}")
+        raise NotADirectoryError(f"--dataset-dir must be a directory: {dataset_dir}")
 
     csv_files = sorted(dataset_dir.glob("*.csv"), key=lambda p: p.stem.lower())
     if args.datasets is not None:
         if not args.datasets:
-            raise ValueError("--datasets requiere al menos un nombre cuando se usa")
+            raise ValueError("--datasets requires at least one dataset name when used")
         requested = list(dict.fromkeys(Path(name).stem for name in args.datasets))
         by_name = {path.stem: path for path in csv_files}
         missing = [name for name in requested if name not in by_name]
         if missing:
-            available = ", ".join(sorted(by_name)) or "(ninguno)"
+            available = ", ".join(sorted(by_name)) or "(none)"
             raise FileNotFoundError(
-                f"Datasets Code Smell no encontrados en {dataset_dir}: {missing}. "
-                f"Disponibles: {available}"
+                f"Code Smell datasets not found in {dataset_dir}: {missing}. "
+                f"Available datasets: {available}"
             )
         csv_files = [by_name[name] for name in requested]
 
     if not csv_files:
-        raise FileNotFoundError(f"No se encontraron archivos CSV en {dataset_dir}")
+        raise FileNotFoundError(f"No CSV files found in {dataset_dir}")
 
     return [DatasetSpec(name=path.stem, source="codesmell", path=path) for path in csv_files]
 
 def resolve_dataset_specs(args: argparse.Namespace) -> List[DatasetSpec]:
     if args.dataset_source == "mafese":
         if args.datasets is not None:
-            raise ValueError("--datasets solo esta soportado con --dataset-source codesmell")
+            raise ValueError("--datasets is only supported with --dataset-source codesmell")
         return [DatasetSpec(name=name, source="mafese") for name in resolve_mafese_dataset_names(args)]
     if args.dataset_source == "codesmell":
         return resolve_codesmell_dataset_specs(args)
-    raise ValueError(f"Origen de datasets no soportado: {args.dataset_source}")
+    raise ValueError(f"Unsupported dataset source: {args.dataset_source}")
 
 def validate_xy(dataset_name: str, X: np.ndarray, y: np.ndarray) -> None:
     if X.ndim != 2:
-        raise ValueError(f"Dataset '{dataset_name}': X debe ser una matriz 2D, shape={X.shape}")
+        raise ValueError(f"Dataset '{dataset_name}': X must be a 2D matrix, shape={X.shape}")
     if y.ndim != 1:
-        raise ValueError(f"Dataset '{dataset_name}': y debe ser un vector 1D, shape={y.shape}")
+        raise ValueError(f"Dataset '{dataset_name}': y must be a 1D vector, shape={y.shape}")
     if X.shape[1] < 1:
-        raise ValueError(f"Dataset '{dataset_name}': X no tiene caracteristicas numericas")
+        raise ValueError(f"Dataset '{dataset_name}': X has no numeric features")
     if X.shape[0] != y.shape[0]:
         raise ValueError(
-            f"Dataset '{dataset_name}': X e y tienen diferente numero de muestras "
+            f"Dataset '{dataset_name}': X and y have different sample counts "
             f"({X.shape[0]} vs {y.shape[0]})"
         )
     if np.unique(y).size < 2:
-        raise ValueError(f"Dataset '{dataset_name}': y debe contener al menos dos clases")
+        raise ValueError(f"Dataset '{dataset_name}': y must contain at least two classes")
     if not np.isfinite(X).all():
-        raise ValueError(f"Dataset '{dataset_name}': X contiene NaN o infinitos despues de la limpieza")
+        raise ValueError(f"Dataset '{dataset_name}': X contains NaN or infinite values after cleaning")
 
 def load_mafese_dataset(dataset_name: str) -> Tuple[str, np.ndarray, np.ndarray]:
     mafese_data = get_dataset(dataset_name)
     if mafese_data is None:
         raise ValueError(
-            f"mafese no pudo cargar '{dataset_name}'. "
-            "Verifica que exista en la suite 'test14' de mafese."
+            f"MAFESE could not load '{dataset_name}'. "
+            "Verify that it exists in the MAFESE 'test14' suite."
         )
     X = np.asarray(mafese_data.X, dtype=np.float64)
     y = np.asarray(mafese_data.y).astype(np.int32)
@@ -304,8 +283,8 @@ def load_codesmell_dataset(csv_path: Path) -> Tuple[str, np.ndarray, np.ndarray]
     is_columns = [col for col in df.columns if str(col).startswith("is_")]
     if len(is_columns) != 1:
         raise ValueError(
-            f"Dataset Code Smell '{dataset_name}' ({csv_path}): se esperaba exactamente una "
-            f"columna objetivo 'is_*', encontradas {len(is_columns)}: {is_columns}"
+            f"Code Smell dataset '{dataset_name}' ({csv_path}): expected exactly one "
+            f"'is_*' target column, found {len(is_columns)}: {is_columns}"
         )
 
     target_column = is_columns[0]
@@ -326,9 +305,9 @@ def load_dataset(spec: DatasetSpec) -> Tuple[str, np.ndarray, np.ndarray]:
         return load_mafese_dataset(spec.name)
     if spec.source == "codesmell":
         if spec.path is None:
-            raise ValueError(f"Dataset Code Smell '{spec.name}' no tiene ruta CSV asociada")
+            raise ValueError(f"Code Smell dataset '{spec.name}' has no associated CSV path")
         return load_codesmell_dataset(spec.path)
-    raise ValueError(f"Origen de dataset no soportado: {spec.source}")
+    raise ValueError(f"Unsupported dataset source: {spec.source}")
 
 def print_dataset_summary(args: argparse.Namespace, dataset_specs: List[DatasetSpec]) -> None:
     print(f"Dataset source: {args.dataset_source}")
@@ -747,7 +726,7 @@ def load_cache_safe(path: str, label: str):
     try:
         return load_cache(path)
     except Exception as exc:
-        print(f"[cache-warning] No se pudo cargar {label} '{path}': {exc}")
+        print(f"[cache-warning] Could not load {label} '{path}': {exc}")
         return None
 
 def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str) -> Dict[str, Dict]:
@@ -764,9 +743,9 @@ def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_name
                 paths.cache_dir,
                 f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl",
             )
-            payload = load_cache_safe(cache_file, "cache final")
+            payload = load_cache_safe(cache_file, "final cache")
             if payload is None:
-                payload = load_cache_safe(progress_file, "checkpoint parcial")
+                payload = load_cache_safe(progress_file, "partial checkpoint")
             if payload is None:
                 missing.append(f"{dataset_name}/{estimator}")
                 continue
@@ -774,9 +753,9 @@ def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_name
 
     if missing:
         raise FileNotFoundError(
-            "No se encontraron caches para: "
+            "No cache files were found for: "
             + ", ".join(missing)
-            + ". Ejecuta el experimento completo o revisa que los parametros coincidan con el cache existente."
+            + ". Run the full experiment or verify that the parameters match the existing cache."
         )
     return results_struct
 
@@ -838,7 +817,7 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
 
 
 def optimizer_display_label(name: str) -> str:
-    return CHART_LABELS.get(str(name), optimizer_acronym(str(name)))
+    return optimizer_acronym(str(name))
 
 def optimizer_order_key(name: str) -> tuple:
     label = optimizer_display_label(name).upper()
@@ -861,49 +840,46 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.Data
         return df.copy(), [], {}, {}
 
     plot_df = df.copy()
-    if "FuncionTransferencia" not in plot_df.columns:
-        plot_df["FuncionTransferencia"] = ""
-    plot_df["FuncionTransferencia"] = plot_df["FuncionTransferencia"].fillna("").astype(str).str.lower()
+    if "TransferFunction" not in plot_df.columns:
+        plot_df["TransferFunction"] = ""
+    plot_df["TransferFunction"] = plot_df["TransferFunction"].fillna("").astype(str).str.lower()
 
-    tf_counts = plot_df[plot_df["FuncionTransferencia"] != ""].groupby("Optimizador")["FuncionTransferencia"].nunique()
+    tf_counts = plot_df[plot_df["TransferFunction"] != ""].groupby("Optimizer")["TransferFunction"].nunique()
     variant_methods = set(tf_counts[tf_counts > 1].index)
 
     def make_group(row):
-        opt = str(row["Optimizador"])
-        tf = str(row["FuncionTransferencia"]).lower()
+        opt = str(row["Optimizer"])
+        tf = str(row["TransferFunction"]).lower()
         return f"{opt}_{tf.upper()}" if opt in variant_methods and tf else opt
 
-    plot_df["GrupoGrafica"] = plot_df.apply(make_group, axis=1)
+    plot_df["PlotGroup"] = plot_df.apply(make_group, axis=1)
     group_meta = (
-        plot_df[["GrupoGrafica", "Optimizador", "FuncionTransferencia"]]
+        plot_df[["PlotGroup", "Optimizer", "TransferFunction"]]
         .drop_duplicates()
-        .set_index("GrupoGrafica")
+        .set_index("PlotGroup")
         .to_dict("index")
     )
 
-    method_order = list(dict.fromkeys([str(o) for o in opt_order] + [str(meta["Optimizador"]) for meta in group_meta.values()]))
-    method_order = sorted([opt for opt in method_order if opt in {meta["Optimizador"] for meta in group_meta.values()}], key=optimizer_order_key)
+    method_order = list(dict.fromkeys([str(o) for o in opt_order] + [str(meta["Optimizer"]) for meta in group_meta.values()]))
+    method_order = sorted([opt for opt in method_order if opt in {meta["Optimizer"] for meta in group_meta.values()}], key=optimizer_order_key)
 
     opts = []
     for opt in method_order:
         opt_groups = sorted(
-            [g for g, meta in group_meta.items() if meta["Optimizador"] == opt],
-            key=lambda g: (str(group_meta[g]["FuncionTransferencia"]), g),
+            [g for g, meta in group_meta.items() if meta["Optimizer"] == opt],
+            key=lambda g: (str(group_meta[g]["TransferFunction"]), g),
         )
         opts.extend(opt_groups)
-    opts.extend(sorted((g for g in group_meta if g not in set(opts)), key=lambda g: optimizer_order_key(group_meta[g]["Optimizador"])))
+    opts.extend(sorted((g for g in group_meta if g not in set(opts)), key=lambda g: optimizer_order_key(group_meta[g]["Optimizer"])))
 
     colors = muted_color_palette(len(opts))
     color_map = {}
     label_map = {}
     for i, group in enumerate(opts):
         meta = group_meta[group]
-        method = meta["Optimizador"]
-        tf = meta["FuncionTransferencia"]
-        if method not in variant_methods and method in CHART_PALETTE:
-            color_map[group] = CHART_PALETTE[method]
-        else:
-            color_map[group] = colors[i]
+        method = meta["Optimizer"]
+        tf = meta["TransferFunction"]
+        color_map[group] = colors[i]
         base_label = optimizer_display_label(method)
         label_map[group] = f"{base_label} {tf.upper()}" if tf and method in variant_methods else base_label
 
@@ -1007,10 +983,10 @@ def generate_summary_dataframe(results_struct: Dict[str, Dict], args: argparse.N
             )
             rows.append(
                 {
-                    "Archivo": dataset_name,
-                    "Estimador": estimator,
-                    "Optimizador": method,
-                    "FuncionTransferencia": parsed["transfer_function"],
+                    "Dataset": dataset_name,
+                    "Estimator": estimator,
+                    "Optimizer": method,
+                    "TransferFunction": parsed["transfer_function"],
                     "Configuracion": label,
                     "F1_test": float(row.get("F1Mean", np.nan)),
                     "AS_test": float(row.get("AccMean", np.nan)) / 100.0,
@@ -1046,11 +1022,11 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
         return None
 
     plot_df = df.copy()
-    plot_df["Estimador"] = plot_df["Estimador"].astype(str).str.lower()
+    plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
     plot_df, opts, color_map, label_map = prepare_plot_groups(plot_df, opt_order)
     if not opts:
         return None
-    method_by_group = plot_df.drop_duplicates("GrupoGrafica").set_index("GrupoGrafica")["Optimizador"].to_dict()
+    method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
 
     metric_cols = ["AS_test", "PS_test", "RS_test", "F1_test"]
     metric_labels = ["Accuracy", "Precision", "Recall", "F1-Score"]
@@ -1061,14 +1037,14 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
         ("#f9d5d9", "#edaeb8"),
     ]
 
-    present_estimators = [str(e).lower() for e in plot_df["Estimador"].dropna().unique()]
-    required_estimators = [e for e in DEFAULT_ESTIMATORS if e in SUPPORTED_ESTIMATORS]
+    present_estimators = [str(e).lower() for e in plot_df["Estimator"].dropna().unique()]
+    required_estimators = [e for e in ESTIMATORS if e in SUPPORTED_ESTIMATORS]
     estimators = [e for e in SUPPORTED_ESTIMATORS if e in set(required_estimators + present_estimators)]
     estimators += sorted(e for e in present_estimators if e not in set(estimators))
     if not estimators:
         return None
 
-    grouped = plot_df.groupby(["Estimador", "GrupoGrafica"])[metric_cols].mean()
+    grouped = plot_df.groupby(["Estimator", "PlotGroup"])[metric_cols].mean()
     n_rows = len(estimators)
     n_cols = len(metric_cols)
     fig_w = max(16.0, 4.2 * n_cols)
@@ -1114,7 +1090,7 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
                 ax.text(
                     0.5,
                     0.5,
-                    "Sin datos",
+                    "No data",
                     transform=ax.transAxes,
                     ha="center",
                     va="center",
@@ -1144,7 +1120,7 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
 
     legend = _plot_legend_patches(opts, color_map, label_map)
     if any(is_exact_dsade_method(method_by_group.get(opt)) for opt in opts):
-        legend.append(mpatches.Patch(facecolor="#333333", edgecolor="black", label="DSA-DE: borde negro"))
+        legend.append(mpatches.Patch(facecolor="#333333", edgecolor="black", label="DSA-DE: black border"))
     fig.legend(handles=legend, loc="lower center", ncol=min(len(legend), 6), fontsize=9, framealpha=0.95)
     fig.tight_layout(rect=[0.0, 0.04, 1.0, 1.0])
     filename = "09_resultados_clasificador_metrica_todos_datasets.png"
@@ -1159,20 +1135,20 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
     if not opts:
         return []
-    method_by_group = plot_df.drop_duplicates("GrupoGrafica").set_index("GrupoGrafica")["Optimizador"].to_dict()
+    method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
 
     saved = []
-    metricas = ["F1_test", "AS_test", "PS_test", "RS_test"]
+    metrics = ["F1_test", "AS_test", "PS_test", "RS_test"]
     met_labels = ["F1-score", "Accuracy", "Precision", "Recall"]
-    medias = plot_df.groupby("GrupoGrafica")[metricas].mean()
+    means = plot_df.groupby("PlotGroup")[metrics].mean()
 
     fig, ax = plt.subplots(figsize=(max(12, 1.25 * len(opts) + 7), 6))
-    x = np.arange(len(metricas))
+    x = np.arange(len(metrics))
     n = len(opts)
     w = min(0.75 / max(1, n), 0.13)
     for i, opt in enumerate(opts):
         offset = (i - n / 2 + 0.5) * w
-        vals = [medias.loc[opt, m] for m in metricas]
+        vals = [means.loc[opt, m] for m in metrics]
         is_dsade = is_dsade_method(method_by_group.get(opt))
         bars = ax.bar(
             x + offset,
@@ -1196,8 +1172,8 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     _save_chart(fig, out_dir, "01_metricas_globales.png")
     saved.append("01_metricas_globales.png")
 
-    smells = sorted(plot_df["Archivo"].unique())
-    pivot_smell = plot_df.groupby(["Archivo", "GrupoGrafica"])["F1_test"].mean().unstack()
+    smells = sorted(plot_df["Dataset"].unique())
+    pivot_smell = plot_df.groupby(["Dataset", "PlotGroup"])["F1_test"].mean().unstack()
     fig, ax = plt.subplots(figsize=(max(12, 0.35 * len(smells) * max(1, len(opts)) + 5), 6))
     x = np.arange(len(smells))
     w = 0.75 / max(1, len(opts))
@@ -1213,8 +1189,8 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     _save_chart(fig, out_dir, "02_f1_por_smell.png")
     saved.append("02_f1_por_smell.png")
 
-    ests = sorted(plot_df["Estimador"].unique())
-    pivot = plot_df.groupby(["Estimador", "GrupoGrafica"])["F1_test"].mean().unstack()
+    ests = sorted(plot_df["Estimator"].unique())
+    pivot = plot_df.groupby(["Estimator", "PlotGroup"])["F1_test"].mean().unstack()
     fig, ax = plt.subplots(figsize=(max(10, 1.0 * len(opts) + 5), 6))
     x = np.arange(len(ests))
     n = len(opts)
@@ -1232,7 +1208,7 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     _save_chart(fig, out_dir, "03_f1_por_estimador.png")
     saved.append("03_f1_por_estimador.png")
 
-    pivot = plot_df.groupby(["Archivo", "GrupoGrafica"])["F1_test"].mean().unstack()
+    pivot = plot_df.groupby(["Dataset", "PlotGroup"])["F1_test"].mean().unstack()
     mat = pivot.reindex(index=smells, columns=opts).values
     fig, ax = plt.subplots(figsize=(max(10, 0.75 * len(opts) + 4), max(5, 0.35 * len(smells) + 2)))
     im = ax.imshow(mat, cmap="Blues", vmin=0.0, vmax=1.0, aspect="auto")
@@ -1252,7 +1228,7 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     _save_chart(fig, out_dir, "04_heatmap.png")
     saved.append("04_heatmap.png")
 
-    data_box = [plot_df[plot_df["GrupoGrafica"] == o]["F1_test"].values for o in opts]
+    data_box = [plot_df[plot_df["PlotGroup"] == o]["F1_test"].values for o in opts]
     fig, ax = plt.subplots(figsize=(max(11, 0.65 * len(opts) + 5), 6))
     bp = ax.boxplot(data_box, patch_artist=True, widths=0.5)
     for patch, opt in zip(bp["boxes"], opts):
@@ -1268,7 +1244,7 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
 
     fig, ax = plt.subplots(figsize=(11, 7))
     for opt in opts:
-        sub = plot_df[plot_df["GrupoGrafica"] == opt]
+        sub = plot_df[plot_df["PlotGroup"] == opt]
         is_dsade = is_dsade_method(method_by_group.get(opt))
         ax.scatter(
             sub["N_Features_Selected"],
@@ -1287,15 +1263,15 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     _save_chart(fig, out_dir, "06_scatter_features_f1.png")
     saved.append("06_scatter_features_f1.png")
 
-    medias = plot_df.groupby("GrupoGrafica")[["F1_test", "AS_test", "PS_test", "RS_test", "N_Features_Selected"]].mean()
-    max_feat = max(float(medias["N_Features_Selected"].max()), 1.0)
+    means = plot_df.groupby("PlotGroup")[["F1_test", "AS_test", "PS_test", "RS_test", "N_Features_Selected"]].mean()
+    max_feat = max(float(means["N_Features_Selected"].max()), 1.0)
     categories = ["F1-test", "Accuracy", "Precision", "Recall", "Feat.\\nEfficiency"]
     n_cat = len(categories)
     angles = [n / float(n_cat) * 2 * np.pi for n in range(n_cat)]
     angles += angles[:1]
     fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
     for opt in opts:
-        row = medias.loc[opt]
+        row = means.loc[opt]
         vals = [row["F1_test"], row["AS_test"], row["PS_test"], row["RS_test"], 1 - row["N_Features_Selected"] / max_feat]
         vals += vals[:1]
         is_dsade = is_dsade_method(method_by_group.get(opt))
@@ -1309,8 +1285,8 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     _save_chart(fig, out_dir, "07_radar.png")
     saved.append("07_radar.png")
 
-    feat_med = plot_df.groupby("GrupoGrafica")["N_Features_Selected"].mean()
-    rt_med = plot_df.groupby("GrupoGrafica")["Runtime"].mean()
+    feat_med = plot_df.groupby("PlotGroup")["N_Features_Selected"].mean()
+    rt_med = plot_df.groupby("PlotGroup")["Runtime"].mean()
     feat_vals = [feat_med[o] for o in opts]
     rt_vals = [rt_med[o] for o in opts]
     colors = [color_map.get(o, "#888") for o in opts]
@@ -1357,10 +1333,10 @@ def build_run_level_dataframe(results_struct: Dict[str, Dict], args: argparse.Na
             n_runs = max((values.size for values in runs_by_metric.values()), default=0)
             for run_idx in range(n_runs):
                 out = {
-                    "Archivo": dataset_name,
-                    "Estimador": estimator_filter.lower(),
-                    "Optimizador": parsed["method"],
-                    "FuncionTransferencia": parsed["transfer_function"],
+                    "Dataset": dataset_name,
+                    "Estimator": estimator_filter.lower(),
+                    "Optimizer": parsed["method"],
+                    "TransferFunction": parsed["transfer_function"],
                     "Configuracion": label,
                     "Run": run_idx + 1,
                 }
@@ -1380,10 +1356,10 @@ def build_curve_dataframe(results_struct: Dict[str, Dict], args: argparse.Namesp
                 continue
             rows.append(
                 {
-                    "Archivo": dataset_name,
-                    "Estimador": estimator_filter.lower(),
-                    "Optimizador": parsed["method"],
-                    "FuncionTransferencia": parsed["transfer_function"],
+                    "Dataset": dataset_name,
+                    "Estimator": estimator_filter.lower(),
+                    "Optimizer": parsed["method"],
+                    "TransferFunction": parsed["transfer_function"],
                     "Configuracion": label,
                     "Curve": np.asarray(row.get("Curve", []), dtype=float),
                 }
@@ -1416,14 +1392,14 @@ def generate_seven_global_charts(
         os.replace(os.path.join(out_dir, chart1), os.path.join(out_dir, new_chart1))
         saved.append(new_chart1)
 
-    knn_df = df[df["Estimador"].astype(str).str.lower() == estimator_filter.lower()].copy()
+    knn_df = df[df["Estimator"].astype(str).str.lower() == estimator_filter.lower()].copy()
     if knn_df.empty:
         return saved
     plot_df, opts, color_map, label_map = prepare_plot_groups(knn_df, opt_order)
     if not opts:
         return saved
-    method_by_group = plot_df.drop_duplicates("GrupoGrafica").set_index("GrupoGrafica")["Optimizador"].to_dict()
-    datasets = sorted(plot_df["Archivo"].dropna().unique())
+    method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
+    datasets = sorted(plot_df["Dataset"].dropna().unique())
     n_rows, n_cols = _grid_shape(len(datasets))
 
     categories = ["Accuracy", "Precision", "Recall", "F1-Score", "Feat.\nEfficiency"]
@@ -1438,13 +1414,13 @@ def generate_seven_global_charts(
     )
     for idx, dataset in enumerate(datasets):
         ax = axes[idx // n_cols, idx % n_cols]
-        sub = plot_df[plot_df["Archivo"] == dataset]
-        medias = sub.groupby("GrupoGrafica")[["AS_test", "PS_test", "RS_test", "F1_test", "N_Features_Selected"]].mean()
-        max_feat = max(float(medias["N_Features_Selected"].max()), 1.0)
+        sub = plot_df[plot_df["Dataset"] == dataset]
+        means = sub.groupby("PlotGroup")[["AS_test", "PS_test", "RS_test", "F1_test", "N_Features_Selected"]].mean()
+        max_feat = max(float(means["N_Features_Selected"].max()), 1.0)
         for opt in opts:
-            if opt not in medias.index:
+            if opt not in means.index:
                 continue
-            row = medias.loc[opt]
+            row = means.loc[opt]
             vals = [row["AS_test"], row["PS_test"], row["RS_test"], row["F1_test"], 1 - row["N_Features_Selected"] / max_feat]
             vals += vals[:1]
             is_dsade = is_dsade_method(method_by_group.get(opt))
@@ -1482,7 +1458,7 @@ def generate_seven_global_charts(
     for idx, dataset in enumerate(datasets):
         ax1 = axes[idx // n_cols, idx % n_cols]
         ax2 = ax1.twinx()
-        sub = plot_df[plot_df["Archivo"] == dataset].groupby("GrupoGrafica")[["N_Features_Selected", "Runtime"]].mean()
+        sub = plot_df[plot_df["Dataset"] == dataset].groupby("PlotGroup")[["N_Features_Selected", "Runtime"]].mean()
         x = np.arange(len(opts))
         feat_vals = [sub.loc[o, "N_Features_Selected"] if o in sub.index else np.nan for o in opts]
         rt_vals = [sub.loc[o, "Runtime"] if o in sub.index else np.nan for o in opts]
@@ -1508,8 +1484,8 @@ def generate_seven_global_charts(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.6 * n_rows), squeeze=False)
     for idx, dataset in enumerate(datasets):
         ax = axes[idx // n_cols, idx % n_cols]
-        sub = run_plot_df[run_plot_df["Archivo"] == dataset]
-        data_box = [sub[sub["GrupoGrafica"] == opt]["AS_test"].dropna().values for opt in run_opts]
+        sub = run_plot_df[run_plot_df["Dataset"] == dataset]
+        data_box = [sub[sub["PlotGroup"] == opt]["AS_test"].dropna().values for opt in run_opts]
         bp = ax.boxplot(data_box, patch_artist=True, widths=0.55, showmeans=True)
         for patch, opt in zip(bp["boxes"], run_opts):
             patch.set_facecolor(run_color_map.get(opt, "#888"))
@@ -1535,17 +1511,17 @@ def generate_seven_global_charts(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.4 * n_rows), squeeze=False)
     for idx, dataset in enumerate(datasets):
         ax = axes[idx // n_cols, idx % n_cols]
-        sub = curve_plot_df[curve_plot_df["Archivo"] == dataset] if not curve_plot_df.empty else pd.DataFrame()
+        sub = curve_plot_df[curve_plot_df["Dataset"] == dataset] if not curve_plot_df.empty else pd.DataFrame()
         plotted = False
         for opt in curve_opts:
-            rows_opt = sub[sub["GrupoGrafica"] == opt] if not sub.empty else pd.DataFrame()
+            rows_opt = sub[sub["PlotGroup"] == opt] if not sub.empty else pd.DataFrame()
             if rows_opt.empty:
                 continue
             curve = np.asarray(rows_opt.iloc[0]["Curve"], dtype=float)
             if curve.size == 0:
                 continue
-            is_dsade = is_dsade_method(rows_opt.iloc[0]["Optimizador"])
-            is_macro = str(rows_opt.iloc[0]["Optimizador"]).upper() == "MACRO-DE"
+            is_dsade = is_dsade_method(rows_opt.iloc[0]["Optimizer"])
+            is_macro = str(rows_opt.iloc[0]["Optimizer"]).upper() == "MACRO-DE"
             ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_macro else (2.4 if is_dsade else 1.4), linestyle="-")
             #ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.4, linestyle="-" if is_dsade else "--")
             plotted = True
@@ -1562,7 +1538,7 @@ def generate_seven_global_charts(
     _save_chart(fig, out_dir, "05_convergence_por_dataset_knn.png")
     saved.append("05_convergence_por_dataset_knn.png")
 
-    pivot = plot_df.groupby(["GrupoGrafica", "Archivo"])["F1_test"].mean().unstack()
+    pivot = plot_df.groupby(["PlotGroup", "Dataset"])["F1_test"].mean().unstack()
     mat = pivot.reindex(index=opts, columns=datasets).values
     fig, ax = plt.subplots(figsize=(max(10, 0.9 * len(datasets) + 4), max(5, 0.45 * len(opts) + 2)))
     im = ax.imshow(mat, cmap="Blues", vmin=0.0, vmax=1.0, aspect="auto")
@@ -1594,7 +1570,7 @@ def generate_seven_global_charts(
     _save_chart(fig, out_dir, "06_heatmap_f1_knn.png")
     saved.append("06_heatmap_f1_knn.png")
 
-    data_violin = [run_plot_df[run_plot_df["GrupoGrafica"] == opt]["RS_test"].dropna().values for opt in run_opts]
+    data_violin = [run_plot_df[run_plot_df["PlotGroup"] == opt]["RS_test"].dropna().values for opt in run_opts]
     fig, ax = plt.subplots(figsize=(max(12, 0.85 * len(run_opts) + 5), 6.5))
     parts = ax.violinplot(data_violin, showmeans=False, showmedians=False, widths=0.78)
     for body, opt in zip(parts["bodies"], run_opts):
@@ -1653,7 +1629,7 @@ def generate_global_accuracy_boxplot(df, out_dir, opt_order):
     )
 
     data_box = [
-        plot_df[plot_df["GrupoGrafica"] == opt]["AS_test"].values
+        plot_df[plot_df["PlotGroup"] == opt]["AS_test"].values
         for opt in opts
     ]
 
@@ -1676,7 +1652,7 @@ def generate_global_accuracy_boxplot(df, out_dir, opt_order):
     for i, opt in enumerate(opts):
 
         vals = plot_df[
-            plot_df["GrupoGrafica"] == opt
+            plot_df["PlotGroup"] == opt
         ]["AS_test"]
 
         if len(vals) > 0:
@@ -1715,13 +1691,13 @@ def generate_global_features_runtime(df, out_dir, opt_order):
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
 
     feat_med = (
-        plot_df.groupby("GrupoGrafica")
+        plot_df.groupby("PlotGroup")
         ["N_Features_Selected"]
         .mean()
     )
 
     rt_med = (
-        plot_df.groupby("GrupoGrafica")
+        plot_df.groupby("PlotGroup")
         ["Runtime"]
         .mean()
     )
@@ -1833,9 +1809,9 @@ def main():
     validate_selection_options(args)
     args.optimizers = resolve_optimizers(args)
     if args.runs < 1:
-        raise ValueError("--runs debe ser >= 1")
+        raise ValueError("--runs must be >= 1")
     if args.n_workers < 1:
-        raise ValueError("--n-workers debe ser >= 1")
+        raise ValueError("--n-workers must be >= 1")
 
     paths = make_paths(args)
     cache_sig = build_cache_signature(args)
@@ -1880,8 +1856,8 @@ def main():
                 paths.cache_dir,
                 f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl",
             )
-            cache_payload = load_cache_safe(cache_file, "cache final") if args.reuse_cache else None
-            progress_payload = load_cache_safe(progress_file, "checkpoint parcial")
+            cache_payload = load_cache_safe(cache_file, "final cache") if args.reuse_cache else None
+            progress_payload = load_cache_safe(progress_file, "partial checkpoint")
             if cache_payload is not None and (
                 progress_payload is None
                 or payload_completed_runs(cache_payload) >= payload_completed_runs(progress_payload)
@@ -1891,7 +1867,7 @@ def main():
             else:
                 cls_payload = progress_payload or {}
                 if progress_payload is not None:
-                    print(f"[resume] Reanudando {dataset_name} / {estimator} desde checkpoint parcial")
+                    print(f"[resume] Resuming {dataset_name} / {estimator} from partial checkpoint")
             for method in args.optimizers:
                 for tf in args.transfer_functions:
                     label = build_alg_label(method, tf, estimator, show_tf, show_cls)
@@ -2003,3 +1979,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
