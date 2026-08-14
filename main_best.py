@@ -57,22 +57,27 @@ CODE_SMELL_DATASETS = None
 MAFESE_DATASET_SUITE = "test14"
 
 OPTIMIZERS = [
-    "MaCRO-DE",
+    # "MaCRO-DE",
     "DSADE",
     "DE",
-    "PSO",
-    "GWO",
-    "WOA",
-    "HHO",
-    "MFO",
-    "SHADE",
     "JADE",
-    "SADE",
+    "SHADE",
+    "PSO",
+    "WOA",
+    "GWO",
+    "HHO",
+    "GOA",
+    "SA",
+    "BRO",
+    "RUN",
+    "WOA",
+    "FOX",
 ]
 
 ESTIMATORS = [
     "knn",
     "svm",
+    "rf",
 ]
 
 TRANSFER_FUNCTIONS = [
@@ -463,10 +468,8 @@ def build_legacy_alg_label(method: str, transfer_function: str, classifier: str,
     return "_".join(parts)
 
 def muted_color_palette(n: int) -> np.ndarray:
-    cmap = plt.get_cmap("turbo", max(n, 1))
-    colors = cmap(np.arange(max(n, 1)))[:, :3]
-    colors = 0.8 * colors + 0.2
-    return np.clip(colors, 0.0, 1.0)
+    cmap = plt.get_cmap("Paired", max(n, 1))
+    return cmap(np.arange(max(n, 1)))[:, :3]
 
 
 class RobustClassificationFeatureSelectionProblem(FeatureSelectionProblem):
@@ -819,21 +822,19 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
 def optimizer_display_label(name: str) -> str:
     return optimizer_acronym(str(name))
 
-def optimizer_order_key(name: str) -> tuple:
-    label = optimizer_display_label(name).upper()
-    if label == "MACRO-DE":
-        return (0, "")
-    if label == "DSA-DE":
-        return (1, "")
-    if label in {"DSADE-AWAD", "DSADE_AWAD"}:
-        return (2, "")
-    return (3, label)
-
 def is_dsade_method(name: str) -> bool:
     return str(name).upper() in {"MACRO-DE", "DSA-DE", "DSADE", "DSADE_AWAD", "DSADE-AWAD"}
 
 def is_exact_dsade_method(name: str) -> bool:
     return str(name).upper() in {"DSA-DE", "DSADE"}
+
+def optimizer_order_from_config(opt_order: List[str]) -> List[str]:
+    ordered = []
+    for name in opt_order:
+        display_name = optimizer_acronym(name)
+        if display_name not in ordered:
+            ordered.append(display_name)
+    return ordered
 
 def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.DataFrame, List[str], Dict[str, str], Dict[str, str]]:
     if df.empty:
@@ -860,8 +861,10 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.Data
         .to_dict("index")
     )
 
-    method_order = list(dict.fromkeys([str(o) for o in opt_order] + [str(meta["Optimizer"]) for meta in group_meta.values()]))
-    method_order = sorted([opt for opt in method_order if opt in {meta["Optimizer"] for meta in group_meta.values()}], key=optimizer_order_key)
+    present_methods = [str(meta["Optimizer"]) for meta in group_meta.values()]
+    configured_order = optimizer_order_from_config(opt_order)
+    method_order = [opt for opt in configured_order if opt in set(present_methods)]
+    method_order.extend(opt for opt in present_methods if opt not in set(method_order))
 
     opts = []
     for opt in method_order:
@@ -870,7 +873,7 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.Data
             key=lambda g: (str(group_meta[g]["TransferFunction"]), g),
         )
         opts.extend(opt_groups)
-    opts.extend(sorted((g for g in group_meta if g not in set(opts)), key=lambda g: optimizer_order_key(group_meta[g]["Optimizer"])))
+    opts.extend(g for g in group_meta if g not in set(opts))
 
     colors = muted_color_palette(len(opts))
     color_map = {}
@@ -970,6 +973,80 @@ def export_global_excel(results_struct: Dict[str, Dict], dataset_names: List[str
         feat.to_csv(paths[5])
         tim.to_csv(paths[6])
         return paths
+
+def _run_stats(values, best_mode: str) -> Dict[str, float]:
+    arr = np.asarray(values, dtype=float).ravel()
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {"Best": np.nan, "Worst": np.nan, "Mean": np.nan, "Std": np.nan}
+
+    if best_mode == "min":
+        best = np.nanmin(arr)
+        worst = np.nanmax(arr)
+    else:
+        best = np.nanmax(arr)
+        worst = np.nanmin(arr)
+
+    std = 0.0 if arr.size == 1 else float(np.nanstd(arr, ddof=1))
+    return {
+        "Best": float(best),
+        "Worst": float(worst),
+        "Mean": float(np.nanmean(arr)),
+        "Std": std,
+    }
+
+def export_statistical_excel(
+    results_struct: Dict[str, Dict],
+    dataset_names: List[str],
+    optimizer_order: List[str],
+    args: argparse.Namespace,
+    out_path: str,
+):
+    metrics = {
+        "Accuracy": ("AccRuns", "max"),
+        "Precision": ("PSRuns", "max"),
+        "Recall": ("RSRuns", "max"),
+        "F1Score": ("F1Runs", "max"),
+        "Fitness": ("FitRuns", "min"),
+        "Features": ("FeatRuns", "min"),
+        "Time": ("TimeRuns", "min"),
+    }
+    stats = ["Best", "Worst", "Mean", "Std"]
+    optimizers = optimizer_order_from_config(optimizer_order)
+    index = pd.MultiIndex.from_product([optimizers, stats], names=["Optimizer", "Statistic"])
+    sheets = {
+        sheet_name: pd.DataFrame(np.nan, index=index, columns=dataset_names)
+        for sheet_name in metrics
+    }
+
+    for dataset_name in dataset_names:
+        alg_data = results_struct.get(dataset_name, {})
+        runs_by_optimizer = {
+            sheet_name: {optimizer: [] for optimizer in optimizers}
+            for sheet_name in metrics
+        }
+        for label, row in alg_data.items():
+            parsed = parse_result_label(label, args)
+            optimizer = optimizer_acronym(parsed["method"])
+            if optimizer not in set(optimizers):
+                continue
+            for sheet_name, (run_key, _) in metrics.items():
+                values = np.asarray(row.get(run_key, []), dtype=float).ravel()
+                if values.size:
+                    runs_by_optimizer[sheet_name][optimizer].append(values)
+
+        for sheet_name, (_, best_mode) in metrics.items():
+            for optimizer in optimizers:
+                chunks = runs_by_optimizer[sheet_name][optimizer]
+                values = np.concatenate(chunks) if chunks else np.array([], dtype=float)
+                stat_values = _run_stats(values, best_mode)
+                for stat in stats:
+                    sheets[sheet_name].loc[(optimizer, stat), dataset_name] = stat_values[stat]
+
+    with pd.ExcelWriter(out_path) as writer:
+        for sheet_name, df in sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name)
+    return out_path
 
 def generate_summary_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace) -> pd.DataFrame:
     rows = []
@@ -1119,8 +1196,6 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
                 )
 
     legend = _plot_legend_patches(opts, color_map, label_map)
-    if any(is_exact_dsade_method(method_by_group.get(opt)) for opt in opts):
-        legend.append(mpatches.Patch(facecolor="#333333", edgecolor="black", label="DSA-DE: black border"))
     fig.legend(handles=legend, loc="lower center", ncol=min(len(legend), 6), fontsize=9, framealpha=0.95)
     fig.tight_layout(rect=[0.0, 0.04, 1.0, 1.0])
     filename = "09_resultados_clasificador_metrica_todos_datasets.png"
@@ -1786,6 +1861,8 @@ def generate_global_features_runtime(df, out_dir, opt_order):
 
 def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str):
     results_struct = load_results_from_cache(paths, args, dataset_names, cache_sig)
+    statistical_excel = os.path.join(paths.res_dir, f"Statistical_Results_{paths.exp_tag}.xlsx")
+    export_statistical_excel(results_struct, dataset_names, list(args.optimizers), args, statistical_excel)
     summary_df = generate_summary_dataframe(results_struct, args)
     summary_csv = os.path.join(paths.res_dir, f"RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
     summary_df.to_csv(summary_csv, index=False)
@@ -1796,7 +1873,7 @@ def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, datase
         list(args.optimizers),
         args,
     )
-    return summary_csv, generated_charts
+    return summary_csv, generated_charts, statistical_excel
 
 def main():
     args = parse_args()
@@ -1826,11 +1903,12 @@ def main():
     print(f"Cache signature: {cache_sig}")
 
     if args.figures_only:
-        summary_csv, generated_charts = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
+        summary_csv, generated_charts, statistical_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
         print("Completed figures-only.")
         print(f"Cache dir: {paths.cache_dir}")
         print(f"Figures dir: {paths.fig_dir}")
         print(f"Charts summary CSV: {summary_csv}")
+        print(f"Statistical results: {statistical_excel}")
         if generated_charts:
             print("Charts:")
             for name in generated_charts:
@@ -1958,6 +2036,8 @@ def main():
 
     excel_path = os.path.join(paths.res_dir, f"Global_Results_{paths.exp_tag}.xlsx")
     exported = export_global_excel(results_struct, dataset_names, excel_path)
+    statistical_excel = os.path.join(paths.res_dir, f"Statistical_Results_{paths.exp_tag}.xlsx")
+    export_statistical_excel(results_struct, dataset_names, list(args.optimizers), args, statistical_excel)
     summary_df = generate_summary_dataframe(results_struct, args)
     summary_csv = os.path.join(paths.res_dir, f"RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
     summary_df.to_csv(summary_csv, index=False)
@@ -1969,6 +2049,7 @@ def main():
     print(f"Figures dir: {paths.fig_dir}")
     print(f"Charts summary CSV: {summary_csv}")
     print(f"Charts dir: {chart_dir}")
+    print(f"Statistical results: {statistical_excel}")
     if generated_charts:
         print("Notebook-style charts:")
         for name in generated_charts:
