@@ -8,7 +8,8 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import inspect
-from typing import Dict, List
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -25,6 +26,12 @@ from dbo_optimizer import DBOOptimizer
 from dsade_optimizer import DSADE
 from dsade_awad_optimizer import DSADE_AWAD
 from macro_de_optimizer import MaCRO_DE
+from algorithm_acronym_list import (
+    list_available_optimizers,
+    optimizer_acronym,
+    optimizer_class,
+    resolve_optimizer_name,
+)
 
 plt.rcParams.update({
     "figure.facecolor": "white",
@@ -33,23 +40,19 @@ plt.rcParams.update({
 })
 
 DEFAULT_OPTIMIZERS = [
-    # "DSADE_AWAD",
-    # "DSADE",
     "MaCRO-DE",
-    "OriginalBRO",
-    "DBO",
-    "OriginalDE",
-    "OriginalDMOA",
-    "OriginalSHADE",
-    "OriginalGWO",
-    "OriginalMGO",
-    "OriginalPSO",
-    "OriginalWOA",
-    "OriginalHHO",
-    "OriginalMFO",
+    "DE",
+    "PSO",
+    "GWO",
+    "WOA",
+    "HHO",
+    "MFO",
+    "SHADE",
+    "JADE",
+    "SADE",
 ]
 DEFAULT_ESTIMATORS = ["knn","svm"]
-DEFAULT_TRANSFER_FUNCTIONS = ["vstf_01"]
+DEFAULT_TRANSFER_FUNCTIONS = ["vstf_01", "vstf_02", "vstf_03", "vstf_04", "sstf_01", "sstf_02", "sstf_03", "sstf_04"]
 
 TEST_datasets_clasific_14 = [
     "BreastCancer",
@@ -70,42 +73,71 @@ CHART_PALETTE = {
     "DSADE_AWAD": "#d1495b",
     "MaCRO-DE": "#3266ad",
     "DBO": "#00a6a6",
+    "GWO": "#e06c00",
     "OriginalGWO": "#e06c00",
+    "WOA": "#2a9d5c",
     "OriginalWOA": "#2a9d5c",
+    "CA": "#c44569",
     "OriginalCA": "#c44569",
+    "PSO": "#9b59b6",
     "OriginalPSO": "#9b59b6",
+    "DE": "#6a4c93",
     "OriginalDE": "#6a4c93",
     "JADE": "#2d6a4f",
     "SADE": "#f4a261",
+    "SHADE": "#264653",
     "OriginalSHADE": "#264653",
+    "FOX": "#1b9aaa",
     "OriginalFOX": "#1b9aaa",
+    "RIME": "#e76f51",
     "OriginalRIME": "#e76f51",
+    "BRO": "#577590",
     "OriginalBRO": "#577590",
+    "DMOA": "#90be6d",
     "OriginalDMOA": "#90be6d",
+    "MGO": "#f9844a",
     "OriginalMGO": "#f9844a",
+    "HHO": "#4d4d4d",
     "OriginalHHO": "#4d4d4d",
+    "GOA": "#8a5a44",
     "OriginalGOA": "#8a5a44",
+    "MFO": "#595959",
+    "OriginalMFO": "#595959",
 }
 CHART_LABELS = {
     "DSADE": "DSADE",
-    "DSADE_AWAD": "DSADE-AWAD",
+    "DSADE_AWAD": "DSADE_AWAD",
     "MaCRO-DE": "MaCRO-DE",
     "DBO": "DBO",
+    "GWO": "GWO",
     "OriginalGWO": "GWO",
+    "WOA": "WOA",
     "OriginalWOA": "WOA",
+    "CA": "CA",
     "OriginalCA": "CA",
+    "PSO": "PSO",
     "OriginalPSO": "PSO",
+    "DE": "DE",
     "OriginalDE": "DE",
     "JADE": "JADE",
     "SADE": "SADE",
+    "SHADE": "SHADE",
     "OriginalSHADE": "SHADE",
+    "FOX": "FOX",
     "OriginalFOX": "FOX",
+    "RIME": "RIME",
     "OriginalRIME": "RIME",
+    "BRO": "BRO",
     "OriginalBRO": "BRO",
-    "OriginalDMOA": "DMO",
+    "DMOA": "DMOA",
+    "OriginalDMOA": "DMOA",
+    "MGO": "MGO",
     "OriginalMGO": "MGO",
+    "HHO": "HHO",
     "OriginalHHO": "HHO",
+    "GOA": "GOA",
     "OriginalGOA": "GOA",
+    "MFO": "MFO",
     "OriginalMFO": "MFO",
 }
 SUPPORTED_ESTIMATORS = ["knn", "svm", "rf", "adaboost", "xgb", "tree", "ann"]
@@ -127,11 +159,19 @@ class Paths:
     res_dir: str
     cache_dir: str
 
+@dataclass
+class DatasetSpec:
+    name: str
+    source: str
+    path: Optional[Path] = None
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Framework de comparacion FS (multi-dataset, multi-run, cache)")
-    parser.add_argument("--exp-id", type=int, default=629, help="ID numerico del experimento")
-    parser.add_argument("--dataset-source", default="mafese", choices=["mafese"], help="Origen de datasets")
+    parser.add_argument("--exp-id", type=int, default=630, help="ID numerico del experimento")
+    parser.add_argument("--dataset-source", default="mafese", choices=["mafese", "codesmell"], help="Origen de datasets")
     parser.add_argument("--dataset-suite", default="test14", choices=["test14"], help="Suite de datasets")
+    parser.add_argument("--dataset-dir", default="Original", help="Directorio con CSVs de Code Smell")
+    parser.add_argument("--datasets", nargs="*", default=None, help="Datasets Code Smell a ejecutar (nombres con o sin .csv)")
     parser.add_argument("--optimizers", nargs="+", default=list(DEFAULT_OPTIMIZERS), help="Lista de optimizadores")
     parser.add_argument("--estimators", nargs="+", default=DEFAULT_ESTIMATORS, help="Lista de clasificadores")
     parser.add_argument("--transfer-functions", nargs="+", default=DEFAULT_TRANSFER_FUNCTIONS, help="Lista de transfer functions")
@@ -144,6 +184,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", default=".", help="Raiz para Figures/Results")
     parser.add_argument("--reuse-cache", action="store_true", help="Usar cache si existe")
     parser.add_argument("--figures-only", action="store_true", help="Regenerar solo graficas desde cache existente")
+    parser.add_argument("--list-optimizers", action="store_true", help="Listar optimizadores disponibles y terminar")
     parser.add_argument("--parallel", default="yes", choices=["yes", "no"], help="Ejecutar runs en paralelo: yes/no")
     parser.add_argument("--n-workers", type=int, default=12, help="Numero de procesos paralelos si --parallel yes")
     parser.add_argument("--dsade-beta-min", type=float, default=0.2)
@@ -153,7 +194,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def resolve_optimizers(args: argparse.Namespace) -> List[str]:
-    return list(dict.fromkeys(args.optimizers))
+    optimizers = []
+    for name in args.optimizers:
+        resolved_name = resolve_optimizer_name(name)
+        display_name = resolved_name if resolved_name == "OriginalDMOA" else optimizer_acronym(resolved_name)
+        if display_name not in optimizers:
+            optimizers.append(display_name)
+    return optimizers
+
+def print_available_optimizers() -> None:
+    print(list_available_optimizers())
 
 def validate_selection_options(args: argparse.Namespace) -> None:
     invalid_estimators = [e for e in args.estimators if e not in SUPPORTED_ESTIMATORS]
@@ -182,6 +232,116 @@ def resolve_mafese_dataset_names(args: argparse.Namespace) -> List[str]:
     if args.dataset_suite == "test14":
         return list(TEST_datasets_clasific_14)
     raise ValueError(f"Suite de datasets no soportada: {args.dataset_suite}")
+
+def resolve_codesmell_dataset_specs(args: argparse.Namespace) -> List[DatasetSpec]:
+    dataset_dir = Path(args.dataset_dir)
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Directorio Code Smell no encontrado: {dataset_dir}")
+    if not dataset_dir.is_dir():
+        raise NotADirectoryError(f"--dataset-dir debe ser un directorio: {dataset_dir}")
+
+    csv_files = sorted(dataset_dir.glob("*.csv"), key=lambda p: p.stem.lower())
+    if args.datasets is not None:
+        if not args.datasets:
+            raise ValueError("--datasets requiere al menos un nombre cuando se usa")
+        requested = list(dict.fromkeys(Path(name).stem for name in args.datasets))
+        by_name = {path.stem: path for path in csv_files}
+        missing = [name for name in requested if name not in by_name]
+        if missing:
+            available = ", ".join(sorted(by_name)) or "(ninguno)"
+            raise FileNotFoundError(
+                f"Datasets Code Smell no encontrados en {dataset_dir}: {missing}. "
+                f"Disponibles: {available}"
+            )
+        csv_files = [by_name[name] for name in requested]
+
+    if not csv_files:
+        raise FileNotFoundError(f"No se encontraron archivos CSV en {dataset_dir}")
+
+    return [DatasetSpec(name=path.stem, source="codesmell", path=path) for path in csv_files]
+
+def resolve_dataset_specs(args: argparse.Namespace) -> List[DatasetSpec]:
+    if args.dataset_source == "mafese":
+        if args.datasets is not None:
+            raise ValueError("--datasets solo esta soportado con --dataset-source codesmell")
+        return [DatasetSpec(name=name, source="mafese") for name in resolve_mafese_dataset_names(args)]
+    if args.dataset_source == "codesmell":
+        return resolve_codesmell_dataset_specs(args)
+    raise ValueError(f"Origen de datasets no soportado: {args.dataset_source}")
+
+def validate_xy(dataset_name: str, X: np.ndarray, y: np.ndarray) -> None:
+    if X.ndim != 2:
+        raise ValueError(f"Dataset '{dataset_name}': X debe ser una matriz 2D, shape={X.shape}")
+    if y.ndim != 1:
+        raise ValueError(f"Dataset '{dataset_name}': y debe ser un vector 1D, shape={y.shape}")
+    if X.shape[1] < 1:
+        raise ValueError(f"Dataset '{dataset_name}': X no tiene caracteristicas numericas")
+    if X.shape[0] != y.shape[0]:
+        raise ValueError(
+            f"Dataset '{dataset_name}': X e y tienen diferente numero de muestras "
+            f"({X.shape[0]} vs {y.shape[0]})"
+        )
+    if np.unique(y).size < 2:
+        raise ValueError(f"Dataset '{dataset_name}': y debe contener al menos dos clases")
+    if not np.isfinite(X).all():
+        raise ValueError(f"Dataset '{dataset_name}': X contiene NaN o infinitos despues de la limpieza")
+
+def load_mafese_dataset(dataset_name: str) -> Tuple[str, np.ndarray, np.ndarray]:
+    mafese_data = get_dataset(dataset_name)
+    if mafese_data is None:
+        raise ValueError(
+            f"mafese no pudo cargar '{dataset_name}'. "
+            "Verifica que exista en la suite 'test14' de mafese."
+        )
+    X = np.asarray(mafese_data.X, dtype=np.float64)
+    y = np.asarray(mafese_data.y).astype(np.int32)
+    validate_xy(dataset_name, X, y)
+    return dataset_name, X, y
+
+def load_codesmell_dataset(csv_path: Path) -> Tuple[str, np.ndarray, np.ndarray]:
+    dataset_name = csv_path.stem
+    df = pd.read_csv(csv_path)
+    is_columns = [col for col in df.columns if str(col).startswith("is_")]
+    if len(is_columns) != 1:
+        raise ValueError(
+            f"Dataset Code Smell '{dataset_name}' ({csv_path}): se esperaba exactamente una "
+            f"columna objetivo 'is_*', encontradas {len(is_columns)}: {is_columns}"
+        )
+
+    target_column = is_columns[0]
+    y = df[target_column].astype(int).to_numpy()
+    X = (
+        df.drop(columns=is_columns)
+        .select_dtypes(include=["number"])
+        .to_numpy(dtype=np.float64)
+    )
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    y = y.astype(np.int32)
+
+    validate_xy(dataset_name, X, y)
+    return dataset_name, X, y
+
+def load_dataset(spec: DatasetSpec) -> Tuple[str, np.ndarray, np.ndarray]:
+    if spec.source == "mafese":
+        return load_mafese_dataset(spec.name)
+    if spec.source == "codesmell":
+        if spec.path is None:
+            raise ValueError(f"Dataset Code Smell '{spec.name}' no tiene ruta CSV asociada")
+        return load_codesmell_dataset(spec.path)
+    raise ValueError(f"Origen de dataset no soportado: {spec.source}")
+
+def print_dataset_summary(args: argparse.Namespace, dataset_specs: List[DatasetSpec]) -> None:
+    print(f"Dataset source: {args.dataset_source}")
+    if args.dataset_source == "mafese":
+        print(f"Dataset suite: {args.dataset_suite} ({len(dataset_specs)} datasets)")
+        print(f"Datasets: {', '.join(spec.name for spec in dataset_specs)}")
+        return
+
+    print(f"Dataset directory: {args.dataset_dir}")
+    print(f"Datasets found: {len(dataset_specs)}")
+    print()
+    for spec in dataset_specs:
+        print(f"- {spec.name}")
 
 
 class SafeOriginalDMOA(OriginalDMOA):
@@ -239,8 +399,18 @@ class SafeOriginalDMOA(OriginalDMOA):
             self.pop[idx] = self.generate_agent(new_pos)
 
 
+def _instantiate_mealpy_optimizer(optimizer_cls, args: argparse.Namespace):
+    init_params = inspect.signature(optimizer_cls.__init__).parameters
+    kwargs = {}
+    if "epoch" in init_params:
+        kwargs["epoch"] = args.epochs
+    if "pop_size" in init_params:
+        kwargs["pop_size"] = args.pop_size
+    return optimizer_cls(**kwargs)
+
 def build_optimizer(name: str, args: argparse.Namespace):
-    if name.upper() in {"DSA-DE", "DSADE"}:
+    resolved_name = resolve_optimizer_name(name)
+    if resolved_name == "DSADE":
         return DSADE(
             epoch=args.epochs,
             pop_size=args.pop_size,
@@ -249,7 +419,7 @@ def build_optimizer(name: str, args: argparse.Namespace):
             pcr=args.dsade_pcr,
             mahalanobis_q=args.dsade_mahal_q,
         )
-    if name.upper() in {"DSADE_AWAD", "DSADE-AWAD"}:
+    if resolved_name == "DSADE_AWAD":
         return DSADE_AWAD(
             epoch=args.epochs,
             pop_size=args.pop_size,
@@ -258,7 +428,7 @@ def build_optimizer(name: str, args: argparse.Namespace):
             pcr=args.dsade_pcr,
             mahalanobis_q=args.dsade_mahal_q,
         )
-    if name.upper() in {"MACRO-DE", "MACRO_DE"}:
+    if resolved_name == "MaCRO-DE":
         return MaCRO_DE(
             epoch=args.epochs,
             pop_size=args.pop_size,
@@ -267,15 +437,20 @@ def build_optimizer(name: str, args: argparse.Namespace):
             pcr=args.dsade_pcr,
             mahalanobis_q=args.dsade_mahal_q,
         )
-    if name.upper() == "DBO":
+    if resolved_name == "DBO":
         return DBOOptimizer(epoch=args.epochs, pop_size=args.pop_size)
-    if name.upper() == "ORIGINALDMOA":
+
+    # Simple "DMOA" is resolved by algorithm_acronym_list to DevDMOA. This
+    # explicit OriginalDMOA path keeps the local numerical guard for users who
+    # intentionally request the original variant in binary FS experiments.
+    if resolved_name == "OriginalDMOA":
         return SafeOriginalDMOA(epoch=args.epochs, pop_size=args.pop_size)
-    return name
+
+    return _instantiate_mealpy_optimizer(optimizer_class(resolved_name), args)
 
 def build_cache_signature(args: argparse.Namespace) -> str:
     payload = {
-        "optimizers": list(args.optimizers),
+        "optimizers": [resolve_optimizer_name(name) for name in args.optimizers],
         "transfer_functions": list(args.transfer_functions),
         "runs": int(args.runs),
         "epochs": int(args.epochs),
@@ -293,7 +468,15 @@ def build_cache_signature(args: argparse.Namespace) -> str:
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
 
 def build_alg_label(method: str, transfer_function: str, classifier: str, show_tf: bool, show_cls: bool) -> str:
-    parts = [method.upper()]
+    parts = [optimizer_acronym(method).upper()]
+    if show_tf:
+        parts.append(str(transfer_function).upper())
+    if show_cls:
+        parts.append(classifier.upper())
+    return "_".join(parts)
+
+def build_legacy_alg_label(method: str, transfer_function: str, classifier: str, show_tf: bool, show_cls: bool) -> str:
+    parts = [resolve_optimizer_name(method).upper()]
     if show_tf:
         parts.append(str(transfer_function).upper())
     if show_cls:
@@ -608,8 +791,12 @@ def payload_completed_runs(payload: dict) -> int:
 
 def parse_result_label(label: str, args: argparse.Namespace) -> dict:
     label_upper = str(label).upper()
+    optimizer_candidates = []
+    for opt in args.optimizers:
+        resolved = resolve_optimizer_name(opt)
+        optimizer_candidates.extend([str(opt), optimizer_acronym(opt), resolved, optimizer_acronym(resolved)])
     ordered_opts = sorted(
-        list(dict.fromkeys([str(o) for o in args.optimizers] + ["DSA-DE", "DSADE", "DSADE_AWAD", "DSADE-AWAD", "MaCRO-DE", "MACRO-DE", "DBO"])),
+        list(dict.fromkeys(optimizer_candidates)),
         key=len,
         reverse=True,
     )
@@ -622,6 +809,10 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
         str(label),
     )
     rest = label_upper[len(method):].lstrip("_") if method != str(label) else ""
+    try:
+        method = optimizer_acronym(resolve_optimizer_name(method))
+    except ValueError:
+        method = optimizer_acronym(method)
 
     estimator = ""
     for est in sorted([str(e) for e in args.estimators], key=len, reverse=True):
@@ -647,7 +838,7 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
 
 
 def optimizer_display_label(name: str) -> str:
-    return CHART_LABELS.get(str(name), str(name))
+    return CHART_LABELS.get(str(name), optimizer_acronym(str(name)))
 
 def optimizer_order_key(name: str) -> tuple:
     label = optimizer_display_label(name).upper()
@@ -713,7 +904,7 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.Data
             color_map[group] = CHART_PALETTE[method]
         else:
             color_map[group] = colors[i]
-        base_label = CHART_LABELS.get(method, method)
+        base_label = optimizer_display_label(method)
         label_map[group] = f"{base_label} {tf.upper()}" if tf and method in variant_methods else base_label
 
     return plot_df, opts, color_map, label_map
@@ -830,10 +1021,6 @@ def generate_summary_dataframe(results_struct: Dict[str, Dict], args: argparse.N
                 }
             )
     return pd.DataFrame(rows)
-
-
-def _legend_patches(opts: List[str]) -> List[mpatches.Patch]:
-    return [mpatches.Patch(color=CHART_PALETTE.get(o, "#888"), label=CHART_LABELS.get(o, o)) for o in opts]
 
 
 def _plot_legend_patches(opts: List[str], color_map: Dict[str, str], label_map: Dict[str, str]) -> List[mpatches.Patch]:
@@ -1639,6 +1826,10 @@ def main():
     args = parse_args()
     logging.disable(logging.INFO)
     logging.getLogger("mealpy").setLevel(logging.WARNING)
+    if args.list_optimizers:
+        print_available_optimizers()
+        return
+
     validate_selection_options(args)
     args.optimizers = resolve_optimizers(args)
     if args.runs < 1:
@@ -1651,12 +1842,11 @@ def main():
     show_tf = len(args.transfer_functions) > 1
     show_cls = len(args.estimators) > 1
 
-    dataset_names = resolve_mafese_dataset_names(args)
+    dataset_specs = resolve_dataset_specs(args)
+    dataset_names = [spec.name for spec in dataset_specs]
 
     print(f"Experiment: {paths.exp_tag}")
-    print(f"Dataset source: {args.dataset_source}")
-    print(f"Dataset suite: {args.dataset_suite} ({len(dataset_names)} datasets)")
-    print(f"Datasets: {', '.join(dataset_names)}")
+    print_dataset_summary(args, dataset_specs)
     print(f"Cache signature: {cache_sig}")
 
     if args.figures_only:
@@ -1672,16 +1862,9 @@ def main():
         return
 
     results_struct = {}
-    for dataset_name in dataset_names:
+    for spec in dataset_specs:
+        dataset_name, X, y = load_dataset(spec)
         results_struct[dataset_name] = {}
-        mafese_data = get_dataset(dataset_name)
-        if mafese_data is None:
-            raise ValueError(
-                f"mafese no pudo cargar '{dataset_name}'. "
-                "Verifica que exista en la suite 'test14' de mafese."
-            )
-        X = np.asarray(mafese_data.X, dtype=np.float64)
-        y = np.asarray(mafese_data.y).astype(np.int32)
         data = Data(X, y)
         try:
             data.split_train_test(test_size=args.test_size, random_state=args.random_state, stratify=y)
@@ -1712,6 +1895,9 @@ def main():
             for method in args.optimizers:
                 for tf in args.transfer_functions:
                     label = build_alg_label(method, tf, estimator, show_tf, show_cls)
+                    legacy_label = build_legacy_alg_label(method, tf, estimator, show_tf, show_cls)
+                    if label not in cls_payload and legacy_label in cls_payload:
+                        cls_payload[label] = cls_payload.pop(legacy_label)
                     prev = cls_payload.get(label, {})
                     acc_runs = list(np.asarray(prev.get("AccRuns", []), dtype=float))
                     ps_runs = list(np.asarray(prev.get("PSRuns", []), dtype=float))
