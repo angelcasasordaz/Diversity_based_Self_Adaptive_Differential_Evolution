@@ -88,10 +88,22 @@ RUNS = 1
 EPOCHS = 5
 POP_SIZE = 50
 
+CHART_CMAP = "tab20"
+
+# Qualitative:
+# "tab10"
+# "tab20"
+# "Set1"
+# "Set2"
+# "Set3"
+# "Dark2"
+# "Paired"
+# "Accent"
+
 PARALLEL = True
 N_WORKERS = max(1, (os.cpu_count() or 1) - 1)
 
-EXP_ID = 626
+EXP_ID = 627
 TEST_SIZE = 0.2
 RANDOM_STATE = 2
 SEED_BASE = 1234
@@ -468,7 +480,7 @@ def build_legacy_alg_label(method: str, transfer_function: str, classifier: str,
     return "_".join(parts)
 
 def muted_color_palette(n: int) -> np.ndarray:
-    cmap = plt.get_cmap("Paired", max(n, 1))
+    cmap = plt.get_cmap(CHART_CMAP, max(n, 1))
     return cmap(np.arange(max(n, 1)))[:, :3]
 
 
