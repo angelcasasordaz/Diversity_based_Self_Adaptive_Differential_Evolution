@@ -58,19 +58,19 @@ MAFESE_DATASET_SUITE = "test14"
 
 OPTIMIZERS = [
     # "MaCRO-DE",
-    "DSADE",
-    "DE",
-    "JADE",
-    "SHADE",
-    "PSO",
-    "WOA",
-    "GWO",
-    "HHO",
-    "GOA",
-    "SA",
-    "BRO",
-    "RUN",
-    "WOA",
+    # "DSADE",
+    # "DE",
+    # "JADE",
+    # "SHADE",
+    # "PSO",
+    # "WOA",
+    # "GWO",
+    # "HHO",
+    # "GOA",
+    # "SA",
+    # "BRO",
+    # "RUN",
+    # "WOA",
     "FOX",
 ]
 
@@ -84,12 +84,12 @@ TRANSFER_FUNCTIONS = [
     "vstf_01",
 ]
 
-RUNS = 3
-EPOCHS = 10
+RUNS = 1
+EPOCHS = 5
 POP_SIZE = 50
 
 PARALLEL = True
-N_WORKERS = 12
+N_WORKERS = max(1, (os.cpu_count() or 1) - 1)
 
 EXP_ID = 626
 TEST_SIZE = 0.2
@@ -1627,13 +1627,16 @@ def generate_seven_global_charts(
     #         tick.set_color("red")
     #         tick.set_fontweight("bold")
     macro_idx = next(
-        i for i, opt in enumerate(opts)
-        if str(method_by_group.get(opt)).upper() == "MACRO-DE"
+        (
+            i for i, opt in enumerate(opts)
+            if str(method_by_group.get(opt)).upper() == "MACRO-DE"
+        ),
+        None,
     )
 
-    rect = plt.Rectangle((-0.5, macro_idx - 0.5), len(datasets),1, fill=False, edgecolor="black", linewidth=2.5, zorder=100)
-
-    ax.add_patch(rect)
+    if macro_idx is not None:
+        rect = plt.Rectangle((-0.5, macro_idx - 0.5), len(datasets),1, fill=False, edgecolor="black", linewidth=2.5, zorder=100)
+        ax.add_patch(rect)
     ax.set_xlabel("Dataset")
     ax.set_ylabel("Metaheuristics")
     for i in range(len(opts)):
