@@ -6,7 +6,15 @@ from functools import lru_cache
 import mealpy
 
 
-CUSTOM_OPTIMIZERS = ("MaCRO-DE", "DSADE", "DSADE_AWAD", "DBO")
+CUSTOM_OPTIMIZERS = (
+    "MaCRO-DE",
+    "DSADE",
+    "DSADE_AWAD",
+    "DBO",
+    "DE-AWAD",
+    "DE-DiversitySelection",
+    "DE-Mahalanobis",
+)
 CUSTOM_OPTIMIZER_ALIASES = {
     "MACRO-DE": "MaCRO-DE",
     "MACRO_DE": "MaCRO-DE",
@@ -16,6 +24,12 @@ CUSTOM_OPTIMIZER_ALIASES = {
     "DSADE_AWAD": "DSADE_AWAD",
     "DSADE-AWAD": "DSADE_AWAD",
     "DBO": "DBO",
+    "DE-AWAD": "DE-AWAD",
+    "DE_AWAD": "DE-AWAD",
+    "DE-DIVERSITYSELECTION": "DE-DiversitySelection",
+    "DE_DIVERSITYSELECTION": "DE-DiversitySelection",
+    "DE-MAHALANOBIS": "DE-Mahalanobis",
+    "DE_MAHALANOBIS": "DE-Mahalanobis",
 }
 
 

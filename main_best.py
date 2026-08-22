@@ -23,6 +23,9 @@ from sklearn.base import clone
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from dbo_optimizer import DBOOptimizer
+from de_awad_optimizer import DE_AWAD
+from de_diversity_selection_optimizer import DE_DiversitySelection
+from de_mahalanobis_optimizer import DE_Mahalanobis
 from dsade_optimizer import DSADE
 from dsade_awad_optimizer import DSADE_AWAD
 from macro_de_optimizer import MaCRO_DE
@@ -41,6 +44,12 @@ DATASET_SOURCE = "codesmell"
 # Options:
 # "codesmell"
 # "mafese"
+
+EXPERIMENT_MODE = "full"
+# Options:
+# "full"
+# "ablation"
+# "sensitivity"
 
 CODE_SMELL_DATASET_DIR = "Original"
 
@@ -64,18 +73,26 @@ OPTIMIZERS = [
     "DE-DiversitySelection",
     "DE-Mahalanobis",
     "DSA-DE",
-    "JADE",
-    "SHADE",
-    "PSO",
-    "WOA",
-    "GWO",
-    "HHO",
-    "GOA",
-    "SA",
-    "BRO",
-    "RUN",
-    "WOA",
-    "FOX",
+    # "JADE",
+    # "SHADE",
+    # "PSO",
+    # "WOA",
+    # "GWO",
+    # "HHO",
+    # "GOA",
+    # "SA",
+    # "BRO",
+    # "RUN",
+    # "WOA",
+    # "FOX",
+]
+
+ABLATION_OPTIMIZERS = [
+    "DE",
+    "DE-AWAD",
+    "DE-DiversitySelection",
+    "DE-Mahalanobis",
+    "DSA-DE",
 ]
 
 ESTIMATORS = [
@@ -88,11 +105,11 @@ TRANSFER_FUNCTIONS = [
     "vstf_01",
 ]
 
-RUNS = 1
-EPOCHS = 5
+RUNS = 15
+EPOCHS = 50
 POP_SIZE = 50
 
-CHART_CMAP = "tab20"
+CHART_CMAP = "Dark2"
 
 # Qualitative:
 # "tab10"
@@ -119,6 +136,9 @@ DSADE_BETA_MIN = 0.2
 DSADE_BETA_MAX = 0.8
 DSADE_PCR = 0.2
 DSADE_MAHAL_Q = 0.68
+
+SENSITIVITY_PARAMETER = "mahalanobis_q"
+SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
 
 plt.rcParams.update({
     "figure.facecolor": "white",
@@ -155,6 +175,7 @@ SUPPORTED_TRANSFER_FUNCTIONS = [
 @dataclass
 class Paths:
     exp_tag: str
+    mode: str
     fig_dir: str
     res_dir: str
     cache_dir: str
@@ -167,6 +188,7 @@ class DatasetSpec:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Feature-selection comparison framework with cache and multi-run support")
+    parser.add_argument("--experiment-mode", default=EXPERIMENT_MODE, choices=["full", "ablation", "sensitivity"])
     parser.add_argument("--exp-id", type=int, default=EXP_ID, help="Numeric experiment ID")
     parser.add_argument("--dataset-source", default=DATASET_SOURCE, choices=["mafese", "codesmell"], help="Dataset source")
     parser.add_argument("--dataset-suite", default=MAFESE_DATASET_SUITE, choices=["test14"], help="MAFESE dataset suite")
@@ -191,6 +213,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dsade-beta-max", type=float, default=DSADE_BETA_MAX)
     parser.add_argument("--dsade-pcr", type=float, default=DSADE_PCR)
     parser.add_argument("--dsade-mahal-q", type=float, default=DSADE_MAHAL_Q)
+    parser.add_argument("--sensitivity-parameter", default=SENSITIVITY_PARAMETER)
+    parser.add_argument("--sensitivity-values", nargs="+", type=float, default=list(SENSITIVITY_VALUES))
     return parser.parse_args()
 
 def resolve_optimizers(args: argparse.Namespace) -> List[str]:
@@ -204,6 +228,53 @@ def resolve_optimizers(args: argparse.Namespace) -> List[str]:
 
 def print_available_optimizers() -> None:
     print(list_available_optimizers())
+
+def apply_experiment_mode(args: argparse.Namespace) -> None:
+    args.experiment_mode = str(args.experiment_mode).lower()
+    args.sensitivity_parameter = str(args.sensitivity_parameter).lower()
+    if args.experiment_mode == "ablation":
+        args.optimizers = list(ABLATION_OPTIMIZERS)
+    elif args.experiment_mode == "sensitivity":
+        valid_parameters = {"beta_min", "beta_max", "pcr", "mahalanobis_q", "pop_size", "epochs"}
+        if args.sensitivity_parameter not in valid_parameters:
+            raise ValueError(
+                f"Unsupported sensitivity parameter: {args.sensitivity_parameter}. "
+                f"Valid values: {', '.join(sorted(valid_parameters))}"
+            )
+        if not args.sensitivity_values:
+            raise ValueError("Sensitivity mode requires at least one sensitivity value")
+        args.optimizers = ["DSA-DE"]
+
+def apply_sensitivity_value(args: argparse.Namespace, value: float) -> None:
+    parameter = args.sensitivity_parameter
+    if parameter == "beta_min":
+        args.dsade_beta_min = float(value)
+    elif parameter == "beta_max":
+        args.dsade_beta_max = float(value)
+    elif parameter == "pcr":
+        args.dsade_pcr = float(value)
+    elif parameter == "mahalanobis_q":
+        args.dsade_mahal_q = float(value)
+    elif parameter == "pop_size":
+        args.pop_size = int(value)
+    elif parameter == "epochs":
+        args.epochs = int(value)
+
+def sensitivity_value_token(value: float) -> str:
+    return str(value).replace("-", "m").replace(".", "p")
+
+def sensitivity_label_suffix(args: argparse.Namespace, value: float) -> str:
+    return f"SENS_{args.sensitivity_parameter}_{sensitivity_value_token(value)}"
+
+def experiment_output_prefix(args: argparse.Namespace) -> str:
+    if args.experiment_mode == "full":
+        return ""
+    return f"{args.experiment_mode.capitalize()}_"
+
+def experiment_variants(args: argparse.Namespace) -> List[Optional[float]]:
+    if args.experiment_mode == "sensitivity":
+        return [float(value) for value in args.sensitivity_values]
+    return [None]
 
 def validate_selection_options(args: argparse.Namespace) -> None:
     invalid_estimators = [e for e in args.estimators if e not in SUPPORTED_ESTIMATORS]
@@ -221,12 +292,12 @@ def validate_selection_options(args: argparse.Namespace) -> None:
 
 def make_paths(args: argparse.Namespace) -> Paths:
     exp_tag = f"EXP{args.exp_id:03d}"
-    fig_dir = os.path.join(args.output_root, "Figures", exp_tag)
-    res_dir = os.path.join(args.output_root, "Results", exp_tag)
+    fig_dir = os.path.join(args.output_root, "Figures", exp_tag, args.experiment_mode)
+    res_dir = os.path.join(args.output_root, "Results", exp_tag, args.experiment_mode)
     cache_dir = os.path.join(res_dir, "cache")
     for p in (fig_dir, res_dir, cache_dir):
         os.makedirs(p, exist_ok=True)
-    return Paths(exp_tag=exp_tag, fig_dir=fig_dir, res_dir=res_dir, cache_dir=cache_dir)
+    return Paths(exp_tag=exp_tag, mode=args.experiment_mode, fig_dir=fig_dir, res_dir=res_dir, cache_dir=cache_dir)
 
 def resolve_mafese_dataset_names(args: argparse.Namespace) -> List[str]:
     if args.dataset_suite == "test14":
@@ -428,6 +499,22 @@ def build_optimizer(name: str, args: argparse.Namespace):
             pcr=args.dsade_pcr,
             mahalanobis_q=args.dsade_mahal_q,
         )
+    if resolved_name == "DE-AWAD":
+        return DE_AWAD(
+            epoch=args.epochs,
+            pop_size=args.pop_size,
+            beta_min=args.dsade_beta_min,
+            beta_max=args.dsade_beta_max,
+            pcr=args.dsade_pcr,
+        )
+    if resolved_name == "DE-DiversitySelection":
+        return DE_DiversitySelection(epoch=args.epochs, pop_size=args.pop_size)
+    if resolved_name == "DE-Mahalanobis":
+        return DE_Mahalanobis(
+            epoch=args.epochs,
+            pop_size=args.pop_size,
+            mahalanobis_q=args.dsade_mahal_q,
+        )
     if resolved_name == "MaCRO-DE":
         return MaCRO_DE(
             epoch=args.epochs,
@@ -450,6 +537,7 @@ def build_optimizer(name: str, args: argparse.Namespace):
 
 def build_cache_signature(args: argparse.Namespace) -> str:
     payload = {
+        "experiment_mode": str(args.experiment_mode),
         "optimizers": [resolve_optimizer_name(name) for name in args.optimizers],
         "transfer_functions": list(args.transfer_functions),
         "runs": int(args.runs),
@@ -464,19 +552,39 @@ def build_cache_signature(args: argparse.Namespace) -> str:
         "dsade_beta_max": float(args.dsade_beta_max),
         "dsade_pcr": float(args.dsade_pcr),
         "dsade_mahal_q": float(args.dsade_mahal_q),
+        "sensitivity_parameter": str(args.sensitivity_parameter),
+        "sensitivity_values": [float(value) for value in args.sensitivity_values],
     }
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
 
-def build_alg_label(method: str, transfer_function: str, classifier: str, show_tf: bool, show_cls: bool) -> str:
+def build_alg_label(
+    method: str,
+    transfer_function: str,
+    classifier: str,
+    show_tf: bool,
+    show_cls: bool,
+    variant_suffix: Optional[str] = None,
+) -> str:
     parts = [optimizer_acronym(method).upper()]
+    if variant_suffix:
+        parts.append(variant_suffix.upper())
     if show_tf:
         parts.append(str(transfer_function).upper())
     if show_cls:
         parts.append(classifier.upper())
     return "_".join(parts)
 
-def build_legacy_alg_label(method: str, transfer_function: str, classifier: str, show_tf: bool, show_cls: bool) -> str:
+def build_legacy_alg_label(
+    method: str,
+    transfer_function: str,
+    classifier: str,
+    show_tf: bool,
+    show_cls: bool,
+    variant_suffix: Optional[str] = None,
+) -> str:
     parts = [resolve_optimizer_name(method).upper()]
+    if variant_suffix:
+        parts.append(variant_suffix.upper())
     if show_tf:
         parts.append(str(transfer_function).upper())
     if show_cls:
@@ -789,6 +897,8 @@ def payload_completed_runs(payload: dict) -> int:
 
 def parse_result_label(label: str, args: argparse.Namespace) -> dict:
     label_upper = str(label).upper()
+    sensitivity_parameter = ""
+    sensitivity_value = np.nan
     optimizer_candidates = []
     for opt in args.optimizers:
         resolved = resolve_optimizer_name(opt)
@@ -812,6 +922,20 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
     except ValueError:
         method = optimizer_acronym(method)
 
+    if rest.startswith("SENS_"):
+        sens_tail = rest[len("SENS_"):]
+        for parameter in ("MAHALANOBIS_Q", "BETA_MIN", "BETA_MAX", "POP_SIZE", "EPOCHS", "PCR"):
+            prefix = f"{parameter}_"
+            if sens_tail.startswith(prefix):
+                value_token, _, remainder = sens_tail[len(prefix):].partition("_")
+                try:
+                    sensitivity_value = float(value_token.replace("M", "-").replace("P", "."))
+                except ValueError:
+                    sensitivity_value = np.nan
+                sensitivity_parameter = parameter.lower()
+                rest = remainder
+                break
+
     estimator = ""
     for est in sorted([str(e) for e in args.estimators], key=len, reverse=True):
         est_upper = est.upper()
@@ -832,7 +956,13 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
             transfer_function = tf.lower()
             break
 
-    return {"method": method, "transfer_function": transfer_function, "estimator": estimator}
+    return {
+        "method": method,
+        "transfer_function": transfer_function,
+        "estimator": estimator,
+        "sensitivity_parameter": sensitivity_parameter,
+        "sensitivity_value": sensitivity_value,
+    }
 
 
 def optimizer_display_label(name: str) -> str:
@@ -843,6 +973,30 @@ def is_dsade_method(name: str) -> bool:
 
 def is_exact_dsade_method(name: str) -> bool:
     return str(name).upper() in {"DSA-DE", "DSADE"}
+
+def is_dsade_plot_group(opt: str, method_by_group: Optional[Dict[str, str]] = None) -> bool:
+    method = method_by_group.get(opt, opt) if method_by_group else opt
+    return is_exact_dsade_method(method)
+
+def apply_dsade_patch_highlight(patch, opt: str, method_by_group: Optional[Dict[str, str]] = None, linewidth: float = 2.4) -> None:
+    if is_dsade_plot_group(opt, method_by_group):
+        patch.set_edgecolor("black")
+        patch.set_linewidth(linewidth)
+
+def add_dsade_line_highlight(ax, x, y, color, is_dsade: bool, linewidth: float = 2.4, **plot_kwargs):
+    if is_dsade:
+        bg_kwargs = {k: v for k, v in plot_kwargs.items() if k != "label"}
+        bg_zorder = bg_kwargs.pop("zorder", plot_kwargs.get("zorder", 3))
+        ax.plot(x, y, color="black", linewidth=linewidth + 3.0, zorder=bg_zorder - 0.1, **bg_kwargs)
+    return ax.plot(x, y, color=color, linewidth=linewidth, **plot_kwargs)
+
+def add_heatmap_column_outline(ax, column_idx: int, n_rows: int, linewidth: float = 2.6) -> None:
+    rect = plt.Rectangle((column_idx - 0.5, -0.5), 1, n_rows, fill=False, edgecolor="black", linewidth=linewidth, zorder=100)
+    ax.add_patch(rect)
+
+def add_heatmap_row_outline(ax, row_idx: int, n_cols: int, linewidth: float = 2.6) -> None:
+    rect = plt.Rectangle((-0.5, row_idx - 0.5), n_cols, 1, fill=False, edgecolor="black", linewidth=linewidth, zorder=100)
+    ax.add_patch(rect)
 
 def optimizer_order_from_config(opt_order: List[str]) -> List[str]:
     ordered = []
@@ -908,8 +1062,9 @@ def plot_bar(values: np.ndarray, labels: List[str], ylabel: str, title: str, out
     colors = muted_color_palette(len(labels))
     plt.figure(figsize=(10, 5), facecolor="white")
     bars = plt.bar(np.arange(len(labels)), values)
-    for i, b in enumerate(bars):
+    for i, (b, label) in enumerate(zip(bars, labels)):
         b.set_color(colors[i])
+        apply_dsade_patch_highlight(b, label)
     plt.xticks(np.arange(len(labels)), labels, rotation=45, ha="right")
     plt.ylabel(ylabel)
     plt.grid(axis="y", alpha=0.3)
@@ -927,7 +1082,18 @@ def plot_lines(curves_by_label: Dict[str, np.ndarray], title: str, ylabel: str, 
         curve = curves_by_label[label]
         if curve.size == 0:
             continue
-        plt.plot(curve, linestyle=styles[i % len(styles)], color=colors[i], linewidth=2.4, label=label)
+        ax = plt.gca()
+        is_dsade = is_exact_dsade_method(label)
+        add_dsade_line_highlight(
+            ax,
+            np.arange(curve.size),
+            curve,
+            colors[i],
+            is_dsade,
+            linewidth=2.4,
+            linestyle=styles[i % len(styles)],
+            label=label,
+        )
     plt.xlabel("Iteration")
     plt.ylabel(ylabel)
     plt.grid(alpha=0.3)
@@ -1028,8 +1194,13 @@ def export_statistical_excel(
         "Time": ("TimeRuns", "min"),
     }
     stats = ["Best", "Worst", "Mean", "Std"]
-    optimizers = optimizer_order_from_config(optimizer_order)
-    index = pd.MultiIndex.from_product([optimizers, stats], names=["Optimizer", "Statistic"])
+    if args.experiment_mode == "sensitivity":
+        optimizers = [f"{args.sensitivity_parameter}={float(value):g}" for value in args.sensitivity_values]
+        index_name = "SensitivityValue"
+    else:
+        optimizers = optimizer_order_from_config(optimizer_order)
+        index_name = "Optimizer"
+    index = pd.MultiIndex.from_product([optimizers, stats], names=[index_name, "Statistic"])
     sheets = {
         sheet_name: pd.DataFrame(np.nan, index=index, columns=dataset_names)
         for sheet_name in metrics
@@ -1043,7 +1214,13 @@ def export_statistical_excel(
         }
         for label, row in alg_data.items():
             parsed = parse_result_label(label, args)
-            optimizer = optimizer_acronym(parsed["method"])
+            if args.experiment_mode == "sensitivity":
+                parsed_value = parsed.get("sensitivity_value", np.nan)
+                if not np.isfinite(parsed_value):
+                    continue
+                optimizer = f"{args.sensitivity_parameter}={float(parsed_value):g}"
+            else:
+                optimizer = optimizer_acronym(parsed["method"])
             if optimizer not in set(optimizers):
                 continue
             for sheet_name, (run_key, _) in metrics.items():
@@ -1080,6 +1257,8 @@ def generate_summary_dataframe(results_struct: Dict[str, Dict], args: argparse.N
                     "Estimator": estimator,
                     "Optimizer": method,
                     "TransferFunction": parsed["transfer_function"],
+                    "SensitivityParameter": parsed.get("sensitivity_parameter", ""),
+                    "SensitivityValue": parsed.get("sensitivity_value", np.nan),
                     "Configuracion": label,
                     "F1_test": float(row.get("F1Mean", np.nan)),
                     "AS_test": float(row.get("AccMean", np.nan)) / 100.0,
@@ -1108,6 +1287,172 @@ def _save_chart(fig, out_dir: str, filename: str):
     _force_white_background(fig)
     fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
+
+def generate_ablation_main_figure(df: pd.DataFrame, out_dir: str, opt_order: List[str]) -> Optional[str]:
+    if df.empty:
+        return None
+
+    plot_df = df.copy()
+    plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
+    plot_df, opts, color_map, label_map = prepare_plot_groups(plot_df, opt_order)
+    if not opts:
+        return None
+
+    estimators = [est for est in ESTIMATORS if est in set(plot_df["Estimator"])]
+    estimators += sorted(est for est in plot_df["Estimator"].dropna().unique() if est not in set(estimators))
+    if not estimators:
+        return None
+
+    display_labels = dict(label_map)
+    if "DSADE" in display_labels:
+        display_labels["DSADE"] = "DSA-DE"
+    grouped = plot_df.groupby(["Estimator", "PlotGroup"])[["F1_test", "N_Features_Selected"]].mean()
+    n_cols = min(3, len(estimators))
+    n_rows = int(np.ceil(len(estimators) / n_cols))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(max(13, 4.8 * n_cols), max(5, 4.3 * n_rows)),
+        squeeze=False,
+        facecolor="white",
+    )
+    x = np.arange(len(opts))
+    colors = [color_map.get(opt, "#888888") for opt in opts]
+
+    for idx, estimator in enumerate(estimators):
+        ax1 = axes[idx // n_cols, idx % n_cols]
+        f1_vals = [
+            float(grouped.loc[(estimator, opt), "F1_test"])
+            if (estimator, opt) in grouped.index
+            else np.nan
+            for opt in opts
+        ]
+        feat_vals = [
+            float(grouped.loc[(estimator, opt), "N_Features_Selected"])
+            if (estimator, opt) in grouped.index
+            else np.nan
+            for opt in opts
+        ]
+        bars = ax1.bar(x, f1_vals, color=colors, width=0.68, alpha=0.9, edgecolor="black", linewidth=2.3)
+        for bar, value, opt in zip(bars, f1_vals, opts):
+            apply_dsade_patch_highlight(bar, opt, method_by_group=None, linewidth=2.6)
+            if np.isfinite(value):
+                ax1.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    value + 0.006,
+                    f"{value:.3f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    rotation=90,
+                )
+        ax2 = ax1.twinx()
+        ax2.plot(
+            x,
+            feat_vals,
+            color="#222222",
+            marker="o",
+            markeredgecolor="black",
+            markeredgewidth=1.8,
+            linewidth=2.6,
+            label="Selected features",
+        )
+        for x_idx, opt in enumerate(opts):
+            if is_dsade_plot_group(opt) and np.isfinite(feat_vals[x_idx]):
+                ax2.scatter(x_idx, feat_vals[x_idx], s=95, facecolor="#222222", edgecolor="black", linewidth=2.0, zorder=5)
+        ax1.set_title(estimator.upper(), fontsize=11, fontweight="bold")
+        ax1.set_ylabel("Mean F1-score")
+        ax2.set_ylabel("Mean selected features")
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([display_labels.get(opt, opt) for opt in opts], rotation=35, ha="right")
+        ax1.set_ylim(0.0, 1.05)
+        ax1.grid(axis="y", alpha=0.25)
+
+    for idx in range(len(estimators), n_rows * n_cols):
+        axes[idx // n_cols, idx % n_cols].axis("off")
+
+    fig.suptitle("Ablation Study: F1-score and Selected Features", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    filename = "ablation_main_f1_features.png"
+    _save_chart(fig, out_dir, filename)
+    return filename
+
+def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argparse.Namespace) -> Optional[str]:
+    if df.empty:
+        return None
+
+    plot_df = df.copy()
+    plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
+    plot_df = plot_df[np.isfinite(pd.to_numeric(plot_df["SensitivityValue"], errors="coerce"))].copy()
+    if plot_df.empty:
+        return None
+
+    plot_df["SensitivityValue"] = plot_df["SensitivityValue"].astype(float)
+    value_order = [float(value) for value in args.sensitivity_values]
+    estimators = [est for est in ESTIMATORS if est in set(plot_df["Estimator"])]
+    estimators += sorted(est for est in plot_df["Estimator"].dropna().unique() if est not in set(estimators))
+    if not estimators:
+        return None
+
+    grouped = plot_df.groupby(["Estimator", "SensitivityValue"])[["F1_test", "N_Features_Selected"]].mean()
+    n_cols = min(3, len(estimators))
+    n_rows = int(np.ceil(len(estimators) / n_cols))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(max(13, 4.8 * n_cols), max(5, 4.3 * n_rows)),
+        squeeze=False,
+        facecolor="white",
+    )
+    x = np.arange(len(value_order))
+    colors = muted_color_palette(len(value_order))
+    xlabels = [f"{value:g}" for value in value_order]
+
+    for idx, estimator in enumerate(estimators):
+        ax1 = axes[idx // n_cols, idx % n_cols]
+        f1_vals = [
+            float(grouped.loc[(estimator, value), "F1_test"])
+            if (estimator, value) in grouped.index
+            else np.nan
+            for value in value_order
+        ]
+        feat_vals = [
+            float(grouped.loc[(estimator, value), "N_Features_Selected"])
+            if (estimator, value) in grouped.index
+            else np.nan
+            for value in value_order
+        ]
+        bars = ax1.bar(x, f1_vals, color=colors, width=0.68, alpha=0.9)
+        for bar, value in zip(bars, f1_vals):
+            if np.isfinite(value):
+                ax1.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    value + 0.006,
+                    f"{value:.3f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    rotation=90,
+                )
+        ax2 = ax1.twinx()
+        ax2.plot(x, feat_vals, color="#222222", marker="o", linewidth=2.0, label="Selected features")
+        ax1.set_title(estimator.upper(), fontsize=11, fontweight="bold")
+        ax1.set_ylabel("Mean F1-score")
+        ax2.set_ylabel("Mean selected features")
+        ax1.set_xlabel(args.sensitivity_parameter)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(xlabels, rotation=0)
+        ax1.set_ylim(0.0, 1.05)
+        ax1.grid(axis="y", alpha=0.25)
+
+    for idx in range(len(estimators), n_rows * n_cols):
+        axes[idx // n_cols, idx % n_cols].axis("off")
+
+    fig.suptitle(f"Sensitivity Study: DSA-DE {args.sensitivity_parameter}", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    filename = f"sensitivity_{args.sensitivity_parameter}_f1_features.png"
+    _save_chart(fig, out_dir, filename)
+    return filename
 
 
 def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str]):
@@ -1157,8 +1502,8 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
                 else np.nan
                 for opt in opts
             ]
-            edges = ["black" if is_dsade_method(method_by_group.get(opt)) else "none" for opt in opts]
-            widths = [1.8 if is_dsade_method(method_by_group.get(opt)) else 0.0 for opt in opts]
+            edges = ["black" if is_dsade_plot_group(opt, method_by_group) else "none" for opt in opts]
+            widths = [2.2 if is_dsade_plot_group(opt, method_by_group) else 0.0 for opt in opts]
             bars = ax.bar(x, vals, color=colors, edgecolor=edges, linewidth=widths, width=0.68)
 
             mean_val = float(np.nanmean(vals)) if np.isfinite(vals).any() else np.nan
@@ -1240,15 +1585,15 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     for i, opt in enumerate(opts):
         offset = (i - n / 2 + 0.5) * w
         vals = [means.loc[opt, m] for m in metrics]
-        is_dsade = is_dsade_method(method_by_group.get(opt))
+        is_dsade = is_dsade_plot_group(opt, method_by_group)
         bars = ax.bar(
             x + offset,
             vals,
             w,
             color=color_map.get(opt, "#888"),
             alpha=0.95 if is_dsade else 0.70,
-            linewidth=2 if is_dsade else 0.5,
-            edgecolor=color_map.get(opt, "#888"),
+            linewidth=2.4 if is_dsade else 0.5,
+            edgecolor="black" if is_dsade else color_map.get(opt, "#888"),
         )
         if is_dsade:
             for bar, v in zip(bars, vals):
@@ -1270,7 +1615,16 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     w = 0.75 / max(1, len(opts))
     for i, opt in enumerate(opts):
         vals = [pivot_smell.loc[s, opt] if (s in pivot_smell.index and opt in pivot_smell.columns) else np.nan for s in smells]
-        ax.bar(x + (i - len(opts) / 2 + 0.5) * w, vals, w, color=color_map.get(opt, "#888"), alpha=0.85, label=label_map.get(opt, opt))
+        bars = ax.bar(
+            x + (i - len(opts) / 2 + 0.5) * w,
+            vals,
+            w,
+            color=color_map.get(opt, "#888"),
+            alpha=0.85,
+            label=label_map.get(opt, opt),
+            edgecolor="black" if is_dsade_plot_group(opt, method_by_group) else "none",
+            linewidth=2.2 if is_dsade_plot_group(opt, method_by_group) else 0.0,
+        )
     ax.set_xticks(x)
     ax.set_xticklabels(smells, rotation=35, ha="right")
     ax.set_ylim(0.0, 1.05)
@@ -1289,7 +1643,16 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     for i, opt in enumerate(opts):
         offset = (i - n / 2 + 0.5) * w
         vals = [pivot.loc[e, opt] if (e in pivot.index and opt in pivot.columns) else np.nan for e in ests]
-        ax.bar(x + offset, vals, w, color=color_map.get(opt, "#888"), alpha=0.95 if is_dsade_method(method_by_group.get(opt)) else 0.70)
+        is_dsade = is_dsade_plot_group(opt, method_by_group)
+        ax.bar(
+            x + offset,
+            vals,
+            w,
+            color=color_map.get(opt, "#888"),
+            alpha=0.95 if is_dsade else 0.70,
+            edgecolor="black" if is_dsade else "none",
+            linewidth=2.2 if is_dsade else 0.0,
+        )
     ax.set_xticks(x)
     ax.set_xticklabels([e.upper() for e in ests], fontsize=11)
     ax.set_ylim(0.0, 1.05)
@@ -1314,7 +1677,10 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
             if not np.isfinite(v):
                 continue
             color = "white" if v > 0.80 else "#333"
-            ax.text(j, i, f"{v:.4f}", ha="center", va="center", fontsize=9, color=color, fontweight="bold" if is_dsade_method(method_by_group.get(opt)) else "normal")
+            ax.text(j, i, f"{v:.4f}", ha="center", va="center", fontsize=9, color=color, fontweight="bold" if is_dsade_plot_group(opt, method_by_group) else "normal")
+    for j, opt in enumerate(opts):
+        if is_dsade_plot_group(opt, method_by_group):
+            add_heatmap_column_outline(ax, j, len(smells))
     fig.tight_layout()
     _save_chart(fig, out_dir, "04_heatmap.png")
     saved.append("04_heatmap.png")
@@ -1325,6 +1691,7 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     for patch, opt in zip(bp["boxes"], opts):
         patch.set_facecolor(color_map.get(opt, "#888"))
         patch.set_alpha(0.75)
+        apply_dsade_patch_highlight(patch, opt, method_by_group, linewidth=2.6)
     ax.set_xticks(range(1, len(opts) + 1))
     ax.set_xticklabels([label_map.get(o, o) for o in opts], fontsize=9, rotation=35, ha="right")
     ax.set_ylim(0.0, 1.12)
@@ -1336,7 +1703,7 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     fig, ax = plt.subplots(figsize=(11, 7))
     for opt in opts:
         sub = plot_df[plot_df["PlotGroup"] == opt]
-        is_dsade = is_dsade_method(method_by_group.get(opt))
+        is_dsade = is_dsade_plot_group(opt, method_by_group)
         ax.scatter(
             sub["N_Features_Selected"],
             sub["F1_test"],
@@ -1344,6 +1711,8 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
             s=120 if is_dsade else 60,
             alpha=0.90 if is_dsade else 0.65,
             marker="*" if is_dsade else "o",
+            edgecolor="black" if is_dsade else "white",
+            linewidth=1.4 if is_dsade else 0.4,
             label=label_map.get(opt, opt),
         )
     ax.set_xlabel("Number of selected features", fontsize=11)
@@ -1365,8 +1734,17 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
         row = means.loc[opt]
         vals = [row["F1_test"], row["AS_test"], row["PS_test"], row["RS_test"], 1 - row["N_Features_Selected"] / max_feat]
         vals += vals[:1]
-        is_dsade = is_dsade_method(method_by_group.get(opt))
-        ax.plot(angles, vals, color=color_map.get(opt, "#888"), linewidth=2.5 if is_dsade else 1.2, linestyle="-" if is_dsade else "--", label=label_map.get(opt, opt))
+        is_dsade = is_dsade_plot_group(opt, method_by_group)
+        add_dsade_line_highlight(
+            ax,
+            angles,
+            vals,
+            color_map.get(opt, "#888"),
+            is_dsade,
+            linewidth=2.5 if is_dsade else 1.2,
+            linestyle="-" if is_dsade else "--",
+            label=label_map.get(opt, opt),
+        )
         ax.fill(angles, vals, color=color_map.get(opt, "#888"), alpha=0.15 if is_dsade else 0.06)
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(categories, fontsize=11)
@@ -1385,8 +1763,12 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
     w = 0.38
     fig, ax1 = plt.subplots(figsize=(10, 6))
     ax2 = ax1.twinx()
-    ax1.bar(x - w / 2, feat_vals, w, color=colors, alpha=0.85, zorder=3)
-    ax2.bar(x + w / 2, rt_vals, w, color=colors, alpha=0.45, hatch="///", zorder=3)
+    bars1 = ax1.bar(x - w / 2, feat_vals, w, color=colors, alpha=0.85, zorder=3)
+    bars2 = ax2.bar(x + w / 2, rt_vals, w, color=colors, alpha=0.45, hatch="///", zorder=3)
+    for bar, opt in zip(bars1, opts):
+        apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.4)
+    for bar, opt in zip(bars2, opts):
+        apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.4)
     ax1.set_xticks(x)
     ax1.set_xticklabels([label_map.get(o, o) for o in opts], fontsize=9, rotation=35, ha="right")
     ax1.set_ylabel("Average selected features", fontsize=11)
@@ -1514,13 +1896,15 @@ def generate_seven_global_charts(
             row = means.loc[opt]
             vals = [row["AS_test"], row["PS_test"], row["RS_test"], row["F1_test"], 1 - row["N_Features_Selected"] / max_feat]
             vals += vals[:1]
-            is_dsade = is_dsade_method(method_by_group.get(opt))
+            is_dsade = is_dsade_plot_group(opt, method_by_group)
             is_macro = method_by_group.get(opt) == "MaCRO-DE"
 
-            ax.plot(
+            add_dsade_line_highlight(
+                ax,
                 angles,
                 vals,
-                color=color_map.get(opt, "#888"),
+                color_map.get(opt, "#888"),
+                is_dsade,
                 linewidth=4.0 if is_macro else (2.4 if is_dsade else 1.1),
                 linestyle="-" if is_macro else ("-" if is_dsade else "--"),
                 zorder=10 if is_macro else 2
@@ -1554,8 +1938,12 @@ def generate_seven_global_charts(
         feat_vals = [sub.loc[o, "N_Features_Selected"] if o in sub.index else np.nan for o in opts]
         rt_vals = [sub.loc[o, "Runtime"] if o in sub.index else np.nan for o in opts]
         colors = [color_map.get(o, "#888") for o in opts]
-        ax1.bar(x - 0.18, feat_vals, 0.36, color=colors, alpha=0.85)
-        ax2.bar(x + 0.18, rt_vals, 0.36, color=colors, alpha=0.40, hatch="///")
+        bars1 = ax1.bar(x - 0.18, feat_vals, 0.36, color=colors, alpha=0.85)
+        bars2 = ax2.bar(x + 0.18, rt_vals, 0.36, color=colors, alpha=0.40, hatch="///")
+        for bar, opt in zip(bars1, opts):
+            apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.2)
+        for bar, opt in zip(bars2, opts):
+            apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.2)
         ax1.set_xticks(x)
         ax1.set_xticklabels([label_map.get(o, o) for o in opts], rotation=45, ha="right", fontsize=7)
         ax1.set_ylabel("Features", fontsize=9)
@@ -1581,6 +1969,7 @@ def generate_seven_global_charts(
         for patch, opt in zip(bp["boxes"], run_opts):
             patch.set_facecolor(run_color_map.get(opt, "#888"))
             patch.set_alpha(0.60)
+            apply_dsade_patch_highlight(patch, opt, method_by_group, linewidth=2.5)
         ax.set_xticks(range(1, len(run_opts) + 1))
         ax.set_xticklabels([run_label_map.get(o, o) for o in run_opts], rotation=45, ha="right", fontsize=7)
         ax.set_ylim(0.0, 1.08)
@@ -1611,9 +2000,17 @@ def generate_seven_global_charts(
             curve = np.asarray(rows_opt.iloc[0]["Curve"], dtype=float)
             if curve.size == 0:
                 continue
-            is_dsade = is_dsade_method(rows_opt.iloc[0]["Optimizer"])
+            is_dsade = is_exact_dsade_method(rows_opt.iloc[0]["Optimizer"])
             is_macro = str(rows_opt.iloc[0]["Optimizer"]).upper() == "MACRO-DE"
-            ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_macro else (2.4 if is_dsade else 1.4), linestyle="-")
+            add_dsade_line_highlight(
+                ax,
+                np.arange(curve.size),
+                curve,
+                curve_color_map.get(opt, "#888"),
+                is_dsade,
+                linewidth=2.4 if is_macro else (2.4 if is_dsade else 1.4),
+                linestyle="-",
+            )
             #ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.4, linestyle="-" if is_dsade else "--")
             plotted = True
         if not plotted:
@@ -1653,6 +2050,9 @@ def generate_seven_global_charts(
     if macro_idx is not None:
         rect = plt.Rectangle((-0.5, macro_idx - 0.5), len(datasets),1, fill=False, edgecolor="black", linewidth=2.5, zorder=100)
         ax.add_patch(rect)
+    for row_idx, opt in enumerate(opts):
+        if is_dsade_plot_group(opt, method_by_group):
+            add_heatmap_row_outline(ax, row_idx, len(datasets))
     ax.set_xlabel("Dataset")
     ax.set_ylabel("Metaheuristics")
     for i in range(len(opts)):
@@ -1669,13 +2069,23 @@ def generate_seven_global_charts(
     parts = ax.violinplot(data_violin, showmeans=False, showmedians=False, widths=0.78)
     for body, opt in zip(parts["bodies"], run_opts):
         body.set_facecolor(run_color_map.get(opt, "#888"))
-        body.set_edgecolor(run_color_map.get(opt, "#888"))
+        body.set_edgecolor("black" if is_dsade_plot_group(opt, method_by_group) else run_color_map.get(opt, "#888"))
+        body.set_linewidth(2.4 if is_dsade_plot_group(opt, method_by_group) else 1.0)
         body.set_alpha(0.22)
     for i, (opt, values) in enumerate(zip(run_opts, data_violin), start=1):
         if values.size == 0:
             continue
         jitter = np.linspace(-0.08, 0.08, values.size) if values.size > 1 else np.array([0.0])
-        ax.scatter(np.full(values.size, i) + jitter, values, color=run_color_map.get(opt, "#888"), edgecolor="white", linewidth=0.5, s=35, zorder=3)
+        is_dsade = is_dsade_plot_group(opt, method_by_group)
+        ax.scatter(
+            np.full(values.size, i) + jitter,
+            values,
+            color=run_color_map.get(opt, "#888"),
+            edgecolor="black" if is_dsade else "white",
+            linewidth=1.2 if is_dsade else 0.5,
+            s=45 if is_dsade else 35,
+            zorder=3,
+        )
         mean_val = float(np.nanmean(values))
         median_val = float(np.nanmedian(values))
         ax.scatter(i, mean_val, marker="D", color="black", edgecolor="white", linewidth=1.2, s=140, zorder=4)
@@ -1717,6 +2127,7 @@ def generate_seven_global_charts(
 def generate_global_accuracy_boxplot(df, out_dir, opt_order):
 
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
+    method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict() if not plot_df.empty else {}
 
     fig, ax = plt.subplots(
         figsize=(max(12, 0.8 * len(opts) + 5), 6)
@@ -1742,6 +2153,7 @@ def generate_global_accuracy_boxplot(df, out_dir, opt_order):
         if label_map.get(opt) == "MaCRO-DE":
             patch.set_edgecolor("black")
             patch.set_linewidth(3.0)
+        apply_dsade_patch_highlight(patch, opt, method_by_group, linewidth=2.8)
 
     for i, opt in enumerate(opts):
 
@@ -1783,6 +2195,7 @@ def generate_global_accuracy_boxplot(df, out_dir, opt_order):
 def generate_global_features_runtime(df, out_dir, opt_order):
 
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
+    method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict() if not plot_df.empty else {}
 
     feat_med = (
         plot_df.groupby("PlotGroup")
@@ -1828,6 +2241,7 @@ def generate_global_features_runtime(df, out_dir, opt_order):
         if label_map.get(opt) == "MaCRO-DE":
             bar.set_edgecolor("black")
             bar.set_linewidth(3)
+        apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.8)
 
     for bar, opt in zip(bars2, opts):
 
@@ -1836,6 +2250,7 @@ def generate_global_features_runtime(df, out_dir, opt_order):
         if label_map.get(opt) == "MaCRO-DE":
             bar.set_edgecolor("black")
             bar.set_linewidth(3)
+        apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.8)
 
     for i, v in enumerate(feat_vals):
 
@@ -1880,24 +2295,36 @@ def generate_global_features_runtime(df, out_dir, opt_order):
 
 def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str):
     results_struct = load_results_from_cache(paths, args, dataset_names, cache_sig)
-    statistical_excel = os.path.join(paths.res_dir, f"Statistical_Results_{paths.exp_tag}.xlsx")
+    output_prefix = experiment_output_prefix(args)
+    statistical_excel = os.path.join(paths.res_dir, f"{output_prefix}Statistical_Results_{paths.exp_tag}.xlsx")
     export_statistical_excel(results_struct, dataset_names, list(args.optimizers), args, statistical_excel)
     summary_df = generate_summary_dataframe(results_struct, args)
-    summary_csv = os.path.join(paths.res_dir, f"RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
+    summary_csv = os.path.join(paths.res_dir, f"{output_prefix}RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
     summary_df.to_csv(summary_csv, index=False)
-    generated_charts = generate_seven_global_charts(
-        summary_df,
-        results_struct,
-        paths.fig_dir,
-        list(args.optimizers),
-        args,
-    )
+    if args.experiment_mode == "sensitivity":
+        generated_charts = []
+        sensitivity_chart = generate_sensitivity_main_figure(summary_df, paths.fig_dir, args)
+        if sensitivity_chart:
+            generated_charts.append(sensitivity_chart)
+    else:
+        generated_charts = generate_seven_global_charts(
+            summary_df,
+            results_struct,
+            paths.fig_dir,
+            list(args.optimizers),
+            args,
+        )
+        if args.experiment_mode == "ablation":
+            ablation_chart = generate_ablation_main_figure(summary_df, paths.fig_dir, list(args.optimizers))
+            if ablation_chart:
+                generated_charts.append(ablation_chart)
     return summary_csv, generated_charts, statistical_excel
 
 def main():
     args = parse_args()
     logging.disable(logging.INFO)
     logging.getLogger("mealpy").setLevel(logging.WARNING)
+    apply_experiment_mode(args)
     if args.list_optimizers:
         print_available_optimizers()
         return
@@ -1918,6 +2345,7 @@ def main():
     dataset_names = [spec.name for spec in dataset_specs]
 
     print(f"Experiment: {paths.exp_tag}")
+    print(f"Mode: {args.experiment_mode}")
     print_dataset_summary(args, dataset_specs)
     print(f"Cache signature: {cache_sig}")
 
@@ -1967,40 +2395,81 @@ def main():
                     print(f"[resume] Resuming {dataset_name} / {estimator} from partial checkpoint")
             for method in args.optimizers:
                 for tf in args.transfer_functions:
-                    label = build_alg_label(method, tf, estimator, show_tf, show_cls)
-                    legacy_label = build_legacy_alg_label(method, tf, estimator, show_tf, show_cls)
-                    if label not in cls_payload and legacy_label in cls_payload:
-                        cls_payload[label] = cls_payload.pop(legacy_label)
-                    prev = cls_payload.get(label, {})
-                    acc_runs = list(np.asarray(prev.get("AccRuns", []), dtype=float))
-                    ps_runs = list(np.asarray(prev.get("PSRuns", []), dtype=float))
-                    rs_runs = list(np.asarray(prev.get("RSRuns", []), dtype=float))
-                    f1_runs = list(np.asarray(prev.get("F1Runs", []), dtype=float))
-                    fit_runs = list(np.asarray(prev.get("FitRuns", []), dtype=float))
-                    feat_runs = list(np.asarray(prev.get("FeatRuns", []), dtype=float))
-                    time_runs = list(np.asarray(prev.get("TimeRuns", []), dtype=float))
-                    curves = list(prev.get("CurvesAll", []))
-
-                    done = len(acc_runs)
-                    if done >= args.runs:
-                        print(f"Running {dataset_name} | {label} | runs={args.runs} (already complete)")
-                        continue
-                    print(f"Running {dataset_name} | {label} | runs={args.runs} (resume from {done})")
-
-                    pending_runs = list(range(done, args.runs))
-                    def checkpoint_run(run, out):
-                        acc_runs.append(out["as_test"])
-                        ps_runs.append(out["ps_test"])
-                        rs_runs.append(out["rs_test"])
-                        f1_runs.append(out["f1_test"])
-                        fit_runs.append(out["fit_final"])
-                        feat_runs.append(out["n_features"])
-                        time_runs.append(out["runtime"])
-                        curves.append(out["curve"])
-                        print(
-                            f"  Run {run + 1:02d} | Acc={acc_runs[-1]:.2f}% | F1={f1_runs[-1]:.4f} | "
-                            f"Fit={fit_runs[-1]:.4f} | Feat={feat_runs[-1]} | Time={time_runs[-1]:.2f}s"
+                    for variant_value in experiment_variants(args):
+                        if variant_value is not None:
+                            apply_sensitivity_value(args, variant_value)
+                        variant_suffix = (
+                            sensitivity_label_suffix(args, variant_value)
+                            if variant_value is not None
+                            else None
                         )
+                        label = build_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix)
+                        legacy_label = build_legacy_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix)
+                        if label not in cls_payload and legacy_label in cls_payload:
+                            cls_payload[label] = cls_payload.pop(legacy_label)
+                        prev = cls_payload.get(label, {})
+                        acc_runs = list(np.asarray(prev.get("AccRuns", []), dtype=float))
+                        ps_runs = list(np.asarray(prev.get("PSRuns", []), dtype=float))
+                        rs_runs = list(np.asarray(prev.get("RSRuns", []), dtype=float))
+                        f1_runs = list(np.asarray(prev.get("F1Runs", []), dtype=float))
+                        fit_runs = list(np.asarray(prev.get("FitRuns", []), dtype=float))
+                        feat_runs = list(np.asarray(prev.get("FeatRuns", []), dtype=float))
+                        time_runs = list(np.asarray(prev.get("TimeRuns", []), dtype=float))
+                        curves = list(prev.get("CurvesAll", []))
+
+                        done = len(acc_runs)
+                        if done >= args.runs:
+                            print(f"Running {dataset_name} | {label} | runs={args.runs} (already complete)")
+                            continue
+                        print(f"Running {dataset_name} | {label} | runs={args.runs} (resume from {done})")
+
+                        pending_runs = list(range(done, args.runs))
+                        def checkpoint_run(run, out):
+                            acc_runs.append(out["as_test"])
+                            ps_runs.append(out["ps_test"])
+                            rs_runs.append(out["rs_test"])
+                            f1_runs.append(out["f1_test"])
+                            fit_runs.append(out["fit_final"])
+                            feat_runs.append(out["n_features"])
+                            time_runs.append(out["runtime"])
+                            curves.append(out["curve"])
+                            print(
+                                f"  Run {run + 1:02d} | Acc={acc_runs[-1]:.2f}% | F1={f1_runs[-1]:.4f} | "
+                                f"Fit={fit_runs[-1]:.4f} | Feat={feat_runs[-1]} | Time={time_runs[-1]:.2f}s"
+                            )
+
+                            cls_payload[label] = build_label_payload(
+                                estimator,
+                                acc_runs,
+                                ps_runs,
+                                rs_runs,
+                                f1_runs,
+                                fit_runs,
+                                feat_runs,
+                                time_runs,
+                                curves,
+                                args.epochs,
+                            )
+                            save_cache(progress_file, cls_payload)
+                            save_cache(cache_file, cls_payload)
+
+                        if args.parallel == "yes" and len(pending_runs) > 1:
+                            print(f"  Parallel: yes | workers={min(args.n_workers, len(pending_runs))}")
+                            execute_pending_runs(
+                                data,
+                                estimator,
+                                method,
+                                tf,
+                                args,
+                                pending_runs,
+                                on_run_complete=checkpoint_run,
+                            )
+                        else:
+                            for run in pending_runs:
+                                checkpoint_run(
+                                    run,
+                                    run_single(data, estimator, method, tf, args, args.seed_base + run),
+                                )
 
                         cls_payload[label] = build_label_payload(
                             estimator,
@@ -2016,52 +2485,30 @@ def main():
                         )
                         save_cache(progress_file, cls_payload)
                         save_cache(cache_file, cls_payload)
-
-                    if args.parallel == "yes" and len(pending_runs) > 1:
-                        print(f"  Parallel: yes | workers={min(args.n_workers, len(pending_runs))}")
-                        execute_pending_runs(
-                            data,
-                            estimator,
-                            method,
-                            tf,
-                            args,
-                            pending_runs,
-                            on_run_complete=checkpoint_run,
-                        )
-                    else:
-                        for run in pending_runs:
-                            checkpoint_run(
-                                run,
-                                run_single(data, estimator, method, tf, args, args.seed_base + run),
-                            )
-
-                    cls_payload[label] = build_label_payload(
-                        estimator,
-                        acc_runs,
-                        ps_runs,
-                        rs_runs,
-                        f1_runs,
-                        fit_runs,
-                        feat_runs,
-                        time_runs,
-                        curves,
-                        args.epochs,
-                    )
-                    save_cache(progress_file, cls_payload)
-                    save_cache(cache_file, cls_payload)
             save_cache(cache_file, cls_payload)
 
             results_struct[dataset_name].update(cls_payload)
 
-    excel_path = os.path.join(paths.res_dir, f"Global_Results_{paths.exp_tag}.xlsx")
+    output_prefix = experiment_output_prefix(args)
+    excel_path = os.path.join(paths.res_dir, f"{output_prefix}Global_Results_{paths.exp_tag}.xlsx")
     exported = export_global_excel(results_struct, dataset_names, excel_path)
-    statistical_excel = os.path.join(paths.res_dir, f"Statistical_Results_{paths.exp_tag}.xlsx")
+    statistical_excel = os.path.join(paths.res_dir, f"{output_prefix}Statistical_Results_{paths.exp_tag}.xlsx")
     export_statistical_excel(results_struct, dataset_names, list(args.optimizers), args, statistical_excel)
     summary_df = generate_summary_dataframe(results_struct, args)
-    summary_csv = os.path.join(paths.res_dir, f"RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
+    summary_csv = os.path.join(paths.res_dir, f"{output_prefix}RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
     summary_df.to_csv(summary_csv, index=False)
     chart_dir = paths.fig_dir
-    generated_charts = generate_seven_global_charts(summary_df, results_struct, chart_dir, list(args.optimizers), args)
+    if args.experiment_mode == "sensitivity":
+        generated_charts = []
+        sensitivity_chart = generate_sensitivity_main_figure(summary_df, chart_dir, args)
+        if sensitivity_chart:
+            generated_charts.append(sensitivity_chart)
+    else:
+        generated_charts = generate_seven_global_charts(summary_df, results_struct, chart_dir, list(args.optimizers), args)
+        if args.experiment_mode == "ablation":
+            ablation_chart = generate_ablation_main_figure(summary_df, chart_dir, list(args.optimizers))
+            if ablation_chart:
+                generated_charts.append(ablation_chart)
 
     print("Completed.")
     print(f"Cache dir: {paths.cache_dir}")
