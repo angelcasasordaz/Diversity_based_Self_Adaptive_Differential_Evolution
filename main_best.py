@@ -847,6 +847,9 @@ def load_cache(path: str):
     with open(path, "rb") as f:
         return pickle.load(f)
 
+def legacy_cache_dir(paths: Paths) -> str:
+    return os.path.join(os.path.dirname(paths.res_dir), "cache")
+
 def load_cache_safe(path: str, label: str):
     if not os.path.exists(path):
         return None
@@ -856,23 +859,30 @@ def load_cache_safe(path: str, label: str):
         print(f"[cache-warning] Could not load {label} '{path}': {exc}")
         return None
 
+def load_cache_with_legacy_fallback(paths: Paths, filename: str, label: str):
+    primary_path = os.path.join(paths.cache_dir, filename)
+    if os.path.exists(primary_path):
+        return load_cache_safe(primary_path, label)
+
+    legacy_path = os.path.join(legacy_cache_dir(paths), filename)
+    if os.path.abspath(legacy_path) == os.path.abspath(primary_path):
+        return None
+    payload = load_cache_safe(legacy_path, f"legacy {label}")
+    if payload is not None:
+        print(f"[cache] Reused legacy {label}: {legacy_path}")
+    return payload
+
 def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str) -> Dict[str, Dict]:
     results_struct = {}
     missing = []
     for dataset_name in dataset_names:
         results_struct[dataset_name] = {}
         for estimator in args.estimators:
-            cache_file = os.path.join(
-                paths.cache_dir,
-                f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_results.pkl",
-            )
-            progress_file = os.path.join(
-                paths.cache_dir,
-                f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl",
-            )
-            payload = load_cache_safe(cache_file, "final cache")
+            cache_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_results.pkl"
+            progress_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl"
+            payload = load_cache_with_legacy_fallback(paths, cache_filename, "final cache")
             if payload is None:
-                payload = load_cache_safe(progress_file, "partial checkpoint")
+                payload = load_cache_with_legacy_fallback(paths, progress_filename, "partial checkpoint")
             if payload is None:
                 missing.append(f"{dataset_name}/{estimator}")
                 continue
@@ -2373,16 +2383,16 @@ def main():
             data.split_train_test(test_size=args.test_size, random_state=args.random_state)
 
         for estimator in args.estimators:
-            cache_file = os.path.join(
-                paths.cache_dir,
-                f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_results.pkl",
+            cache_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_results.pkl"
+            progress_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl"
+            cache_file = os.path.join(paths.cache_dir, cache_filename)
+            progress_file = os.path.join(paths.cache_dir, progress_filename)
+            cache_payload = (
+                load_cache_with_legacy_fallback(paths, cache_filename, "final cache")
+                if args.reuse_cache
+                else None
             )
-            progress_file = os.path.join(
-                paths.cache_dir,
-                f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl",
-            )
-            cache_payload = load_cache_safe(cache_file, "final cache") if args.reuse_cache else None
-            progress_payload = load_cache_safe(progress_file, "partial checkpoint")
+            progress_payload = load_cache_with_legacy_fallback(paths, progress_filename, "partial checkpoint")
             if cache_payload is not None and (
                 progress_payload is None
                 or payload_completed_runs(cache_payload) >= payload_completed_runs(progress_payload)
