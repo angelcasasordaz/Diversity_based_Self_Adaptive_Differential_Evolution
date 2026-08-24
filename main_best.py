@@ -45,7 +45,11 @@ DATASET_SOURCE = "codesmell"
 # "codesmell"
 # "mafese"
 
-EXPERIMENT_MODE = "full"
+EXPERIMENT_MODES = [
+    "full",
+    "ablation",
+    "sensitivity",
+]
 # Options:
 # "full"
 # "ablation"
@@ -69,22 +73,22 @@ OPTIMIZERS = [
     # "MaCRO-DE",
     "DSADE",
     "DE",
-    "DE-AWAD",
-    "DE-DiversitySelection",
-    "DE-Mahalanobis",
-    "DSA-DE",
-    # "JADE",
-    # "SHADE",
-    # "PSO",
-    # "WOA",
-    # "GWO",
-    # "HHO",
-    # "GOA",
-    # "SA",
-    # "BRO",
-    # "RUN",
-    # "WOA",
-    # "FOX",
+    # "DE-AWAD",
+    # "DE-DiversitySelection",
+    # "DE-Mahalanobis",
+    # "DSA-DE",
+    "JADE",
+    "SHADE",
+    "PSO",
+    "WOA",
+    "GWO",
+    "HHO",
+    "GOA",
+    "SA",
+    "BRO",
+    "RUN",
+    "WOA",
+    "FOX",
 ]
 
 ABLATION_OPTIMIZERS = [
@@ -188,7 +192,8 @@ class DatasetSpec:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Feature-selection comparison framework with cache and multi-run support")
-    parser.add_argument("--experiment-mode", default=EXPERIMENT_MODE, choices=["full", "ablation", "sensitivity"])
+    parser.add_argument("--experiment-modes", nargs="+", default=list(EXPERIMENT_MODES), choices=["full", "ablation", "sensitivity"])
+    parser.add_argument("--experiment-mode", default=None, choices=["full", "ablation", "sensitivity"], help=argparse.SUPPRESS)
     parser.add_argument("--exp-id", type=int, default=EXP_ID, help="Numeric experiment ID")
     parser.add_argument("--dataset-source", default=DATASET_SOURCE, choices=["mafese", "codesmell"], help="Dataset source")
     parser.add_argument("--dataset-suite", default=MAFESE_DATASET_SUITE, choices=["test14"], help="MAFESE dataset suite")
@@ -215,7 +220,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dsade-mahal-q", type=float, default=DSADE_MAHAL_Q)
     parser.add_argument("--sensitivity-parameter", default=SENSITIVITY_PARAMETER)
     parser.add_argument("--sensitivity-values", nargs="+", type=float, default=list(SENSITIVITY_VALUES))
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.experiment_mode is not None:
+        args.experiment_modes = [args.experiment_mode]
+    return args
 
 def resolve_optimizers(args: argparse.Namespace) -> List[str]:
     optimizers = []
@@ -878,11 +886,7 @@ def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_name
     for dataset_name in dataset_names:
         results_struct[dataset_name] = {}
         for estimator in args.estimators:
-            cache_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_results.pkl"
-            progress_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl"
-            payload = load_cache_with_legacy_fallback(paths, cache_filename, "final cache")
-            if payload is None:
-                payload = load_cache_with_legacy_fallback(paths, progress_filename, "partial checkpoint")
+            payload = load_best_cache_payload(paths, dataset_name, estimator, cache_sig)
             if payload is None:
                 missing.append(f"{dataset_name}/{estimator}")
                 continue
@@ -903,6 +907,67 @@ def payload_completed_runs(payload: dict) -> int:
             continue
         total += int(row.get("CompletedRuns", len(row.get("AccRuns", []))))
     return total
+
+def payload_label_completed_runs(payload: dict, label: str, legacy_label: str) -> int:
+    row = payload.get(label)
+    if row is None and legacy_label != label:
+        row = payload.get(legacy_label)
+    if not isinstance(row, dict):
+        return 0
+    return int(row.get("CompletedRuns", len(row.get("AccRuns", []))))
+
+def expected_result_labels(
+    args: argparse.Namespace,
+    estimator: str,
+    show_tf: bool,
+    show_cls: bool,
+) -> List[Tuple[str, str]]:
+    labels = []
+    for method in args.optimizers:
+        for tf in args.transfer_functions:
+            for variant_value in experiment_variants(args):
+                variant_suffix = (
+                    sensitivity_label_suffix(args, variant_value)
+                    if variant_value is not None
+                    else None
+                )
+                labels.append(
+                    (
+                        build_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix),
+                        build_legacy_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix),
+                    )
+                )
+    return labels
+
+def load_best_cache_payload(paths: Paths, dataset_name: str, estimator: str, cache_sig: str):
+    cache_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_results.pkl"
+    progress_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl"
+    cache_payload = load_cache_with_legacy_fallback(paths, cache_filename, "final cache")
+    progress_payload = load_cache_with_legacy_fallback(paths, progress_filename, "partial checkpoint")
+    if cache_payload is not None and (
+        progress_payload is None
+        or payload_completed_runs(cache_payload) >= payload_completed_runs(progress_payload)
+    ):
+        return cache_payload
+    return progress_payload
+
+def mode_cache_is_complete(
+    paths: Paths,
+    args: argparse.Namespace,
+    dataset_names: List[str],
+    cache_sig: str,
+    show_tf: bool,
+    show_cls: bool,
+) -> bool:
+    for dataset_name in dataset_names:
+        for estimator in args.estimators:
+            payload = load_best_cache_payload(paths, dataset_name, estimator, cache_sig)
+            if payload is None:
+                return False
+            for label, legacy_label in expected_result_labels(args, estimator, show_tf, show_cls):
+                if payload_label_completed_runs(payload, label, legacy_label) < args.runs:
+                    return False
+    return True
 
 
 def parse_result_label(label: str, args: argparse.Namespace) -> dict:
@@ -2303,9 +2368,10 @@ def generate_global_features_runtime(df, out_dir, opt_order):
         "09_global_features_runtime_tradeoff.png"
     )
 
-def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str):
-    results_struct = load_results_from_cache(paths, args, dataset_names, cache_sig)
+def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: List[str], results_struct: Dict[str, Dict]):
     output_prefix = experiment_output_prefix(args)
+    excel_path = os.path.join(paths.res_dir, f"{output_prefix}Global_Results_{paths.exp_tag}.xlsx")
+    exported = export_global_excel(results_struct, dataset_names, excel_path)
     statistical_excel = os.path.join(paths.res_dir, f"{output_prefix}Statistical_Results_{paths.exp_tag}.xlsx")
     export_statistical_excel(results_struct, dataset_names, list(args.optimizers), args, statistical_excel)
     summary_df = generate_summary_dataframe(results_struct, args)
@@ -2328,16 +2394,23 @@ def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, datase
             ablation_chart = generate_ablation_main_figure(summary_df, paths.fig_dir, list(args.optimizers))
             if ablation_chart:
                 generated_charts.append(ablation_chart)
-    return summary_csv, generated_charts, statistical_excel
+    return exported, summary_csv, generated_charts, statistical_excel
 
-def main():
-    args = parse_args()
-    logging.disable(logging.INFO)
-    logging.getLogger("mealpy").setLevel(logging.WARNING)
+def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str):
+    results_struct = load_results_from_cache(paths, args, dataset_names, cache_sig)
+    return export_mode_outputs(paths, args, dataset_names, results_struct)
+
+def clone_args_for_mode(base_args: argparse.Namespace, mode: str) -> argparse.Namespace:
+    mode_args = argparse.Namespace(**vars(base_args))
+    mode_args.experiment_mode = str(mode).lower()
+    mode_args.optimizers = list(base_args.optimizers)
+    mode_args.estimators = list(base_args.estimators)
+    mode_args.transfer_functions = list(base_args.transfer_functions)
+    mode_args.sensitivity_values = list(base_args.sensitivity_values)
+    return mode_args
+
+def run_experiment_mode(args: argparse.Namespace) -> None:
     apply_experiment_mode(args)
-    if args.list_optimizers:
-        print_available_optimizers()
-        return
 
     validate_selection_options(args)
     args.optimizers = resolve_optimizers(args)
@@ -2360,7 +2433,7 @@ def main():
     print(f"Cache signature: {cache_sig}")
 
     if args.figures_only:
-        summary_csv, generated_charts, statistical_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
+        exported, summary_csv, generated_charts, statistical_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
         print("Completed figures-only.")
         print(f"Cache dir: {paths.cache_dir}")
         print(f"Figures dir: {paths.fig_dir}")
@@ -2370,6 +2443,25 @@ def main():
             print("Charts:")
             for name in generated_charts:
                 print(f"  - {os.path.join(paths.fig_dir, name)}")
+        print("Global results:")
+        for p in exported:
+            print(f"  - {p}")
+        return
+
+    if mode_cache_is_complete(paths, args, dataset_names, cache_sig, show_tf, show_cls):
+        exported, summary_csv, generated_charts, statistical_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
+        print(f"[mode-complete] {args.experiment_mode} cache is complete; skipped optimization.")
+        print(f"Cache dir: {paths.cache_dir}")
+        print(f"Figures dir: {paths.fig_dir}")
+        print(f"Charts summary CSV: {summary_csv}")
+        print(f"Statistical results: {statistical_excel}")
+        if generated_charts:
+            print("Charts:")
+            for name in generated_charts:
+                print(f"  - {os.path.join(paths.fig_dir, name)}")
+        print("Global results:")
+        for p in exported:
+            print(f"  - {p}")
         return
 
     results_struct = {}
@@ -2387,11 +2479,7 @@ def main():
             progress_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl"
             cache_file = os.path.join(paths.cache_dir, cache_filename)
             progress_file = os.path.join(paths.cache_dir, progress_filename)
-            cache_payload = (
-                load_cache_with_legacy_fallback(paths, cache_filename, "final cache")
-                if args.reuse_cache
-                else None
-            )
+            cache_payload = load_cache_with_legacy_fallback(paths, cache_filename, "final cache")
             progress_payload = load_cache_with_legacy_fallback(paths, progress_filename, "partial checkpoint")
             if cache_payload is not None and (
                 progress_payload is None
@@ -2499,26 +2587,8 @@ def main():
 
             results_struct[dataset_name].update(cls_payload)
 
-    output_prefix = experiment_output_prefix(args)
-    excel_path = os.path.join(paths.res_dir, f"{output_prefix}Global_Results_{paths.exp_tag}.xlsx")
-    exported = export_global_excel(results_struct, dataset_names, excel_path)
-    statistical_excel = os.path.join(paths.res_dir, f"{output_prefix}Statistical_Results_{paths.exp_tag}.xlsx")
-    export_statistical_excel(results_struct, dataset_names, list(args.optimizers), args, statistical_excel)
-    summary_df = generate_summary_dataframe(results_struct, args)
-    summary_csv = os.path.join(paths.res_dir, f"{output_prefix}RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
-    summary_df.to_csv(summary_csv, index=False)
+    exported, summary_csv, generated_charts, statistical_excel = export_mode_outputs(paths, args, dataset_names, results_struct)
     chart_dir = paths.fig_dir
-    if args.experiment_mode == "sensitivity":
-        generated_charts = []
-        sensitivity_chart = generate_sensitivity_main_figure(summary_df, chart_dir, args)
-        if sensitivity_chart:
-            generated_charts.append(sensitivity_chart)
-    else:
-        generated_charts = generate_seven_global_charts(summary_df, results_struct, chart_dir, list(args.optimizers), args)
-        if args.experiment_mode == "ablation":
-            ablation_chart = generate_ablation_main_figure(summary_df, chart_dir, list(args.optimizers))
-            if ablation_chart:
-                generated_charts.append(ablation_chart)
 
     print("Completed.")
     print(f"Cache dir: {paths.cache_dir}")
@@ -2533,6 +2603,29 @@ def main():
     print("Global results:")
     for p in exported:
         print(f"  - {p}")
+
+def main():
+    args = parse_args()
+    logging.disable(logging.INFO)
+    logging.getLogger("mealpy").setLevel(logging.WARNING)
+    if args.list_optimizers:
+        print_available_optimizers()
+        return
+
+    modes = [str(mode).lower() for mode in args.experiment_modes]
+    if not modes:
+        raise ValueError("EXPERIMENT_MODES / --experiment-modes requires at least one mode")
+    invalid_modes = [mode for mode in modes if mode not in {"full", "ablation", "sensitivity"}]
+    if invalid_modes:
+        raise ValueError(f"Unsupported experiment modes: {invalid_modes}")
+    if args.runs < 1:
+        raise ValueError("--runs must be >= 1")
+    if args.n_workers < 1:
+        raise ValueError("--n-workers must be >= 1")
+
+    for idx, mode in enumerate(modes, start=1):
+        print(f"\n=== Mode {idx}/{len(modes)}: {mode} ===")
+        run_experiment_mode(clone_args_for_mode(args, mode))
 
 if __name__ == "__main__":
     main()
