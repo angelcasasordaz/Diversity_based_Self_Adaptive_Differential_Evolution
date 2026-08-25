@@ -81,13 +81,12 @@ OPTIMIZERS = [
     "SHADE",
     "PSO",
     "WOA",
-    "GWO",
+    # "GWO",
     "HHO",
     "GOA",
     "SA",
     "BRO",
     "RUN",
-    "WOA",
     "FOX",
 ]
 
@@ -109,11 +108,11 @@ TRANSFER_FUNCTIONS = [
     "vstf_01",
 ]
 
-RUNS = 15
-EPOCHS = 50
+RUNS = 30
+EPOCHS = 150
 POP_SIZE = 50
 
-CHART_CMAP = "Dark2"
+CHART_CMAP = "tab20"
 
 # Qualitative:
 # "tab10"
@@ -128,7 +127,7 @@ CHART_CMAP = "Dark2"
 PARALLEL = True
 N_WORKERS = max(1, (os.cpu_count() or 1) - 1)
 
-EXP_ID = 627
+EXP_ID = 626
 TEST_SIZE = 0.2
 RANDOM_STATE = 2
 SEED_BASE = 1234
@@ -1271,49 +1270,86 @@ def export_statistical_excel(
     stats = ["Best", "Worst", "Mean", "Std"]
     if args.experiment_mode == "sensitivity":
         optimizers = [f"{args.sensitivity_parameter}={float(value):g}" for value in args.sensitivity_values]
-        index_name = "SensitivityValue"
     else:
         optimizers = optimizer_order_from_config(optimizer_order)
-        index_name = "Optimizer"
-    index = pd.MultiIndex.from_product([optimizers, stats], names=[index_name, "Statistic"])
-    sheets = {
-        sheet_name: pd.DataFrame(np.nan, index=index, columns=dataset_names)
-        for sheet_name in metrics
-    }
 
+    def safe_sheet_name(name: str, used_names: set) -> str:
+        cleaned = "".join("_" if ch in "[]:*?/\\'" else ch for ch in str(name))
+        cleaned = cleaned.strip() or "Sheet"
+        base = cleaned[:31]
+        sheet_name = base
+        counter = 1
+        while sheet_name in used_names:
+            suffix = f"_{counter}"
+            sheet_name = f"{base[:31 - len(suffix)]}{suffix}"
+            counter += 1
+        used_names.add(sheet_name)
+        return sheet_name
+
+    sheet_tables = {}
+    used_sheet_names = set()
     for dataset_name in dataset_names:
-        alg_data = results_struct.get(dataset_name, {})
-        runs_by_optimizer = {
-            sheet_name: {optimizer: [] for optimizer in optimizers}
-            for sheet_name in metrics
-        }
-        for label, row in alg_data.items():
-            parsed = parse_result_label(label, args)
-            if args.experiment_mode == "sensitivity":
-                parsed_value = parsed.get("sensitivity_value", np.nan)
-                if not np.isfinite(parsed_value):
-                    continue
-                optimizer = f"{args.sensitivity_parameter}={float(parsed_value):g}"
-            else:
-                optimizer = optimizer_acronym(parsed["method"])
-            if optimizer not in set(optimizers):
-                continue
-            for sheet_name, (run_key, _) in metrics.items():
-                values = np.asarray(row.get(run_key, []), dtype=float).ravel()
-                if values.size:
-                    runs_by_optimizer[sheet_name][optimizer].append(values)
+        for estimator in args.estimators:
+            runs_by_metric = {
+                metric_name: {optimizer: [] for optimizer in optimizers}
+                for metric_name in metrics
+            }
+            sheet_tables[(dataset_name, estimator)] = {
+                "sheet_name": safe_sheet_name(f"{dataset_name}_{estimator}", used_sheet_names),
+                "tables": {},
+            }
 
-        for sheet_name, (_, best_mode) in metrics.items():
-            for optimizer in optimizers:
-                chunks = runs_by_optimizer[sheet_name][optimizer]
-                values = np.concatenate(chunks) if chunks else np.array([], dtype=float)
-                stat_values = _run_stats(values, best_mode)
-                for stat in stats:
-                    sheets[sheet_name].loc[(optimizer, stat), dataset_name] = stat_values[stat]
+            alg_data = results_struct.get(dataset_name, {})
+            for label, row in alg_data.items():
+                parsed = parse_result_label(label, args)
+                row_estimator = parsed["estimator"] or row.get("Estimator") or (
+                    args.estimators[0] if len(args.estimators) == 1 else ""
+                )
+                if str(row_estimator).lower() != str(estimator).lower():
+                    continue
+                if args.experiment_mode == "sensitivity":
+                    parsed_value = parsed.get("sensitivity_value", np.nan)
+                    if not np.isfinite(parsed_value):
+                        continue
+                    optimizer = f"{args.sensitivity_parameter}={float(parsed_value):g}"
+                else:
+                    optimizer = optimizer_acronym(parsed["method"])
+                if optimizer not in set(optimizers):
+                    continue
+                for metric_name, (run_key, _) in metrics.items():
+                    values = np.asarray(row.get(run_key, []), dtype=float).ravel()
+                    if values.size:
+                        runs_by_metric[metric_name][optimizer].append(values)
+
+            for metric_name, (_, best_mode) in metrics.items():
+                table = pd.DataFrame(np.nan, index=pd.Index(stats, name="Statistic"), columns=optimizers)
+                for optimizer in optimizers:
+                    chunks = runs_by_metric[metric_name][optimizer]
+                    values = np.concatenate(chunks) if chunks else np.array([], dtype=float)
+                    stat_values = _run_stats(values, best_mode)
+                    for stat in stats:
+                        table.loc[stat, optimizer] = stat_values[stat]
+                sheet_tables[(dataset_name, estimator)]["tables"][metric_name] = table
 
     with pd.ExcelWriter(out_path) as writer:
-        for sheet_name, df in sheets.items():
-            df.to_excel(writer, sheet_name=sheet_name)
+        for sheet_info in sheet_tables.values():
+            startrow = 0
+            for metric_name in metrics:
+                pd.DataFrame([[metric_name]]).to_excel(
+                    writer,
+                    sheet_name=sheet_info["sheet_name"],
+                    startrow=startrow,
+                    startcol=0,
+                    index=False,
+                    header=False,
+                )
+                sheet_info["tables"][metric_name].to_excel(
+                    writer,
+                    sheet_name=sheet_info["sheet_name"],
+                    startrow=startrow + 1,
+                    startcol=0,
+                )
+                startrow += len(stats) + 4
     return out_path
 
 def generate_summary_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace) -> pd.DataFrame:
