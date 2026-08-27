@@ -3,6 +3,8 @@ from mealpy.optimizer import Optimizer
 from mealpy.utils.agent import Agent
 from scipy.stats import chi2
 
+from diversity_gpu_batching import DiversityMathBatcher
+
 
 class MaCRO_DE(Optimizer):
     """
@@ -23,6 +25,9 @@ class MaCRO_DE(Optimizer):
         beta_max=0.8,
         pcr=0.2,
         mahalanobis_q=0.68,
+        compute_device="cpu",
+        gpu_device_id=0,
+        gpu_memory_fraction=0.85,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -44,6 +49,10 @@ class MaCRO_DE(Optimizer):
 
         self.mahalanobis_q = self.validator.check_float(
             "mahalanobis_q", mahalanobis_q, (0.0, 1.0)
+        )
+        self.compute_device = str(compute_device)
+        self.math_batcher = DiversityMathBatcher(
+            self.compute_device, gpu_device_id, gpu_memory_fraction
         )
 
         if self.beta_min > self.beta_max:
@@ -102,122 +111,16 @@ class MaCRO_DE(Optimizer):
         )
 
     def _awad(self, pop_pos, lb, ub):
-
-        _ = lb, ub
-
-        npop, n_dims = pop_pos.shape
-
-        med_dim = np.median(pop_pos, axis=0)
-
-        div_dim = np.mean(
-            np.abs(pop_pos - med_dim),
-            axis=0
-        )
-
-        div = float(
-            np.sum(div_dim) / max(n_dims, 1)
-        )
-
-        unique_count = np.unique(
-            pop_pos,
-            axis=0
-        ).shape[0]
-
-        non_repeat_percent = (
-            unique_count * 100.0
-        ) / max(npop, 1)
-
-        std_devs = np.std(pop_pos, axis=0)
-
-        std_devs[std_devs == 0] = 1e-5
-
-        if npop <= 1:
-
-            min_distance = 0.0
-
-        else:
-
-            min_distance = np.inf
-
-            for i in range(npop - 1):
-
-                diff = (
-                    pop_pos[i + 1:] - pop_pos[i]
-                ) / std_devs
-
-                dists = np.sqrt(
-                    np.sum(diff * diff, axis=1)
-                )
-
-                if dists.size > 0:
-
-                    local_min = float(np.min(dists))
-
-                    if local_min < min_distance:
-                        min_distance = local_min
-
-            if not np.isfinite(min_distance):
-                min_distance = 0.0
-
-        epsilon = 1e-1
-
-        penalty_factor = (
-            (min_distance + epsilon) ** 2
-        ) / (
-            1.0 + min_distance ** 2
-        )
-
-        div = div * 0.1 * non_repeat_percent
-        div = div * penalty_factor
-
-        return float(div)
+        return self.math_batcher.awad(pop_pos, lb, ub)
 
     def _safe_cov_inv(self, pop_pos):
-
-        n_dims = self.problem.n_dims
-
-        sigma = np.cov(
-            pop_pos,
-            rowvar=False
-        )
-
-        if np.ndim(sigma) == 0:
-            sigma = np.array([[float(sigma)]], dtype=float)
-
-        if sigma.shape != (n_dims, n_dims):
-            sigma = np.eye(n_dims) * 1e-6
-
-        sigma = (
-            (sigma + sigma.T) / 2.0
-        ) + 1e-6 * np.eye(n_dims)
-
-        try:
-
-            chol = np.linalg.cholesky(sigma)
-
-            return np.linalg.solve(
-                chol.T,
-                np.linalg.solve(chol, np.eye(n_dims))
-            )
-
-        except np.linalg.LinAlgError:
-
-            return np.linalg.pinv(sigma)
+        return self.math_batcher.covariance_inverse(pop_pos, self.problem.n_dims)
 
     def _mutation_pool(self, pop_pos, div_norm_used):
 
         n_dims = self.problem.n_dims
 
-        mu = np.mean(pop_pos, axis=0)
-
-        sigma_inv = self._safe_cov_inv(pop_pos)
-
-        d = pop_pos - mu
-
-        dist2 = np.sum(
-            (d @ sigma_inv) * d,
-            axis=1
-        )
+        dist2 = self.math_batcher.mahalanobis_distances(pop_pos, n_dims)
 
         thr = chi2.ppf(
             self.mahalanobis_q,
@@ -304,11 +207,9 @@ class MaCRO_DE(Optimizer):
 
             f_used_sum += float(np.mean(f_vec))
 
-            y = x1 + f_vec * (x2 - x3)
+            y = self.math_batcher.mutate(x1, x2, x3, f_vec)
 
             y = self.correct_solution(y)
-
-            z = self.pop[idx].solution.copy()
 
             j0 = self.generator.integers(
                 0,
@@ -322,7 +223,7 @@ class MaCRO_DE(Optimizer):
 
             cross_mask[j0] = True
 
-            z[cross_mask] = y[cross_mask]
+            z = self.math_batcher.crossover(self.pop[idx].solution, y, cross_mask)
 
             z = self.correct_solution(z)
 

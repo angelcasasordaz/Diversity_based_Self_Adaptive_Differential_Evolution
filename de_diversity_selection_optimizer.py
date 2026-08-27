@@ -2,6 +2,8 @@ import numpy as np
 from mealpy.optimizer import Optimizer
 from mealpy.utils.agent import Agent
 
+from diversity_gpu_batching import DiversityMathBatcher
+
 
 class DE_DiversitySelection(Optimizer):
     """
@@ -16,12 +18,26 @@ class DE_DiversitySelection(Optimizer):
     - Mahalanobis pool selection.
     """
 
-    def __init__(self, epoch=1000, pop_size=50, wf=0.1, cr=0.9, **kwargs):
+    def __init__(
+        self,
+        epoch=1000,
+        pop_size=50,
+        wf=0.1,
+        cr=0.9,
+        compute_device="cpu",
+        gpu_device_id=0,
+        gpu_memory_fraction=0.85,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.epoch = self.validator.check_int("epoch", epoch, [1, 100000])
         self.pop_size = self.validator.check_int("pop_size", pop_size, [5, 10000])
         self.wf = self.validator.check_float("wf", wf, (-3.0, 3.0))
         self.cr = self.validator.check_float("cr", cr, (0.0, 1.0))
+        self.compute_device = str(compute_device)
+        self.math_batcher = DiversityMathBatcher(
+            self.compute_device, gpu_device_id, gpu_memory_fraction
+        )
         self.set_parameters(["epoch", "pop_size", "wf", "cr"])
         self.sort_flag = False
         self.support_parallel_modes = True
@@ -30,38 +46,7 @@ class DE_DiversitySelection(Optimizer):
         return np.array([agent.solution for agent in pop], dtype=float)
 
     def _awad(self, pop_pos, lb, ub):
-        _ = lb, ub
-        npop, n_dims = pop_pos.shape
-
-        # Median center per dimension, matching the project AWAD code.
-        med_dim = np.median(pop_pos, axis=0)
-        div_dim = np.mean(np.abs(pop_pos - med_dim), axis=0)
-        div = float(np.sum(div_dim) / max(n_dims, 1))
-
-        unique_count = np.unique(pop_pos, axis=0).shape[0]
-        non_repeat_percent = (unique_count * 100.0) / max(npop, 1)
-
-        std_devs = np.std(pop_pos, axis=0)
-        std_devs[std_devs == 0] = 1e-5
-        if npop <= 1:
-            min_distance = 0.0
-        else:
-            min_distance = np.inf
-            for i in range(npop - 1):
-                diff = (pop_pos[i + 1:] - pop_pos[i]) / std_devs
-                dists = np.sqrt(np.sum(diff * diff, axis=1))
-                if dists.size > 0:
-                    local_min = float(np.min(dists))
-                    if local_min < min_distance:
-                        min_distance = local_min
-            if not np.isfinite(min_distance):
-                min_distance = 0.0
-
-        epsilon = 1e-1
-        penalty_factor = ((min_distance + epsilon) ** 2) / (1.0 + min_distance**2)
-        div = div * 0.1 * non_repeat_percent
-        div = div * penalty_factor
-        return float(div)
+        return self.math_batcher.awad(pop_pos, lb, ub)
 
     def local_awad_contribution(self, candidate_pos, base_pop_pos):
         """
@@ -105,11 +90,10 @@ class DE_DiversitySelection(Optimizer):
         return self.generator.choice(candidates, 3, replace=False)
 
     def _binomial_crossover(self, parent_pos, mutant_pos):
-        trial = parent_pos.copy()
         j0 = self.generator.integers(0, self.problem.n_dims)
         cross_mask = self.generator.random(self.problem.n_dims) <= self.cr
         cross_mask[j0] = True
-        trial[cross_mask] = mutant_pos[cross_mask]
+        trial = self.math_batcher.crossover(parent_pos, mutant_pos, cross_mask)
         return self.correct_solution(trial)
 
     def evolve(self, epoch):
@@ -120,7 +104,7 @@ class DE_DiversitySelection(Optimizer):
             idxs = self._random_de_indices(idx)
             x1, x2, x3 = pop_pos[idxs[0]], pop_pos[idxs[1]], pop_pos[idxs[2]]
 
-            mutant = self.correct_solution(x1 + self.wf * (x2 - x3))
+            mutant = self.correct_solution(self.math_batcher.mutate(x1, x2, x3, self.wf))
             trial = self._binomial_crossover(self.pop[idx].solution, mutant)
             candidate = Agent(solution=trial)
 

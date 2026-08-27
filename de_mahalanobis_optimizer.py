@@ -3,6 +3,8 @@ from mealpy.optimizer import Optimizer
 from mealpy.utils.agent import Agent
 from scipy.stats import chi2
 
+from diversity_gpu_batching import DiversityMathBatcher
+
 
 class DE_Mahalanobis(Optimizer):
     """
@@ -23,13 +25,28 @@ class DE_Mahalanobis(Optimizer):
     and survivor selection remain fixed standard DE behavior.
     """
 
-    def __init__(self, epoch=1000, pop_size=50, wf=0.1, cr=0.9, mahalanobis_q=0.68, **kwargs):
+    def __init__(
+        self,
+        epoch=1000,
+        pop_size=50,
+        wf=0.1,
+        cr=0.9,
+        mahalanobis_q=0.68,
+        compute_device="cpu",
+        gpu_device_id=0,
+        gpu_memory_fraction=0.85,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.epoch = self.validator.check_int("epoch", epoch, [1, 100000])
         self.pop_size = self.validator.check_int("pop_size", pop_size, [5, 10000])
         self.wf = self.validator.check_float("wf", wf, (-3.0, 3.0))
         self.cr = self.validator.check_float("cr", cr, (0.0, 1.0))
         self.mahalanobis_q = self.validator.check_float("mahalanobis_q", mahalanobis_q, (0.0, 1.0))
+        self.compute_device = str(compute_device)
+        self.math_batcher = DiversityMathBatcher(
+            self.compute_device, gpu_device_id, gpu_memory_fraction
+        )
         self.set_parameters(["epoch", "pop_size", "wf", "cr", "mahalanobis_q"])
         self.sort_flag = False
         self.support_parallel_modes = True
@@ -54,60 +71,14 @@ class DE_Mahalanobis(Optimizer):
         return np.array([agent.solution for agent in pop], dtype=float)
 
     def _awad(self, pop_pos, lb, ub):
-        _ = lb, ub
-        npop, n_dims = pop_pos.shape
-
-        # Kept only because the existing Mahalanobis pool switch needs the
-        # delayed normalized diversity state to choose close versus far pools.
-        med_dim = np.median(pop_pos, axis=0)
-        div_dim = np.mean(np.abs(pop_pos - med_dim), axis=0)
-        div = float(np.sum(div_dim) / max(n_dims, 1))
-
-        unique_count = np.unique(pop_pos, axis=0).shape[0]
-        non_repeat_percent = (unique_count * 100.0) / max(npop, 1)
-
-        std_devs = np.std(pop_pos, axis=0)
-        std_devs[std_devs == 0] = 1e-5
-        if npop <= 1:
-            min_distance = 0.0
-        else:
-            min_distance = np.inf
-            for i in range(npop - 1):
-                diff = (pop_pos[i + 1:] - pop_pos[i]) / std_devs
-                dists = np.sqrt(np.sum(diff * diff, axis=1))
-                if dists.size > 0:
-                    local_min = float(np.min(dists))
-                    if local_min < min_distance:
-                        min_distance = local_min
-            if not np.isfinite(min_distance):
-                min_distance = 0.0
-
-        epsilon = 1e-1
-        penalty_factor = ((min_distance + epsilon) ** 2) / (1.0 + min_distance**2)
-        div = div * 0.1 * non_repeat_percent
-        div = div * penalty_factor
-        return float(div)
+        return self.math_batcher.awad(pop_pos, lb, ub)
 
     def _safe_cov_inv(self, pop_pos):
-        n_dims = self.problem.n_dims
-        sigma = np.cov(pop_pos, rowvar=False)
-        if np.ndim(sigma) == 0:
-            sigma = np.array([[float(sigma)]], dtype=float)
-        if sigma.shape != (n_dims, n_dims):
-            sigma = np.eye(n_dims) * 1e-6
-        sigma = (sigma + sigma.T) / 2.0 + 1e-6 * np.eye(n_dims)
-        try:
-            chol = np.linalg.cholesky(sigma)
-            return np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(n_dims)))
-        except np.linalg.LinAlgError:
-            return np.linalg.pinv(sigma)
+        return self.math_batcher.covariance_inverse(pop_pos, self.problem.n_dims)
 
     def _mutation_pool_indices(self, pop_pos, div_norm_used):
         n_dims = self.problem.n_dims
-        mu = np.mean(pop_pos, axis=0)
-        sigma_inv = self._safe_cov_inv(pop_pos)
-        d = pop_pos - mu
-        dist2 = np.sum((d @ sigma_inv) * d, axis=1)
+        dist2 = self.math_batcher.mahalanobis_distances(pop_pos, n_dims)
         thr = chi2.ppf(self.mahalanobis_q, max(n_dims, 1))
         close_mask = dist2 <= thr
 
@@ -127,11 +98,10 @@ class DE_Mahalanobis(Optimizer):
         return self.generator.choice(candidates, 3, replace=False)
 
     def _binomial_crossover(self, parent_pos, mutant_pos):
-        trial = parent_pos.copy()
         j0 = self.generator.integers(0, self.problem.n_dims)
         cross_mask = self.generator.random(self.problem.n_dims) <= self.cr
         cross_mask[j0] = True
-        trial[cross_mask] = mutant_pos[cross_mask]
+        trial = self.math_batcher.crossover(parent_pos, mutant_pos, cross_mask)
         return self.correct_solution(trial)
 
     def evolve(self, epoch):
@@ -148,7 +118,7 @@ class DE_Mahalanobis(Optimizer):
             idxs = self._sample_pool_indices(pool_indices, idx)
             x1, x2, x3 = pop_pos[idxs[0]], pop_pos[idxs[1]], pop_pos[idxs[2]]
 
-            mutant = self.correct_solution(x1 + self.wf * (x2 - x3))
+            mutant = self.correct_solution(self.math_batcher.mutate(x1, x2, x3, self.wf))
             trial = self._binomial_crossover(self.pop[idx].solution, mutant)
             candidate = Agent(solution=trial)
 

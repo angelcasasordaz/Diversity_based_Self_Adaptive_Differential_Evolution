@@ -1,7 +1,10 @@
 import argparse
+import ctypes
 import hashlib
 import json
 import logging
+import math
+import multiprocessing
 import os
 import pickle
 import time
@@ -19,6 +22,7 @@ from mafese import Data, MhaSelector, get_dataset
 from mafese.utils.mealpy_util import FeatureSelectionProblem
 from mafese.utils.estimator import get_general_estimator
 from mealpy.swarm_based.DMOA import OriginalDMOA
+from scipy.stats import friedmanchisquare, rankdata, wilcoxon
 from sklearn.base import clone
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
@@ -29,6 +33,7 @@ from de_mahalanobis_optimizer import DE_Mahalanobis
 from dsade_optimizer import DSADE
 from dsade_awad_optimizer import DSADE_AWAD
 from macro_de_optimizer import MaCRO_DE
+from compute_backend import ComputeBackend
 from algorithm_acronym_list import (
     list_available_optimizers,
     optimizer_acronym,
@@ -81,7 +86,6 @@ OPTIMIZERS = [
     "SHADE",
     "PSO",
     "WOA",
-    # "GWO",
     "HHO",
     "GOA",
     "SA",
@@ -112,7 +116,7 @@ RUNS = 30
 EPOCHS = 150
 POP_SIZE = 50
 
-CHART_CMAP = "tab20"
+CHART_CMAP = "Dark2"
 
 # Qualitative:
 # "tab10"
@@ -125,15 +129,95 @@ CHART_CMAP = "tab20"
 # "Accent"
 
 PARALLEL = True
-N_WORKERS = max(1, (os.cpu_count() or 1) - 1)
+AUTO_WORKER_CPU_FRACTION = 2.0 / 3.0
+AUTO_WORKER_RAM_BYTES = 192 * 1024**2
+AUTO_RAM_RESERVE_BYTES = 512 * 1024**2
 
-EXP_ID = 626
+
+def available_memory_bytes() -> Optional[int]:
+    """Return currently available physical memory using only the standard library."""
+    if os.name == "nt":
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_ulong),
+                ("memory_load", ctypes.c_ulong),
+                ("total_physical", ctypes.c_ulonglong),
+                ("available_physical", ctypes.c_ulonglong),
+                ("total_page_file", ctypes.c_ulonglong),
+                ("available_page_file", ctypes.c_ulonglong),
+                ("total_virtual", ctypes.c_ulonglong),
+                ("available_virtual", ctypes.c_ulonglong),
+                ("available_extended_virtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.available_physical)
+        except (AttributeError, OSError):
+            return None
+        return None
+
+    if os.path.exists("/proc/meminfo"):
+        try:
+            with open("/proc/meminfo", encoding="utf-8") as meminfo:
+                for line in meminfo:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) * 1024
+        except (OSError, ValueError, IndexError):
+            pass
+
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        available_pages = os.sysconf("SC_AVPHYS_PAGES")
+    except (AttributeError, OSError, ValueError):
+        return None
+    return int(page_size * available_pages)
+
+
+def automatic_worker_count(
+    logical_cpus: Optional[int] = None,
+    available_ram: Optional[int] = None,
+) -> int:
+    """Choose a conservative process count while preserving CPU and RAM headroom."""
+    logical_cpus = max(1, int(logical_cpus or os.cpu_count() or 1))
+    cpu_limit = min(
+        max(1, logical_cpus - 2),
+        max(1, math.ceil(logical_cpus * AUTO_WORKER_CPU_FRACTION)),
+    )
+
+    if available_ram is None:
+        available_ram = available_memory_bytes()
+    if available_ram is None:
+        return cpu_limit
+
+    usable_ram = max(0, int(available_ram) - AUTO_RAM_RESERVE_BYTES)
+    ram_limit = max(1, usable_ram // AUTO_WORKER_RAM_BYTES)
+    return max(1, min(cpu_limit, ram_limit))
+
+
+N_WORKERS = automatic_worker_count()
+
+EXP_ID = 627
 TEST_SIZE = 0.2
 RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = False
 FIGURES_ONLY = False
+COMPUTE_DEVICE = "cpu"
+GPU_DEVICE_ID = 0
+GPU_MEMORY_FRACTION = 0.85
+
+GPU_BACKED_CUSTOM_OPTIMIZERS = (
+    "MaCRO-DE",
+    "DSADE",
+    "DSADE_AWAD",
+    "DE-AWAD",
+    "DE-DiversitySelection",
+    "DE-Mahalanobis",
+)
 
 DSADE_BETA_MIN = 0.2
 DSADE_BETA_MAX = 0.8
@@ -210,9 +294,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", default=OUTPUT_ROOT, help="Root directory for Figures and Results")
     parser.add_argument("--reuse-cache", action="store_true", default=REUSE_CACHE, help="Reuse cache when available")
     parser.add_argument("--figures-only", action="store_true", default=FIGURES_ONLY, help="Regenerate only charts from existing cache")
+    parser.add_argument(
+        "--compute-device",
+        default=COMPUTE_DEVICE,
+        choices=["cpu", "gpu", "hybrid"],
+        help="Custom-optimizer math backend; sklearn/MAFESE fitness always stays on CPU",
+    )
+    parser.add_argument("--gpu-device-id", type=int, default=GPU_DEVICE_ID)
+    parser.add_argument("--gpu-memory-fraction", type=float, default=GPU_MEMORY_FRACTION)
     parser.add_argument("--list-optimizers", action="store_true", help="List available optimizers and exit")
     parser.add_argument("--parallel", default="yes" if PARALLEL else "no", choices=["yes", "no"], help="Run independent runs in parallel: yes/no")
-    parser.add_argument("--n-workers", type=int, default=N_WORKERS, help="Number of parallel worker processes")
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=N_WORKERS,
+        help=f"Number of parallel worker processes (automatic default: {N_WORKERS})",
+    )
     parser.add_argument("--dsade-beta-min", type=float, default=DSADE_BETA_MIN)
     parser.add_argument("--dsade-beta-max", type=float, default=DSADE_BETA_MAX)
     parser.add_argument("--dsade-pcr", type=float, default=DSADE_PCR)
@@ -235,6 +332,35 @@ def resolve_optimizers(args: argparse.Namespace) -> List[str]:
 
 def print_available_optimizers() -> None:
     print(list_available_optimizers())
+
+def configure_compute_backend(args: argparse.Namespace) -> None:
+    """Resolve the requested math backend once and print the startup summary."""
+    print(f"Compute mode: {args.compute_device}")
+    backend = ComputeBackend(
+        args.compute_device,
+        device_id=args.gpu_device_id,
+        memory_fraction=args.gpu_memory_fraction,
+    )
+    args.optimizer_compute_device = backend.device
+
+    if backend.uses_gpu:
+        info = backend.gpu_info
+        print("GPU status: detected; custom-optimizer numerical kernels use GPU")
+        print(f"GPU name: {info.name}")
+        backend.free_cached_blocks()
+    elif backend.requested_device == "hybrid":
+        print("GPU status: unavailable; hybrid mode is using CPU fallback")
+        print(f"GPU fallback reason: {backend.fallback_reason}")
+    else:
+        print("GPU status: CPU mode selected; GPU detection was not requested")
+
+    print(
+        "GPU-backed custom optimizers: "
+        + ", ".join(GPU_BACKED_CUSTOM_OPTIMIZERS)
+    )
+    active_workers = args.n_workers if args.parallel == "yes" else 1
+    print(f"CPU worker count: {active_workers}")
+    print("Fitness backend: CPU (MAFESE/scikit-learn)")
 
 def apply_experiment_mode(args: argparse.Namespace) -> None:
     args.experiment_mode = str(args.experiment_mode).lower()
@@ -488,6 +614,15 @@ def _instantiate_mealpy_optimizer(optimizer_cls, args: argparse.Namespace):
 
 def build_optimizer(name: str, args: argparse.Namespace):
     resolved_name = resolve_optimizer_name(name)
+    backend_kwargs = {
+        "compute_device": getattr(
+            args,
+            "optimizer_compute_device",
+            getattr(args, "compute_device", "cpu"),
+        ),
+        "gpu_device_id": getattr(args, "gpu_device_id", 0),
+        "gpu_memory_fraction": getattr(args, "gpu_memory_fraction", 0.85),
+    }
     if resolved_name == "DSADE":
         return DSADE(
             epoch=args.epochs,
@@ -496,6 +631,7 @@ def build_optimizer(name: str, args: argparse.Namespace):
             beta_max=args.dsade_beta_max,
             pcr=args.dsade_pcr,
             mahalanobis_q=args.dsade_mahal_q,
+            **backend_kwargs,
         )
     if resolved_name == "DSADE_AWAD":
         return DSADE_AWAD(
@@ -505,6 +641,7 @@ def build_optimizer(name: str, args: argparse.Namespace):
             beta_max=args.dsade_beta_max,
             pcr=args.dsade_pcr,
             mahalanobis_q=args.dsade_mahal_q,
+            **backend_kwargs,
         )
     if resolved_name == "DE-AWAD":
         return DE_AWAD(
@@ -513,14 +650,18 @@ def build_optimizer(name: str, args: argparse.Namespace):
             beta_min=args.dsade_beta_min,
             beta_max=args.dsade_beta_max,
             pcr=args.dsade_pcr,
+            **backend_kwargs,
         )
     if resolved_name == "DE-DiversitySelection":
-        return DE_DiversitySelection(epoch=args.epochs, pop_size=args.pop_size)
+        return DE_DiversitySelection(
+            epoch=args.epochs, pop_size=args.pop_size, **backend_kwargs
+        )
     if resolved_name == "DE-Mahalanobis":
         return DE_Mahalanobis(
             epoch=args.epochs,
             pop_size=args.pop_size,
             mahalanobis_q=args.dsade_mahal_q,
+            **backend_kwargs,
         )
     if resolved_name == "MaCRO-DE":
         return MaCRO_DE(
@@ -530,6 +671,7 @@ def build_optimizer(name: str, args: argparse.Namespace):
             beta_max=args.dsade_beta_max,
             pcr=args.dsade_pcr,
             mahalanobis_q=args.dsade_mahal_q,
+            **backend_kwargs,
         )
     if resolved_name == "DBO":
         return DBOOptimizer(epoch=args.epochs, pop_size=args.pop_size)
@@ -787,7 +929,12 @@ def execute_pending_runs(
     completed = []
     completed_by_run = {}
     next_run = min(pending_runs)
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    executor_kwargs = {"max_workers": max_workers}
+    if getattr(args, "optimizer_compute_device", "cpu") == "gpu":
+        # CUDA contexts must not be inherited through POSIX fork. Spawn is
+        # already Windows' native behavior and is safe on both platforms.
+        executor_kwargs["mp_context"] = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(**executor_kwargs) as executor:
         futures = [executor.submit(run_single_parallel_task, task) for task in tasks]
         for future in as_completed(futures):
             run, out = future.result()
@@ -1270,86 +1417,251 @@ def export_statistical_excel(
     stats = ["Best", "Worst", "Mean", "Std"]
     if args.experiment_mode == "sensitivity":
         optimizers = [f"{args.sensitivity_parameter}={float(value):g}" for value in args.sensitivity_values]
+        index_name = "SensitivityValue"
     else:
         optimizers = optimizer_order_from_config(optimizer_order)
+        index_name = "Optimizer"
+    index = pd.MultiIndex.from_product([optimizers, stats], names=[index_name, "Statistic"])
+    sheets = {
+        sheet_name: pd.DataFrame(np.nan, index=index, columns=dataset_names)
+        for sheet_name in metrics
+    }
 
-    def safe_sheet_name(name: str, used_names: set) -> str:
-        cleaned = "".join("_" if ch in "[]:*?/\\'" else ch for ch in str(name))
-        cleaned = cleaned.strip() or "Sheet"
-        base = cleaned[:31]
-        sheet_name = base
-        counter = 1
-        while sheet_name in used_names:
-            suffix = f"_{counter}"
-            sheet_name = f"{base[:31 - len(suffix)]}{suffix}"
-            counter += 1
-        used_names.add(sheet_name)
-        return sheet_name
-
-    sheet_tables = {}
-    used_sheet_names = set()
     for dataset_name in dataset_names:
-        for estimator in args.estimators:
-            runs_by_metric = {
-                metric_name: {optimizer: [] for optimizer in optimizers}
-                for metric_name in metrics
-            }
-            sheet_tables[(dataset_name, estimator)] = {
-                "sheet_name": safe_sheet_name(f"{dataset_name}_{estimator}", used_sheet_names),
-                "tables": {},
-            }
-
-            alg_data = results_struct.get(dataset_name, {})
-            for label, row in alg_data.items():
-                parsed = parse_result_label(label, args)
-                row_estimator = parsed["estimator"] or row.get("Estimator") or (
-                    args.estimators[0] if len(args.estimators) == 1 else ""
-                )
-                if str(row_estimator).lower() != str(estimator).lower():
+        alg_data = results_struct.get(dataset_name, {})
+        runs_by_optimizer = {
+            sheet_name: {optimizer: [] for optimizer in optimizers}
+            for sheet_name in metrics
+        }
+        for label, row in alg_data.items():
+            parsed = parse_result_label(label, args)
+            if args.experiment_mode == "sensitivity":
+                parsed_value = parsed.get("sensitivity_value", np.nan)
+                if not np.isfinite(parsed_value):
                     continue
-                if args.experiment_mode == "sensitivity":
-                    parsed_value = parsed.get("sensitivity_value", np.nan)
-                    if not np.isfinite(parsed_value):
-                        continue
-                    optimizer = f"{args.sensitivity_parameter}={float(parsed_value):g}"
-                else:
-                    optimizer = optimizer_acronym(parsed["method"])
-                if optimizer not in set(optimizers):
-                    continue
-                for metric_name, (run_key, _) in metrics.items():
-                    values = np.asarray(row.get(run_key, []), dtype=float).ravel()
-                    if values.size:
-                        runs_by_metric[metric_name][optimizer].append(values)
+                optimizer = f"{args.sensitivity_parameter}={float(parsed_value):g}"
+            else:
+                optimizer = optimizer_acronym(parsed["method"])
+            if optimizer not in set(optimizers):
+                continue
+            for sheet_name, (run_key, _) in metrics.items():
+                values = np.asarray(row.get(run_key, []), dtype=float).ravel()
+                if values.size:
+                    runs_by_optimizer[sheet_name][optimizer].append(values)
 
-            for metric_name, (_, best_mode) in metrics.items():
-                table = pd.DataFrame(np.nan, index=pd.Index(stats, name="Statistic"), columns=optimizers)
-                for optimizer in optimizers:
-                    chunks = runs_by_metric[metric_name][optimizer]
-                    values = np.concatenate(chunks) if chunks else np.array([], dtype=float)
-                    stat_values = _run_stats(values, best_mode)
-                    for stat in stats:
-                        table.loc[stat, optimizer] = stat_values[stat]
-                sheet_tables[(dataset_name, estimator)]["tables"][metric_name] = table
+        for sheet_name, (_, best_mode) in metrics.items():
+            for optimizer in optimizers:
+                chunks = runs_by_optimizer[sheet_name][optimizer]
+                values = np.concatenate(chunks) if chunks else np.array([], dtype=float)
+                stat_values = _run_stats(values, best_mode)
+                for stat in stats:
+                    sheets[sheet_name].loc[(optimizer, stat), dataset_name] = stat_values[stat]
 
     with pd.ExcelWriter(out_path) as writer:
-        for sheet_info in sheet_tables.values():
-            startrow = 0
-            for metric_name in metrics:
-                pd.DataFrame([[metric_name]]).to_excel(
-                    writer,
-                    sheet_name=sheet_info["sheet_name"],
-                    startrow=startrow,
-                    startcol=0,
-                    index=False,
-                    header=False,
-                )
-                sheet_info["tables"][metric_name].to_excel(
-                    writer,
-                    sheet_name=sheet_info["sheet_name"],
-                    startrow=startrow + 1,
-                    startcol=0,
-                )
-                startrow += len(stats) + 4
+        for sheet_name, df in sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name)
+    return out_path
+
+def _holm_adjusted_pvalues(p_values: List[float]) -> np.ndarray:
+    """Return Holm step-down adjusted p-values in their original order."""
+    raw = np.asarray(p_values, dtype=float)
+    if raw.size == 0:
+        return raw
+    order = np.argsort(raw)
+    sorted_raw = raw[order]
+    multipliers = np.arange(raw.size, 0, -1, dtype=float)
+    sorted_adjusted = np.minimum(1.0, np.maximum.accumulate(sorted_raw * multipliers))
+    adjusted = np.empty_like(sorted_adjusted)
+    adjusted[order] = sorted_adjusted
+    return adjusted
+
+def build_friedman_fitness_matrix(
+    results_struct: Dict[str, Dict],
+    dataset_names: List[str],
+    optimizer_order: List[str],
+    args: argparse.Namespace,
+) -> pd.DataFrame:
+    """Build dataset blocks from mean final fitness across independent runs."""
+    optimizers = optimizer_order_from_config(optimizer_order)
+    matrix = pd.DataFrame(
+        np.nan,
+        index=pd.Index(dataset_names, name="Dataset/Function"),
+        columns=pd.Index(optimizers, name="Optimizer"),
+        dtype=float,
+    )
+
+    for dataset_name in dataset_names:
+        fitness_by_optimizer = {optimizer: [] for optimizer in optimizers}
+        for label, row in results_struct.get(dataset_name, {}).items():
+            optimizer = optimizer_acronym(parse_result_label(label, args)["method"])
+            if optimizer not in fitness_by_optimizer:
+                continue
+            run_fitness = np.asarray(row.get("FitRuns", []), dtype=float).ravel()
+            run_fitness = run_fitness[np.isfinite(run_fitness)]
+            if run_fitness.size:
+                fitness_by_optimizer[optimizer].extend(run_fitness.tolist())
+                continue
+            legacy_mean = float(row.get("FitMean", np.nan))
+            if np.isfinite(legacy_mean):
+                fitness_by_optimizer[optimizer].append(legacy_mean)
+
+        for optimizer, values in fitness_by_optimizer.items():
+            if values:
+                matrix.loc[dataset_name, optimizer] = float(np.mean(values))
+    return matrix
+
+def calculate_friedman_analysis(
+    fitness_matrix: pd.DataFrame,
+    mode: str,
+    alpha: float = 0.05,
+) -> Dict[str, pd.DataFrame]:
+    """Calculate one Friedman test and conditional Wilcoxon-Holm post-hoc."""
+    mode_label = str(mode).upper()
+    complete = fitness_matrix.dropna(axis=0, how="any")
+    optimizers = list(fitness_matrix.columns)
+    enough_data = len(optimizers) >= 3 and complete.shape[0] >= 2
+
+    rank_matrix = pd.DataFrame(
+        index=complete.index,
+        columns=optimizers,
+        dtype=float,
+    )
+    for block_name, row in complete.iterrows():
+        rank_matrix.loc[block_name] = rankdata(row.to_numpy(dtype=float), method="average")
+    average_ranks = rank_matrix.mean(axis=0)
+
+    statistic = np.nan
+    p_value = np.nan
+    significant = False
+    status = "Insufficient complete blocks or optimizers"
+    if enough_data:
+        samples = [complete[optimizer].to_numpy(dtype=float) for optimizer in optimizers]
+        statistic, p_value = friedmanchisquare(*samples)
+        statistic = float(statistic)
+        p_value = float(p_value)
+        significant = bool(np.isfinite(p_value) and p_value < alpha)
+        status = "Significant differences detected" if significant else "No significant differences detected"
+
+    finite_ranks = average_ranks.dropna()
+    if finite_ranks.empty:
+        best_rank = np.nan
+        best_optimizers = []
+    else:
+        best_rank = float(finite_ranks.min())
+        best_optimizers = finite_ranks.index[np.isclose(finite_ranks, best_rank)].tolist()
+
+    summary = pd.DataFrame([{
+        "Mode": mode_label,
+        "Metric": "Final fitness (lower is better)",
+        "Aggregation": "Mean final fitness across independent runs per dataset/function and optimizer",
+        "Configured optimizers": len(optimizers),
+        "Available blocks": int(fitness_matrix.shape[0]),
+        "Complete blocks used": int(complete.shape[0]),
+        "Friedman statistic": statistic,
+        "p-value": p_value,
+        "Alpha": float(alpha),
+        "Significant": "YES" if significant else "NO",
+        "Conclusion": status,
+        "Best average rank optimizer(s)": ", ".join(best_optimizers),
+        "Best average rank": best_rank,
+        "Post-hoc method": "Pairwise Wilcoxon signed-rank with Holm correction" if significant else "Not performed",
+    }])
+
+    ranks = pd.DataFrame({
+        "Optimizer": optimizers,
+        "Average rank": [float(average_ranks.get(opt, np.nan)) for opt in optimizers],
+        "Best average rank": ["YES" if opt in best_optimizers else "NO" for opt in optimizers],
+        "Complete blocks used": int(complete.shape[0]),
+    }).sort_values(["Average rank", "Optimizer"], na_position="last", ignore_index=True)
+
+    posthoc_columns = [
+        "Optimizer A",
+        "Optimizer B",
+        "Wilcoxon statistic",
+        "Raw p-value",
+        "Holm adjusted p-value",
+        "Significant at alpha=0.05",
+        "Better average rank",
+        "Note",
+    ]
+    posthoc_rows = []
+    if significant:
+        raw_p_values = []
+        pair_results = []
+        for left_idx, left in enumerate(optimizers[:-1]):
+            for right in optimizers[left_idx + 1:]:
+                left_values = complete[left].to_numpy(dtype=float)
+                right_values = complete[right].to_numpy(dtype=float)
+                if np.allclose(left_values, right_values, rtol=0.0, atol=0.0):
+                    pair_statistic, pair_p = 0.0, 1.0
+                else:
+                    pair_statistic, pair_p = wilcoxon(
+                        left_values,
+                        right_values,
+                        alternative="two-sided",
+                        method="auto",
+                    )
+                pair_results.append((left, right, float(pair_statistic), float(pair_p)))
+                raw_p_values.append(float(pair_p))
+
+        adjusted_p_values = _holm_adjusted_pvalues(raw_p_values)
+        for (left, right, pair_statistic, pair_p), adjusted_p in zip(pair_results, adjusted_p_values):
+            left_rank = float(average_ranks[left])
+            right_rank = float(average_ranks[right])
+            if np.isclose(left_rank, right_rank):
+                better_rank = "TIE"
+            else:
+                better_rank = left if left_rank < right_rank else right
+            posthoc_rows.append({
+                "Optimizer A": left,
+                "Optimizer B": right,
+                "Wilcoxon statistic": pair_statistic,
+                "Raw p-value": pair_p,
+                "Holm adjusted p-value": float(adjusted_p),
+                "Significant at alpha=0.05": "YES" if adjusted_p < alpha else "NO",
+                "Better average rank": better_rank,
+                "Note": "",
+            })
+    else:
+        posthoc_rows.append({
+            "Significant at alpha=0.05": "NO",
+            "Note": "Post-hoc not performed because the Friedman test was not significant or lacked sufficient data.",
+        })
+    posthoc = pd.DataFrame(posthoc_rows, columns=posthoc_columns)
+
+    return {
+        "summary": summary,
+        "ranks": ranks,
+        "posthoc": posthoc,
+        "blocks": fitness_matrix,
+        "block_ranks": rank_matrix,
+    }
+
+def export_friedman_analysis(
+    results_struct: Dict[str, Dict],
+    dataset_names: List[str],
+    optimizer_order: List[str],
+    args: argparse.Namespace,
+    out_path: str,
+    alpha: float = 0.05,
+) -> Optional[str]:
+    """Export cache-derived Friedman analysis for FULL or ABLATION mode."""
+    if args.experiment_mode not in {"full", "ablation"}:
+        return None
+    mode_label = args.experiment_mode.upper()
+    matrix = build_friedman_fitness_matrix(
+        results_struct,
+        dataset_names,
+        optimizer_order,
+        args,
+    )
+    analysis = calculate_friedman_analysis(matrix, mode_label, alpha=alpha)
+    with pd.ExcelWriter(out_path) as writer:
+        analysis["summary"].to_excel(writer, sheet_name=f"{mode_label}_Friedman", index=False)
+        analysis["ranks"].to_excel(writer, sheet_name=f"{mode_label}_Average_Ranks", index=False)
+        analysis["posthoc"].to_excel(writer, sheet_name=f"{mode_label}_PostHoc_Holm", index=False)
+        analysis["blocks"].to_excel(writer, sheet_name=f"{mode_label}_Block_Fitness")
+        analysis["block_ranks"].to_excel(writer, sheet_name=f"{mode_label}_Block_Ranks")
     return out_path
 
 def generate_summary_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace) -> pd.DataFrame:
@@ -2410,6 +2722,20 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
     exported = export_global_excel(results_struct, dataset_names, excel_path)
     statistical_excel = os.path.join(paths.res_dir, f"{output_prefix}Statistical_Results_{paths.exp_tag}.xlsx")
     export_statistical_excel(results_struct, dataset_names, list(args.optimizers), args, statistical_excel)
+    friedman_excel = None
+    if args.experiment_mode in {"full", "ablation"}:
+        mode_label = args.experiment_mode.capitalize()
+        friedman_excel = os.path.join(
+            paths.res_dir,
+            f"{mode_label}_Friedman_Analysis_{paths.exp_tag}.xlsx",
+        )
+        export_friedman_analysis(
+            results_struct,
+            dataset_names,
+            list(args.optimizers),
+            args,
+            friedman_excel,
+        )
     summary_df = generate_summary_dataframe(results_struct, args)
     summary_csv = os.path.join(paths.res_dir, f"{output_prefix}RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
     summary_df.to_csv(summary_csv, index=False)
@@ -2430,7 +2756,7 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
             ablation_chart = generate_ablation_main_figure(summary_df, paths.fig_dir, list(args.optimizers))
             if ablation_chart:
                 generated_charts.append(ablation_chart)
-    return exported, summary_csv, generated_charts, statistical_excel
+    return exported, summary_csv, generated_charts, statistical_excel, friedman_excel
 
 def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str):
     results_struct = load_results_from_cache(paths, args, dataset_names, cache_sig)
@@ -2469,12 +2795,14 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
     print(f"Cache signature: {cache_sig}")
 
     if args.figures_only:
-        exported, summary_csv, generated_charts, statistical_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
+        exported, summary_csv, generated_charts, statistical_excel, friedman_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
         print("Completed figures-only.")
         print(f"Cache dir: {paths.cache_dir}")
         print(f"Figures dir: {paths.fig_dir}")
         print(f"Charts summary CSV: {summary_csv}")
         print(f"Statistical results: {statistical_excel}")
+        if friedman_excel:
+            print(f"Friedman analysis: {friedman_excel}")
         if generated_charts:
             print("Charts:")
             for name in generated_charts:
@@ -2485,12 +2813,14 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
         return
 
     if mode_cache_is_complete(paths, args, dataset_names, cache_sig, show_tf, show_cls):
-        exported, summary_csv, generated_charts, statistical_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
+        exported, summary_csv, generated_charts, statistical_excel, friedman_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
         print(f"[mode-complete] {args.experiment_mode} cache is complete; skipped optimization.")
         print(f"Cache dir: {paths.cache_dir}")
         print(f"Figures dir: {paths.fig_dir}")
         print(f"Charts summary CSV: {summary_csv}")
         print(f"Statistical results: {statistical_excel}")
+        if friedman_excel:
+            print(f"Friedman analysis: {friedman_excel}")
         if generated_charts:
             print("Charts:")
             for name in generated_charts:
@@ -2623,7 +2953,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
 
             results_struct[dataset_name].update(cls_payload)
 
-    exported, summary_csv, generated_charts, statistical_excel = export_mode_outputs(paths, args, dataset_names, results_struct)
+    exported, summary_csv, generated_charts, statistical_excel, friedman_excel = export_mode_outputs(paths, args, dataset_names, results_struct)
     chart_dir = paths.fig_dir
 
     print("Completed.")
@@ -2632,6 +2962,8 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
     print(f"Charts summary CSV: {summary_csv}")
     print(f"Charts dir: {chart_dir}")
     print(f"Statistical results: {statistical_excel}")
+    if friedman_excel:
+        print(f"Friedman analysis: {friedman_excel}")
     if generated_charts:
         print("Notebook-style charts:")
         for name in generated_charts:
@@ -2659,10 +2991,11 @@ def main():
     if args.n_workers < 1:
         raise ValueError("--n-workers must be >= 1")
 
+    configure_compute_backend(args)
+
     for idx, mode in enumerate(modes, start=1):
         print(f"\n=== Mode {idx}/{len(modes)}: {mode} ===")
         run_experiment_mode(clone_args_for_mode(args, mode))
 
 if __name__ == "__main__":
     main()
-
