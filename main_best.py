@@ -21,25 +21,25 @@ import pandas as pd
 from mafese import Data, MhaSelector, get_dataset
 from mafese.utils.mealpy_util import FeatureSelectionProblem
 from mafese.utils.estimator import get_general_estimator
-from mealpy.swarm_based.DMOA import OriginalDMOA
 from scipy.stats import friedmanchisquare, rankdata, wilcoxon
 from sklearn.base import clone
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-from dbo_optimizer import DBOOptimizer
-from de_awad_optimizer import DE_AWAD
-from de_diversity_selection_optimizer import DE_DiversitySelection
-from de_mahalanobis_optimizer import DE_Mahalanobis
-from dsade_optimizer import DSADE
-from dsade_awad_optimizer import DSADE_AWAD
-from macro_de_optimizer import MaCRO_DE
-from compute_backend import ComputeBackend
-from algorithm_acronym_list import (
+from numerical_backend import create_numerical_backend
+from diversity_gpu_batching import (
+    configure_local_gpu_worker,
+    configure_remote_gpu_client,
+    start_gpu_request_service,
+)
+from optimizer_factory import (
+    ExecutionStrategy,
+    build_optimizer,
     list_available_optimizers,
     optimizer_acronym,
-    optimizer_class,
-    resolve_optimizer_name,
+    resolve_optimizer,
+    select_execution_strategy as select_backend_strategy,
 )
+from optimizer_interceptor import Workload
 
 # ============================================================
 # EXPERIMENT CONFIGURATION
@@ -51,7 +51,7 @@ DATASET_SOURCE = "codesmell"
 # "mafese"
 
 EXPERIMENT_MODES = [
-    "full",
+    # "full",
     "ablation",
     "sensitivity",
 ]
@@ -78,10 +78,6 @@ OPTIMIZERS = [
     # "MaCRO-DE",
     "DSADE",
     "DE",
-    # "DE-AWAD",
-    # "DE-DiversitySelection",
-    # "DE-Mahalanobis",
-    # "DSA-DE",
     "JADE",
     "SHADE",
     "PSO",
@@ -116,19 +112,6 @@ RUNS = 30
 EPOCHS = 150
 POP_SIZE = 50
 
-CHART_CMAP = "Dark2"
-
-# Qualitative:
-# "tab10"
-# "tab20"
-# "Set1"
-# "Set2"
-# "Set3"
-# "Dark2"
-# "Paired"
-# "Accent"
-
-PARALLEL = True
 AUTO_WORKER_CPU_FRACTION = 2.0 / 3.0
 AUTO_WORKER_RAM_BYTES = 192 * 1024**2
 AUTO_RAM_RESERVE_BYTES = 512 * 1024**2
@@ -199,25 +182,24 @@ def automatic_worker_count(
 
 N_WORKERS = automatic_worker_count()
 
-EXP_ID = 627
+EXP_ID = 620
 TEST_SIZE = 0.2
 RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = False
 FIGURES_ONLY = False
-COMPUTE_DEVICE = "cpu"
+COMPUTE_DEVICE = "gpu"
+# Options:
+# "cpu"
+# "gpu"
+# "hybrid"
 GPU_DEVICE_ID = 0
 GPU_MEMORY_FRACTION = 0.85
+HYBRID_GPU_MIN_KERNEL_WORK = 100_000
+HYBRID_GPU_MIN_EPOCHS = 2
 
-GPU_BACKED_CUSTOM_OPTIMIZERS = (
-    "MaCRO-DE",
-    "DSADE",
-    "DSADE_AWAD",
-    "DE-AWAD",
-    "DE-DiversitySelection",
-    "DE-Mahalanobis",
-)
+GPU_OWNER_BACKEND = None
 
 DSADE_BETA_MIN = 0.2
 DSADE_BETA_MAX = 0.8
@@ -258,6 +240,21 @@ SUPPORTED_TRANSFER_FUNCTIONS = [
     "sstf_03",
     "sstf_04",
 ]
+
+CHART_CMAP = "Dark2"
+
+# Qualitative:
+# "tab10"
+# "tab20"
+# "Set1"
+# "Set2"
+# "Set3"
+# "Dark2"
+# "Paired"
+# "Accent"
+
+PARALLEL = True
+DEBUG_PARALLEL_PROGRESS = False
 
 @dataclass
 class Paths:
@@ -325,42 +322,196 @@ def resolve_optimizers(args: argparse.Namespace) -> List[str]:
     optimizers = []
     for name in args.optimizers:
         resolved_name = resolve_optimizer_name(name)
-        display_name = resolved_name if resolved_name == "OriginalDMOA" else optimizer_acronym(resolved_name)
+        display_name = optimizer_acronym(resolved_name)
         if display_name not in optimizers:
             optimizers.append(display_name)
     return optimizers
 
+
+def resolve_optimizer_name(name: str) -> str:
+    """Compatibility helper backed by the common dynamic resolver."""
+    return resolve_optimizer(name).canonical_name
+
+
+def validate_comparison_backend(args: argparse.Namespace, optimizer_names: List[str]) -> None:
+    """Reject mixed-backend comparisons before any optimizer is constructed."""
+    requested = str(args.compute_device).lower()
+    resolved = [resolve_optimizer(name) for name in optimizer_names]
+    unsupported = [] if requested == "cpu" else [
+        item for item in resolved if not item.capability.supports_gpu
+    ]
+    backend_reason = None
+    if requested != "cpu" and (GPU_OWNER_BACKEND is None or not GPU_OWNER_BACKEND.uses_gpu):
+        backend_reason = (
+            getattr(GPU_OWNER_BACKEND, "fallback_reason", None)
+            or "CUDA/runtime backend is unavailable"
+        )
+
+    passed = not unsupported and backend_reason is None
+    validated = 0 if backend_reason is not None else len(resolved) - len(unsupported)
+    print(f"Requested backend: {requested}")
+    print(f"Comparison backend validation: {'PASSED' if passed else 'FAILED'}")
+    print(f"Optimizers validated: {validated}/{len(resolved)}")
+    if unsupported:
+        print("Optimizers lacking complete GPU support:")
+        for item in unsupported:
+            print(
+                f"- {item.canonical_name}: {item.capability.capability.value} - "
+                f"{item.capability.reason}"
+            )
+    if backend_reason is not None:
+        print(f"GPU backend unavailable: {backend_reason}")
+    if not passed:
+        raise RuntimeError("comparison backend validation failed before optimization")
+
+
+def report_gpu_acceptance(args: argparse.Namespace, modes: List[str]) -> None:
+    """Report genuine GPU coverage for each configured comparison suite."""
+    suites = {}
+    for mode in ("full", "ablation", "sensitivity"):
+        mode_args = clone_args_for_mode(args, mode)
+        apply_experiment_mode(mode_args)
+        names = resolve_optimizers(mode_args)
+        if mode == "sensitivity":
+            supported = int(resolve_optimizer(names[0]).capability.supports_gpu) * len(mode_args.sensitivity_values)
+            total = len(mode_args.sensitivity_values)
+        else:
+            supported = sum(resolve_optimizer(name).capability.supports_gpu for name in names)
+            total = len(names)
+        suites[mode] = (supported, total)
+
+    selected_supported = all(
+        suites[mode][0] == suites[mode][1] for mode in modes
+    )
+    backend_available = GPU_OWNER_BACKEND is not None and GPU_OWNER_BACKEND.uses_gpu
+    print(
+        "GPU comparison backend validation: "
+        f"{'PASSED' if selected_supported and backend_available else 'FAILED'}"
+    )
+    print(f"GPU-supported FULL optimizers: {suites['full'][0]}/{suites['full'][1]}")
+    print(f"ABLATION GPU support: {suites['ablation'][0]}/{suites['ablation'][1]}")
+    print(f"SENSITIVITY GPU support: {suites['sensitivity'][0]}/{suites['sensitivity'][1]}")
+
 def print_available_optimizers() -> None:
     print(list_available_optimizers())
 
+def format_memory_size(byte_count: int) -> str:
+    return f"{byte_count / 1024**3:.2f} GiB"
+
 def configure_compute_backend(args: argparse.Namespace) -> None:
     """Resolve the requested math backend once and print the startup summary."""
-    print(f"Compute mode: {args.compute_device}")
-    backend = ComputeBackend(
-        args.compute_device,
+    global GPU_OWNER_BACKEND
+    requested_device = str(args.compute_device).lower()
+    backend = create_numerical_backend(
+        requested_device,
         device_id=args.gpu_device_id,
         memory_fraction=args.gpu_memory_fraction,
     )
+    args.gpu_initialization_fallback_reason = backend.fallback_reason
+    GPU_OWNER_BACKEND = backend
     args.optimizer_compute_device = backend.device
+
+    print(f"Requested compute mode: {requested_device}")
+    print(f"Startup numerical backend: {'gpu' if backend.uses_gpu else 'cpu'}")
 
     if backend.uses_gpu:
         info = backend.gpu_info
         print("GPU status: detected; custom-optimizer numerical kernels use GPU")
         print(f"GPU name: {info.name}")
+        print(f"VRAM total: {format_memory_size(info.total_memory_bytes)}")
+        print(f"VRAM available: {format_memory_size(info.free_memory_bytes)}")
+        print(
+            f"GPU memory limit/fraction: {format_memory_size(info.memory_limit_bytes)} "
+            f"({info.memory_fraction:.0%})"
+        )
+        safe_capacity = min(info.free_memory_bytes, info.memory_limit_bytes)
+        print(f"Estimated safe GPU capacity: {format_memory_size(safe_capacity)}")
         backend.free_cached_blocks()
-    elif backend.requested_device == "hybrid":
-        print("GPU status: unavailable; hybrid mode is using CPU fallback")
-        print(f"GPU fallback reason: {backend.fallback_reason}")
+    elif requested_device in {"gpu", "hybrid"}:
+        mode_label = requested_device
+        print(f"GPU status: unavailable; {mode_label} mode selected CPU fallback")
+        print("GPU name: unavailable")
+        print("VRAM total: unavailable")
+        print("VRAM available: unavailable")
+        print(f"GPU memory limit/fraction: unavailable ({backend.memory_fraction:.0%} configured)")
+        fallback_reason = args.gpu_initialization_fallback_reason or backend.fallback_reason
+        print(f"GPU fallback reason ({mode_label}): {fallback_reason}")
     else:
         print("GPU status: CPU mode selected; GPU detection was not requested")
+        print("GPU name: not queried")
+        print("VRAM total: not queried")
+        print("VRAM available: not queried")
+        print(f"GPU memory limit/fraction: not active ({backend.memory_fraction:.0%} configured)")
 
-    print(
-        "GPU-backed custom optimizers: "
-        + ", ".join(GPU_BACKED_CUSTOM_OPTIMIZERS)
-    )
+    print("Optimizer GPU support: resolved dynamically per optimizer")
     active_workers = args.n_workers if args.parallel == "yes" else 1
-    print(f"CPU worker count: {active_workers}")
+    if backend.uses_gpu and requested_device == "hybrid":
+        print("Startup GPU owner capacity: adaptive (0 or 1 for the configured GPU)")
+        print("Selected hybrid strategy: deferred until dataset dimensions and optimizer are known")
+        print("Hybrid selection reason: workload size and safe VRAM capacity are evaluated per run group")
+    else:
+        owner_capacity = 0
+        if backend.uses_gpu and requested_device == "gpu":
+            free_bytes = int(backend.gpu_info.free_memory_bytes)
+            owner_capacity = min(2, active_workers)
+            while owner_capacity > 1 and free_bytes < 2 * owner_capacity * 512 * 1024**2:
+                owner_capacity -= 1
+        print(f"Startup GPU run-worker capacity: {owner_capacity}")
+        if owner_capacity:
+            print("GPU worker architecture: local persistent CUDA contexts")
+    if requested_device == "gpu":
+        print(f"GPU run workers selected: {owner_capacity}")
+    else:
+        print(f"CPU workers selected: {active_workers}")
     print("Fitness backend: CPU (MAFESE/scikit-learn)")
+
+
+def select_execution_strategy(
+    args: argparse.Namespace,
+    data: Data,
+    method: str,
+    run_count: int,
+) -> ExecutionStrategy:
+    """Resolve strict CPU/GPU or adaptive hybrid through the common policy."""
+    workload = Workload(
+        max(1, int(args.pop_size)),
+        max(1, int(data.X_train.shape[1])),
+        max(1, int(args.epochs)),
+    )
+    return select_backend_strategy(
+        getattr(args, "compute_device", "cpu"),
+        resolve_optimizer(method),
+        workload,
+        GPU_OWNER_BACKEND,
+        HYBRID_GPU_MIN_KERNEL_WORK,
+        HYBRID_GPU_MIN_EPOCHS,
+    )
+
+
+def print_execution_strategy(
+    strategy: ExecutionStrategy,
+    args: argparse.Namespace,
+    run_count: int,
+    gpu_run_workers: Optional[int] = None,
+) -> None:
+    active_workers = min(args.n_workers, run_count) if args.parallel == "yes" else 1
+    print(f"Requested backend: {str(args.compute_device).lower()}")
+    print(f"Actual backend: {strategy.optimizer_compute_device}")
+    print(f"Reason: {strategy.reason}")
+    print(f"Requested compute mode: {str(args.compute_device).lower()}")
+    print(f"Actual numerical backend: {strategy.optimizer_compute_device}")
+    print(f"GPU workers/owners selected: {gpu_run_workers if gpu_run_workers is not None else strategy.gpu_owner_count}")
+    if gpu_run_workers is not None:
+        print("CPU fitness: co-located in each GPU run worker")
+    else:
+        print(f"CPU workers selected: {active_workers}")
+    if GPU_OWNER_BACKEND is not None and GPU_OWNER_BACKEND.uses_gpu:
+        print(f"VRAM available: {format_memory_size(GPU_OWNER_BACKEND.gpu_info.free_memory_bytes)}")
+    else:
+        print("VRAM available: unavailable")
+    print(f"Execution strategy: {'forced-gpu-local-persistent-workers' if gpu_run_workers is not None else strategy.name}")
+    print(f"Optimizer capability: {strategy.capability.value}")
+    print(f"Backend selection reason: {strategy.reason}")
 
 def apply_experiment_mode(args: argparse.Namespace) -> None:
     args.experiment_mode = str(args.experiment_mode).lower()
@@ -547,142 +698,6 @@ def print_dataset_summary(args: argparse.Namespace, dataset_specs: List[DatasetS
     for spec in dataset_specs:
         print(f"- {spec.name}")
 
-
-class SafeOriginalDMOA(OriginalDMOA):
-    """OriginalDMOA with numerically safe updates for binary feature-selection spaces."""
-
-    def evolve(self, epoch):
-        cf = (1.0 - epoch / self.epoch) ** (2.0 * epoch / self.epoch)
-        fit_list = np.array([agent.target.fitness for agent in self.pop])
-        mean_cost = np.mean(fit_list)
-        fi = np.exp(-fit_list / (mean_cost + self.EPSILON))
-
-        for idx in range(0, self.pop_size):
-            alpha = self.get_index_roulette_wheel_selection(fi)
-            k = self.generator.choice(list(set(range(0, self.pop_size)) - {idx, alpha}))
-            phi = (self.peep / 2) * self.generator.uniform(-1, 1, self.problem.n_dims)
-            new_pos = self.pop[alpha].solution + phi * (self.pop[alpha].solution - self.pop[k].solution)
-            new_pos = self.correct_solution(new_pos)
-            agent = self.generate_agent(new_pos)
-            if self.compare_target(agent.target, self.pop[idx].target, self.problem.minmax):
-                self.pop[idx] = agent
-            else:
-                self.C[idx] += 1
-
-        sm = np.zeros(self.pop_size)
-        for idx in range(0, self.pop_size):
-            k = self.generator.choice(list(set(range(0, self.pop_size)) - {idx}))
-            phi = (self.peep / 2) * self.generator.uniform(-1, 1, self.problem.n_dims)
-            new_pos = self.pop[idx].solution + phi * (self.pop[idx].solution - self.pop[k].solution)
-            new_pos = self.correct_solution(new_pos)
-            agent = self.generate_agent(new_pos)
-            current_fit = self.pop[idx].target.fitness
-            trial_fit = agent.target.fitness
-            denom = max(abs(trial_fit), abs(current_fit), self.EPSILON)
-            sm[idx] = (trial_fit - current_fit) / denom
-            if self.compare_target(agent.target, self.pop[idx].target, self.problem.minmax):
-                self.pop[idx] = agent
-            else:
-                self.C[idx] += 1
-
-        for idx in range(0, self.n_baby_sitter):
-            if self.C[idx] >= self.L:
-                self.pop[idx] = self.generate_agent()
-                self.C[idx] = 0
-
-        new_tau = np.mean(sm)
-        for idx in range(0, self.pop_size):
-            m = np.full(self.problem.n_dims, sm[idx], dtype=float)
-            phi = (self.peep / 2) * self.generator.uniform(-1, 1, self.problem.n_dims)
-            if new_tau > self.tau:
-                new_pos = self.pop[idx].solution - cf * phi * self.generator.random() * (self.pop[idx].solution - m)
-            else:
-                new_pos = self.pop[idx].solution + cf * phi * self.generator.random() * (self.pop[idx].solution - m)
-            self.tau = new_tau
-            new_pos = self.correct_solution(new_pos)
-            self.pop[idx] = self.generate_agent(new_pos)
-
-
-def _instantiate_mealpy_optimizer(optimizer_cls, args: argparse.Namespace):
-    init_params = inspect.signature(optimizer_cls.__init__).parameters
-    kwargs = {}
-    if "epoch" in init_params:
-        kwargs["epoch"] = args.epochs
-    if "pop_size" in init_params:
-        kwargs["pop_size"] = args.pop_size
-    return optimizer_cls(**kwargs)
-
-def build_optimizer(name: str, args: argparse.Namespace):
-    resolved_name = resolve_optimizer_name(name)
-    backend_kwargs = {
-        "compute_device": getattr(
-            args,
-            "optimizer_compute_device",
-            getattr(args, "compute_device", "cpu"),
-        ),
-        "gpu_device_id": getattr(args, "gpu_device_id", 0),
-        "gpu_memory_fraction": getattr(args, "gpu_memory_fraction", 0.85),
-    }
-    if resolved_name == "DSADE":
-        return DSADE(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-            beta_min=args.dsade_beta_min,
-            beta_max=args.dsade_beta_max,
-            pcr=args.dsade_pcr,
-            mahalanobis_q=args.dsade_mahal_q,
-            **backend_kwargs,
-        )
-    if resolved_name == "DSADE_AWAD":
-        return DSADE_AWAD(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-            beta_min=args.dsade_beta_min,
-            beta_max=args.dsade_beta_max,
-            pcr=args.dsade_pcr,
-            mahalanobis_q=args.dsade_mahal_q,
-            **backend_kwargs,
-        )
-    if resolved_name == "DE-AWAD":
-        return DE_AWAD(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-            beta_min=args.dsade_beta_min,
-            beta_max=args.dsade_beta_max,
-            pcr=args.dsade_pcr,
-            **backend_kwargs,
-        )
-    if resolved_name == "DE-DiversitySelection":
-        return DE_DiversitySelection(
-            epoch=args.epochs, pop_size=args.pop_size, **backend_kwargs
-        )
-    if resolved_name == "DE-Mahalanobis":
-        return DE_Mahalanobis(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-            mahalanobis_q=args.dsade_mahal_q,
-            **backend_kwargs,
-        )
-    if resolved_name == "MaCRO-DE":
-        return MaCRO_DE(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-            beta_min=args.dsade_beta_min,
-            beta_max=args.dsade_beta_max,
-            pcr=args.dsade_pcr,
-            mahalanobis_q=args.dsade_mahal_q,
-            **backend_kwargs,
-        )
-    if resolved_name == "DBO":
-        return DBOOptimizer(epoch=args.epochs, pop_size=args.pop_size)
-
-    # Simple "DMOA" is resolved by algorithm_acronym_list to DevDMOA. This
-    # explicit OriginalDMOA path keeps the local numerical guard for users who
-    # intentionally request the original variant in binary FS experiments.
-    if resolved_name == "OriginalDMOA":
-        return SafeOriginalDMOA(epoch=args.epochs, pop_size=args.pop_size)
-
-    return _instantiate_mealpy_optimizer(optimizer_class(resolved_name), args)
 
 def build_cache_signature(args: argparse.Namespace) -> str:
     payload = {
@@ -898,10 +913,15 @@ def execute_pending_runs(
     pending_runs: List[int],
     on_run_complete=None,
 ):
+    strategy = select_execution_strategy(args, data, method, len(pending_runs))
+    worker_args = argparse.Namespace(**vars(args))
+    worker_args.optimizer_compute_device = strategy.optimizer_compute_device
+    requested_device = str(getattr(args, "compute_device", "cpu")).lower()
+
     if args.parallel != "yes" or len(pending_runs) <= 1:
         completed = []
         for run in pending_runs:
-            item = (run, run_single(data, estimator, method, tf, args, args.seed_base + run))
+            item = (run, run_single(data, estimator, method, tf, worker_args, args.seed_base + run))
             if on_run_complete is not None:
                 on_run_complete(*item)
             completed.append(item)
@@ -914,6 +934,17 @@ def execute_pending_runs(
         "y_test": data.y_test,
     }
     max_workers = min(args.n_workers, len(pending_runs))
+    if requested_device == "gpu":
+        gpu_info = getattr(GPU_OWNER_BACKEND, "gpu_info", None)
+        free_bytes = int(getattr(gpu_info, "free_memory_bytes", 0))
+        per_worker_reserve = max(strategy.estimated_gpu_bytes, 512 * 1024**2)
+        safe_workers = min(2, max_workers)
+        while safe_workers > 1 and free_bytes < 2 * safe_workers * per_worker_reserve:
+            safe_workers -= 1
+        max_workers = max(1, safe_workers)
+        worker_args.gpu_memory_fraction = args.gpu_memory_fraction / max_workers
+    if requested_device in {"gpu", "hybrid"}:
+        print_execution_strategy(strategy, args, len(pending_runs), max_workers if requested_device == "gpu" else None)
     tasks = [
         {
             "run": run,
@@ -921,7 +952,7 @@ def execute_pending_runs(
             "estimator": estimator,
             "method": method,
             "tf": tf,
-            "args": args,
+            "args": worker_args,
             "seed": args.seed_base + run,
         }
         for run in pending_runs
@@ -930,21 +961,82 @@ def execute_pending_runs(
     completed_by_run = {}
     next_run = min(pending_runs)
     executor_kwargs = {"max_workers": max_workers}
-    if getattr(args, "optimizer_compute_device", "cpu") == "gpu":
-        # CUDA contexts must not be inherited through POSIX fork. Spawn is
-        # already Windows' native behavior and is safe on both platforms.
-        executor_kwargs["mp_context"] = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(**executor_kwargs) as executor:
-        futures = [executor.submit(run_single_parallel_task, task) for task in tasks]
-        for future in as_completed(futures):
-            run, out = future.result()
-            completed_by_run[run] = out
-            while next_run in completed_by_run:
-                item = (next_run, completed_by_run.pop(next_run))
-                if on_run_complete is not None:
-                    on_run_complete(*item)
-                completed.append(item)
-                next_run += 1
+    gpu_service_manager = None
+    gpu_service_process = None
+    if requested_device == "gpu":
+        spawn_context = multiprocessing.get_context("spawn")
+        executor_kwargs.update({
+            "mp_context": spawn_context,
+            "initializer": configure_local_gpu_worker,
+            "initargs": (
+                args.gpu_device_id,
+                worker_args.gpu_memory_fraction,
+            ),
+        })
+        print(f"GPU worker architecture: {max_workers} local persistent CUDA run worker(s)")
+    elif strategy.gpu_owner_count > 0:
+        if GPU_OWNER_BACKEND is None:
+            raise RuntimeError("GPU execution requires an initialized parent-owned GPU backend")
+        spawn_context = multiprocessing.get_context("spawn")
+        gpu_service_manager = spawn_context.Manager()
+        connection_pool = gpu_service_manager.Queue(max_workers)
+        server_connections = []
+        client_connections = []
+        for _ in range(max_workers):
+            server_connection, client_connection = spawn_context.Pipe(duplex=True)
+            server_connections.append(server_connection)
+            client_connections.append(client_connection)
+            connection_pool.put(client_connection)
+        gpu_service_stop = spawn_context.Event()
+        gpu_service_process = spawn_context.Process(
+            target=start_gpu_request_service,
+            args=(
+                args.gpu_device_id,
+                args.gpu_memory_fraction,
+                server_connections,
+                gpu_service_stop,
+                DEBUG_PARALLEL_PROGRESS,
+            ),
+            name="diversity-gpu-owner",
+            daemon=True,
+        )
+        gpu_service_process.start()
+        executor_kwargs.update({
+            "mp_context": spawn_context,
+            "initializer": configure_remote_gpu_client,
+            "initargs": (connection_pool, 10.0, DEBUG_PARALLEL_PROGRESS),
+        })
+        print("GPU worker architecture: one CUDA owner with concurrent, deadline-bound per-worker channels")
+    try:
+        with ProcessPoolExecutor(**executor_kwargs) as executor:
+            futures = [executor.submit(run_single_parallel_task, task) for task in tasks]
+            for future in as_completed(futures):
+                run, out = future.result()
+                if DEBUG_PARALLEL_PROGRESS:
+                    if run == next_run:
+                        print(f"  Run {run + 1:02d} worker completed; ready for ordered output.")
+                    else:
+                        print(f"  Run {run + 1:02d} worker completed; waiting for ordered output.")
+                completed_by_run[run] = out
+                while next_run in completed_by_run:
+                    item = (next_run, completed_by_run.pop(next_run))
+                    if on_run_complete is not None:
+                        on_run_complete(*item)
+                    completed.append(item)
+                    if DEBUG_PARALLEL_PROGRESS:
+                        print(f"  Run {next_run + 1:02d} ordered result emitted.")
+                    next_run += 1
+    finally:
+        if gpu_service_process is not None:
+            gpu_service_stop.set()
+            gpu_service_process.join(timeout=12.0)
+            if gpu_service_process.is_alive():
+                gpu_service_process.terminate()
+                gpu_service_process.join(timeout=2.0)
+            for connection in server_connections + client_connections:
+                connection.close()
+        if gpu_service_manager is not None:
+            gpu_service_manager.shutdown()
     return completed
 
 
@@ -2919,21 +3011,15 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
 
                         if args.parallel == "yes" and len(pending_runs) > 1:
                             print(f"  Parallel: yes | workers={min(args.n_workers, len(pending_runs))}")
-                            execute_pending_runs(
-                                data,
-                                estimator,
-                                method,
-                                tf,
-                                args,
-                                pending_runs,
-                                on_run_complete=checkpoint_run,
-                            )
-                        else:
-                            for run in pending_runs:
-                                checkpoint_run(
-                                    run,
-                                    run_single(data, estimator, method, tf, args, args.seed_base + run),
-                                )
+                        execute_pending_runs(
+                            data,
+                            estimator,
+                            method,
+                            tf,
+                            args,
+                            pending_runs,
+                            on_run_complete=checkpoint_run,
+                        )
 
                         cls_payload[label] = build_label_payload(
                             estimator,
@@ -2992,6 +3078,17 @@ def main():
         raise ValueError("--n-workers must be >= 1")
 
     configure_compute_backend(args)
+
+    comparison_optimizers = []
+    for mode in modes:
+        validation_args = clone_args_for_mode(args, mode)
+        apply_experiment_mode(validation_args)
+        validate_selection_options(validation_args)
+        for optimizer in resolve_optimizers(validation_args):
+            if optimizer not in comparison_optimizers:
+                comparison_optimizers.append(optimizer)
+    report_gpu_acceptance(args, modes)
+    validate_comparison_backend(args, comparison_optimizers)
 
     for idx, mode in enumerate(modes, start=1):
         print(f"\n=== Mode {idx}/{len(modes)}: {mode} ===")
