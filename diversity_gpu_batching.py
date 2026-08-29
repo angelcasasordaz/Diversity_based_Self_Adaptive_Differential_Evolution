@@ -231,6 +231,68 @@ class DiversityMathBatcher:
         penalty = ((min_distance + 0.1) ** 2) / (1.0 + min_distance**2)
         return self.backend.scalar(div * 0.1 * non_repeat_percent * penalty)
 
+    def awad_candidate_parent_pairs(self, population, candidates, indices) -> np.ndarray:
+        """Score local candidate/parent AWAD pairs with one backend round-trip.
+
+        Each local population has exactly the same row order as constructing it
+        with ``delete`` followed by ``vstack``.  Only transport and scalar
+        synchronization are batched; the AWAD formula is unchanged.
+        """
+        if self.remote is not None:
+            return self._remote_or_cpu(
+                "awad_candidate_parent_pairs", population, candidates, indices
+            )
+
+        population = np.asarray(population, dtype=float)
+        candidates = np.asarray(candidates, dtype=float)
+        indices = np.asarray(indices, dtype=np.intp)
+        if indices.size == 0:
+            return np.empty((0, 2), dtype=float)
+
+        if not self.uses_gpu:
+            scores = np.empty((indices.size, 2), dtype=float)
+            parent_awad = self._awad_cpu(population)
+            for out_idx, (candidate, parent_idx) in enumerate(zip(candidates, indices)):
+                base = np.delete(population, parent_idx, axis=0)
+                scores[out_idx, 0] = self._awad_cpu(np.vstack((base, candidate)))
+                scores[out_idx, 1] = parent_awad
+            return scores
+
+        xp = self.backend.xp
+        pop_gpu = self.backend.asarray(population, dtype=xp.float64)
+        candidates_gpu = self.backend.asarray(candidates, dtype=xp.float64)
+        device_scores = []
+        for candidate, parent_idx in zip(candidates_gpu, indices):
+            # Boolean indexing preserves the exact np.delete row order.
+            keep = xp.arange(pop_gpu.shape[0]) != int(parent_idx)
+            base = pop_gpu[keep]
+            device_scores.append((
+                self._awad_device(xp.vstack((base, candidate))),
+                self._awad_device(xp.vstack((base, pop_gpu[int(parent_idx)]))),
+            ))
+        return self.backend.to_cpu(xp.asarray(device_scores, dtype=xp.float64))
+
+    def _awad_device(self, pop):
+        """AWAD on an existing device array, without a host synchronization."""
+        xp = self.backend.xp
+        npop, n_dims = pop.shape
+        median = xp.median(pop, axis=0)
+        div = xp.sum(xp.mean(xp.abs(pop - median), axis=0)) / max(n_dims, 1)
+        unique_count = xp.unique(pop, axis=0).shape[0]
+        non_repeat_percent = unique_count * 100.0 / max(npop, 1)
+        std = xp.std(pop, axis=0)
+        std = xp.where(std == 0, 1.0e-5, std)
+        if npop <= 1:
+            min_distance = xp.asarray(0.0)
+        else:
+            scaled = (pop[:, None, :] - pop[None, :, :]) / std
+            distances = xp.sqrt(xp.sum(scaled * scaled, axis=-1))
+            diagonal = xp.eye(npop, dtype=bool)
+            min_distance = xp.min(xp.where(diagonal, xp.inf, distances))
+            min_distance = xp.where(xp.isfinite(min_distance), min_distance, 0.0)
+        penalty = ((min_distance + 0.1) ** 2) / (1.0 + min_distance**2)
+        return div * 0.1 * non_repeat_percent * penalty
+
     @staticmethod
     def _awad_cpu(population) -> float:
         pop = np.asarray(population, dtype=float)

@@ -24,6 +24,9 @@ from mafese.utils.estimator import get_general_estimator
 from scipy.stats import friedmanchisquare, rankdata, wilcoxon
 from sklearn.base import clone
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
+from threadpoolctl import threadpool_limits
 
 from numerical_backend import create_numerical_backend
 from diversity_gpu_batching import (
@@ -181,6 +184,7 @@ def automatic_worker_count(
 
 
 N_WORKERS = automatic_worker_count()
+HYBRID_MAX_RUN_WORKERS = 4
 
 EXP_ID = 620
 TEST_SIZE = 0.2
@@ -189,14 +193,14 @@ SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = False
 FIGURES_ONLY = False
-COMPUTE_DEVICE = "gpu"
+COMPUTE_DEVICE = "hybrid"
 # Options:
 # "cpu"
 # "gpu"
 # "hybrid"
 GPU_DEVICE_ID = 0
 GPU_MEMORY_FRACTION = 0.85
-HYBRID_GPU_MIN_KERNEL_WORK = 100_000
+HYBRID_GPU_MIN_KERNEL_WORK = 1_000_000
 HYBRID_GPU_MIN_EPOCHS = 2
 
 GPU_OWNER_BACKEND = None
@@ -777,16 +781,30 @@ class RobustClassificationFeatureSelectionProblem(FeatureSelectionProblem):
             fit_sign=1,
             **kwargs,
         )
+        # Objective results are deterministic for these estimators. Keep the
+        # cache strictly problem-local so independent runs never share state.
+        self._objective_cache = (
+            {} if isinstance(self.estimator, (KNeighborsClassifier, SVC)) else None
+        )
 
     def obj_func(self, solution):
         x = self.decode_solution(solution)["my_var"]
+        cache_key = None
+        if self._objective_cache is not None:
+            cache_key = np.asarray(x, dtype=np.uint8).tobytes()
+            cached = self._objective_cache.get(cache_key)
+            if cached is not None:
+                return list(cached)
         cols = np.flatnonzero(x)
         self.estimator.fit(self.data.X_train[:, cols], self.data.y_train)
         y_valid_pred = self.estimator.predict(self.data.X_test[:, cols])
         obj = self._score(self.data.y_test, y_valid_pred)
         feature_ratio = np.sum(x) / self.n_dims
         fitness = self.fit_weights[0] * (1.0 - obj) + self.fit_weights[1] * feature_ratio
-        return [fitness, obj, np.sum(x)]
+        result = [fitness, obj, np.sum(x)]
+        if self._objective_cache is not None:
+            self._objective_cache[cache_key] = tuple(result)
+        return result
 
     def _score(self, y_true, y_pred) -> float:
         metric = str(self.obj_name).upper()
@@ -884,8 +902,26 @@ def run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: a
     }
 
 
+_RUN_WORKER_DATA_SPLIT = None
+_RUN_WORKER_THREAD_LIMIT = None
+
+
+def initialize_run_worker(data_split, gpu_mode=None, gpu_args=()):
+    """Install immutable run-group data once per process, plus its GPU client."""
+    global _RUN_WORKER_DATA_SPLIT, _RUN_WORKER_THREAD_LIMIT
+    _RUN_WORKER_DATA_SPLIT = data_split
+    _RUN_WORKER_THREAD_LIMIT = threadpool_limits(limits=1)
+    if gpu_mode == "local":
+        configure_local_gpu_worker(*gpu_args)
+    elif gpu_mode == "remote":
+        configure_remote_gpu_client(*gpu_args)
+
+
 def run_single_parallel_task(task: dict):
-    data_split = task["data_split"]
+    data_split = _RUN_WORKER_DATA_SPLIT
+    if data_split is None:
+        # Retain compatibility for direct callers using the former task shape.
+        data_split = task["data_split"]
     data = Data()
     data.set_train_test(
         X_train=data_split["X_train"],
@@ -943,12 +979,15 @@ def execute_pending_runs(
             safe_workers -= 1
         max_workers = max(1, safe_workers)
         worker_args.gpu_memory_fraction = args.gpu_memory_fraction / max_workers
+    elif requested_device == "hybrid" and strategy.gpu_owner_count > 0:
+        max_workers = min(max_workers, HYBRID_MAX_RUN_WORKERS)
     if requested_device in {"gpu", "hybrid"}:
-        print_execution_strategy(strategy, args, len(pending_runs), max_workers if requested_device == "gpu" else None)
+        display_args = argparse.Namespace(**vars(args))
+        display_args.n_workers = max_workers
+        print_execution_strategy(strategy, display_args, len(pending_runs), max_workers if requested_device == "gpu" else None)
     tasks = [
         {
             "run": run,
-            "data_split": data_split,
             "estimator": estimator,
             "method": method,
             "tf": tf,
@@ -960,18 +999,25 @@ def execute_pending_runs(
     completed = []
     completed_by_run = {}
     next_run = min(pending_runs)
-    executor_kwargs = {"max_workers": max_workers}
+    executor_kwargs = {
+        "max_workers": max_workers,
+        "initializer": initialize_run_worker,
+        "initargs": (data_split,),
+    }
     gpu_service_manager = None
     gpu_service_process = None
     if requested_device == "gpu":
         spawn_context = multiprocessing.get_context("spawn")
+        initializer = initialize_run_worker
+        initargs = (
+            data_split,
+            "local",
+            (args.gpu_device_id, worker_args.gpu_memory_fraction),
+        )
         executor_kwargs.update({
             "mp_context": spawn_context,
-            "initializer": configure_local_gpu_worker,
-            "initargs": (
-                args.gpu_device_id,
-                worker_args.gpu_memory_fraction,
-            ),
+            "initializer": initializer,
+            "initargs": initargs,
         })
         print(f"GPU worker architecture: {max_workers} local persistent CUDA run worker(s)")
     elif strategy.gpu_owner_count > 0:
@@ -1001,10 +1047,16 @@ def execute_pending_runs(
             daemon=True,
         )
         gpu_service_process.start()
+        initializer = initialize_run_worker
+        initargs = (
+            data_split,
+            "remote",
+            (connection_pool, 10.0, DEBUG_PARALLEL_PROGRESS),
+        )
         executor_kwargs.update({
             "mp_context": spawn_context,
-            "initializer": configure_remote_gpu_client,
-            "initargs": (connection_pool, 10.0, DEBUG_PARALLEL_PROGRESS),
+            "initializer": initializer,
+            "initargs": initargs,
         })
         print("GPU worker architecture: one CUDA owner with concurrent, deadline-bound per-worker channels")
     try:
@@ -3010,7 +3062,14 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             save_cache(cache_file, cls_payload)
 
                         if args.parallel == "yes" and len(pending_runs) > 1:
-                            print(f"  Parallel: yes | workers={min(args.n_workers, len(pending_runs))}")
+                            display_workers = min(args.n_workers, len(pending_runs))
+                            if str(args.compute_device).lower() == "hybrid":
+                                preview_strategy = select_execution_strategy(
+                                    args, data, method, len(pending_runs)
+                                )
+                                if preview_strategy.gpu_owner_count > 0:
+                                    display_workers = min(display_workers, HYBRID_MAX_RUN_WORKERS)
+                            print(f"  Parallel: yes | workers={display_workers}")
                         execute_pending_runs(
                             data,
                             estimator,

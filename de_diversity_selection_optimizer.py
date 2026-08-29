@@ -79,10 +79,24 @@ class DE_DiversitySelection(Optimizer):
 
     def _diversity_selection_population(self, pop_old, pop_new):
         old_pos = self._positions(pop_old)
-        selected = []
+        selected = list(pop_old)
+        awad_indices = []
+        awad_candidates = []
         for idx, (parent, offspring) in enumerate(zip(pop_old, pop_new)):
-            base_pop_pos = np.delete(old_pos, idx, axis=0)
-            selected.append(self.diversity_selection(parent, offspring, base_pop_pos))
+            if self.compare_target(offspring.target, parent.target, self.problem.minmax):
+                selected[idx] = offspring
+            else:
+                awad_indices.append(idx)
+                awad_candidates.append(offspring.solution)
+
+        if awad_indices:
+            scores = self.math_batcher.awad_candidate_parent_pairs(
+                old_pos, np.asarray(awad_candidates, dtype=float), awad_indices
+            )
+            for score_idx, pop_idx in enumerate(awad_indices):
+                offspring_awad, parent_awad = scores[score_idx]
+                if offspring_awad > parent_awad + self.EPSILON:
+                    selected[pop_idx] = pop_new[pop_idx]
         return selected
 
     def _random_de_indices(self, current_idx):
@@ -99,8 +113,12 @@ class DE_DiversitySelection(Optimizer):
     def evolve(self, epoch):
         pop_new = []
 
+        # Keep one CPU mirror. In single mode it is updated after every survivor
+        # decision, preserving the original sequential generation semantics.
+        pop_pos = self._positions(self.pop)
+        current_population_awad = None
+
         for idx in range(self.pop_size):
-            pop_pos = self._positions(self.pop)
             idxs = self._random_de_indices(idx)
             x1, x2, x3 = pop_pos[idxs[0]], pop_pos[idxs[1]], pop_pos[idxs[2]]
 
@@ -110,8 +128,28 @@ class DE_DiversitySelection(Optimizer):
 
             if self.mode not in self.AVAILABLE_MODES:
                 candidate.target = self.get_target(trial)
-                base_pop_pos = np.delete(pop_pos, idx, axis=0)
-                self.pop[idx] = self.diversity_selection(self.pop[idx], candidate, base_pop_pos)
+                parent = self.pop[idx]
+                if self.compare_target(candidate.target, parent.target, self.problem.minmax):
+                    survivor = candidate
+                    current_population_awad = None
+                else:
+                    base_pop_pos = np.delete(pop_pos, idx, axis=0)
+                    if current_population_awad is None:
+                        scores = self.math_batcher.awad_candidate_parent_pairs(
+                            pop_pos, np.asarray([candidate.solution], dtype=float), [idx]
+                        )[0]
+                        offspring_awad, current_population_awad = scores
+                    else:
+                        offspring_awad = self.local_awad_contribution(
+                            candidate.solution, base_pop_pos
+                        )
+                    if offspring_awad > current_population_awad + self.EPSILON:
+                        survivor = candidate
+                        current_population_awad = None
+                    else:
+                        survivor = parent
+                self.pop[idx] = survivor
+                pop_pos[idx] = survivor.solution
             else:
                 pop_new.append(candidate)
 

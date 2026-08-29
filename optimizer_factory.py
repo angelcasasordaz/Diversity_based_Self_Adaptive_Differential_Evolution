@@ -11,7 +11,7 @@ import mealpy
 from numerical_backend import UnsupportedOptimizerDeviceError, normalize_compute_device
 from optimizer_adapters import CUSTOM_ADAPTERS, get_custom_adapter
 from optimizer_capabilities import CapabilityReport, OptimizerCapability, analyze_optimizer
-from optimizer_interceptor import Workload, estimate_dense_kernel_bytes
+from optimizer_interceptor import Workload, estimate_dense_kernel_bytes, hybrid_gpu_is_worthwhile
 
 
 @dataclass(frozen=True)
@@ -120,7 +120,25 @@ def select_execution_strategy(
     pop, dims = workload.population_size, workload.dimensions
     estimated = adapter.memory_bytes(pop, dims) if adapter and adapter.memory_bytes else estimate_dense_kernel_bytes(workload)
     if requested == "hybrid":
-        reason = "common hybrid policy selected validated GPU kernels with CPU fitness"
+        kernel_work = (
+            adapter.kernel_work(pop, dims)
+            if adapter and adapter.kernel_work
+            else workload.element_work
+        )
+        gpu_info = getattr(gpu_backend, "gpu_info", None)
+        available_gpu_bytes = int(getattr(gpu_info, "free_memory_bytes", 0))
+        use_gpu, reason = hybrid_gpu_is_worthwhile(
+            workload,
+            kernel_work,
+            available_gpu_bytes,
+            estimated,
+            minimum_kernel_work,
+            minimum_epochs,
+        )
+        if not use_gpu:
+            return ExecutionStrategy(
+                "cpu", 0, "hybrid-cpu-workers", reason, estimated, report.capability
+            )
         name = "hybrid-gpu-single-owner"
     else:
         reason, name = "strict GPU mode selected validated kernels", "forced-gpu-single-owner"
