@@ -225,6 +225,30 @@ DSADE_MAHAL_Q = 0.68
 SENSITIVITY_PARAMETER = "mahalanobis_q"
 SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
 
+# Example: beta_min sensitivity
+# SENSITIVITY_PARAMETER = "beta_min"
+# SENSITIVITY_VALUES = [0.10, 0.20, 0.30, 0.40]
+
+# Example: beta_max sensitivity
+# SENSITIVITY_PARAMETER = "beta_max"
+# SENSITIVITY_VALUES = [0.60, 0.70, 0.80, 0.90]
+
+# Example: pcr sensitivity
+# SENSITIVITY_PARAMETER = "pcr"
+# SENSITIVITY_VALUES = [0.10, 0.20, 0.30, 0.40]
+
+# Example: mahalanobis_q sensitivity
+# SENSITIVITY_PARAMETER = "mahalanobis_q"
+# SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
+
+# Example: population size sensitivity
+# SENSITIVITY_PARAMETER = "pop_size"
+# SENSITIVITY_VALUES = [30, 50, 70, 100]
+
+# Example: epochs sensitivity
+# SENSITIVITY_PARAMETER = "epochs"
+# SENSITIVITY_VALUES = [50, 100, 150, 200]
+
 DEFAULT_FITNESS_ALPHA = 0.90
 DEFAULT_FITNESS_BETA = 0.10
 SENSITIVITY_WEIGHT_PAIRS = [
