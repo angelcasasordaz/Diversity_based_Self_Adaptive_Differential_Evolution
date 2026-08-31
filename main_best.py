@@ -57,15 +57,21 @@ EXPERIMENT_MODES = [
     # "full",
     "ablation",
     "sensitivity",
+    # "sensitivity_weights",
 ]
 # Options:
 # "full"
 # "ablation"
 # "sensitivity"
+# "sensitivity_weights"
 
 CODE_SMELL_DATASET_DIR = "Original"
 
-CODE_SMELL_DATASETS = None
+CODE_SMELL_DATASETS = [
+    "DataClass",
+    "FeatureEnvy",
+    "GodClass",
+]
 # None -> run all CSV files in CODE_SMELL_DATASET_DIR.
 #
 # Example:
@@ -186,7 +192,13 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 620
+EXP_ID = 621
+REUSE_CACHE_FROM_EXP_ID = 620
+# None -> do not search another experiment.
+#
+# Example:
+# EXP_ID = 629
+# REUSE_CACHE_FROM_EXP_ID = 620
 TEST_SIZE = 0.2
 RANDOM_STATE = 2
 SEED_BASE = 1234
@@ -212,6 +224,16 @@ DSADE_MAHAL_Q = 0.68
 
 SENSITIVITY_PARAMETER = "mahalanobis_q"
 SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
+
+DEFAULT_FITNESS_ALPHA = 0.90
+DEFAULT_FITNESS_BETA = 0.10
+SENSITIVITY_WEIGHT_PAIRS = [
+    (0.70, 0.30),
+    (0.80, 0.20),
+    (0.90, 0.10),
+    (0.95, 0.05),
+    (0.99, 0.01),
+]
 
 plt.rcParams.update({
     "figure.facecolor": "white",
@@ -274,11 +296,52 @@ class DatasetSpec:
     source: str
     path: Optional[Path] = None
 
+
+def parse_sensitivity_weight_pair(value: str) -> Tuple[float, float]:
+    """Parse a command-line alpha,beta pair without changing the configured defaults."""
+    parts = str(value).split(",")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(
+            f"Invalid weight pair '{value}'; expected ALPHA,BETA (for example 0.90,0.10)"
+        )
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Invalid numeric weight pair '{value}'") from exc
+
+
+def validate_sensitivity_weight_pairs(weight_pairs) -> List[Tuple[float, float]]:
+    """Return normalized positive alpha/beta pairs whose sum is numerically one."""
+    if not weight_pairs:
+        raise ValueError("sensitivity_weights mode requires at least one alpha/beta pair")
+    validated = []
+    for pair in weight_pairs:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            raise ValueError(f"Invalid sensitivity weight pair: {pair!r}")
+        alpha, beta = float(pair[0]), float(pair[1])
+        if not np.isfinite(alpha) or alpha <= 0:
+            raise ValueError(f"Fitness alpha must be > 0, got {alpha!r}")
+        if not np.isfinite(beta) or beta <= 0:
+            raise ValueError(f"Fitness beta must be > 0, got {beta!r}")
+        if not math.isclose(alpha + beta, 1.0, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError(
+                f"Fitness weights must satisfy alpha + beta = 1, got {alpha!r} + {beta!r}"
+            )
+        validated.append((alpha, beta))
+    return validated
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Feature-selection comparison framework with cache and multi-run support")
-    parser.add_argument("--experiment-modes", nargs="+", default=list(EXPERIMENT_MODES), choices=["full", "ablation", "sensitivity"])
-    parser.add_argument("--experiment-mode", default=None, choices=["full", "ablation", "sensitivity"], help=argparse.SUPPRESS)
+    supported_modes = ["full", "ablation", "sensitivity", "sensitivity_weights"]
+    parser.add_argument("--experiment-modes", nargs="+", default=list(EXPERIMENT_MODES), choices=supported_modes)
+    parser.add_argument("--experiment-mode", default=None, choices=supported_modes, help=argparse.SUPPRESS)
     parser.add_argument("--exp-id", type=int, default=EXP_ID, help="Numeric experiment ID")
+    parser.add_argument(
+        "--reuse-cache-from-exp-id",
+        type=int,
+        default=REUSE_CACHE_FROM_EXP_ID,
+        help="Read compatible checkpoints from another experiment and migrate them into this experiment",
+    )
     parser.add_argument("--dataset-source", default=DATASET_SOURCE, choices=["mafese", "codesmell"], help="Dataset source")
     parser.add_argument("--dataset-suite", default=MAFESE_DATASET_SUITE, choices=["test14"], help="MAFESE dataset suite")
     parser.add_argument("--dataset-dir", default=CODE_SMELL_DATASET_DIR, help="Directory containing Code Smell CSV files")
@@ -317,7 +380,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dsade-mahal-q", type=float, default=DSADE_MAHAL_Q)
     parser.add_argument("--sensitivity-parameter", default=SENSITIVITY_PARAMETER)
     parser.add_argument("--sensitivity-values", nargs="+", type=float, default=list(SENSITIVITY_VALUES))
+    parser.add_argument(
+        "--sensitivity-weight-pairs",
+        nargs="+",
+        type=parse_sensitivity_weight_pair,
+        default=list(SENSITIVITY_WEIGHT_PAIRS),
+        metavar="ALPHA,BETA",
+        help="Fitness alpha,beta pairs for sensitivity_weights mode",
+    )
+    parser.set_defaults(
+        fitness_alpha=DEFAULT_FITNESS_ALPHA,
+        fitness_beta=DEFAULT_FITNESS_BETA,
+    )
     args = parser.parse_args()
+    args.sensitivity_weight_pairs = validate_sensitivity_weight_pairs(args.sensitivity_weight_pairs)
     if args.experiment_mode is not None:
         args.experiment_modes = [args.experiment_mode]
     return args
@@ -384,6 +460,14 @@ def report_gpu_acceptance(args: argparse.Namespace, modes: List[str]) -> None:
             total = len(names)
         suites[mode] = (supported, total)
 
+    if "sensitivity_weights" in modes:
+        mode_args = clone_args_for_mode(args, "sensitivity_weights")
+        apply_experiment_mode(mode_args)
+        names = resolve_optimizers(mode_args)
+        total = len(mode_args.sensitivity_weight_pairs)
+        supported = int(resolve_optimizer(names[0]).capability.supports_gpu) * total
+        suites["sensitivity_weights"] = (supported, total)
+
     selected_supported = all(
         suites[mode][0] == suites[mode][1] for mode in modes
     )
@@ -395,6 +479,11 @@ def report_gpu_acceptance(args: argparse.Namespace, modes: List[str]) -> None:
     print(f"GPU-supported FULL optimizers: {suites['full'][0]}/{suites['full'][1]}")
     print(f"ABLATION GPU support: {suites['ablation'][0]}/{suites['ablation'][1]}")
     print(f"SENSITIVITY GPU support: {suites['sensitivity'][0]}/{suites['sensitivity'][1]}")
+    if "sensitivity_weights" in modes:
+        print(
+            "SENSITIVITY_WEIGHTS GPU support: "
+            f"{suites['sensitivity_weights'][0]}/{suites['sensitivity_weights'][1]}"
+        )
 
 def print_available_optimizers() -> None:
     print(list_available_optimizers())
@@ -520,6 +609,9 @@ def print_execution_strategy(
 def apply_experiment_mode(args: argparse.Namespace) -> None:
     args.experiment_mode = str(args.experiment_mode).lower()
     args.sensitivity_parameter = str(args.sensitivity_parameter).lower()
+    # The established modes always retain the historical wrapper objective.
+    args.fitness_alpha = DEFAULT_FITNESS_ALPHA
+    args.fitness_beta = DEFAULT_FITNESS_BETA
     if args.experiment_mode == "ablation":
         args.optimizers = list(ABLATION_OPTIMIZERS)
     elif args.experiment_mode == "sensitivity":
@@ -531,6 +623,11 @@ def apply_experiment_mode(args: argparse.Namespace) -> None:
             )
         if not args.sensitivity_values:
             raise ValueError("Sensitivity mode requires at least one sensitivity value")
+        args.optimizers = ["DSA-DE"]
+    elif args.experiment_mode == "sensitivity_weights":
+        args.sensitivity_weight_pairs = validate_sensitivity_weight_pairs(
+            args.sensitivity_weight_pairs
+        )
         args.optimizers = ["DSA-DE"]
 
 def apply_sensitivity_value(args: argparse.Namespace, value: float) -> None:
@@ -548,20 +645,53 @@ def apply_sensitivity_value(args: argparse.Namespace, value: float) -> None:
     elif parameter == "epochs":
         args.epochs = int(value)
 
+
+def apply_sensitivity_weight_pair(args: argparse.Namespace, pair: Tuple[float, float]) -> None:
+    alpha, beta = validate_sensitivity_weight_pairs([pair])[0]
+    args.fitness_alpha = alpha
+    args.fitness_beta = beta
+
 def sensitivity_value_token(value: float) -> str:
     return str(value).replace("-", "m").replace(".", "p")
 
 def sensitivity_label_suffix(args: argparse.Namespace, value: float) -> str:
     return f"SENS_{args.sensitivity_parameter}_{sensitivity_value_token(value)}"
 
+
+def sensitivity_weight_label_suffix(pair: Tuple[float, float]) -> str:
+    alpha, beta = pair
+    return (
+        f"WEIGHTS_A{sensitivity_value_token(alpha)}_"
+        f"B{sensitivity_value_token(beta)}"
+    )
+
+
+def sensitivity_weight_display_label(pair: Tuple[float, float]) -> str:
+    alpha, beta = pair
+    return f"alpha={alpha:.2f} / beta={beta:.2f}"
+
+
+def experiment_variant_label_suffix(args: argparse.Namespace, variant) -> Optional[str]:
+    if variant is None:
+        return None
+    if args.experiment_mode == "sensitivity":
+        return sensitivity_label_suffix(args, float(variant))
+    if args.experiment_mode == "sensitivity_weights":
+        return sensitivity_weight_label_suffix(variant)
+    return None
+
 def experiment_output_prefix(args: argparse.Namespace) -> str:
     if args.experiment_mode == "full":
         return ""
+    if args.experiment_mode == "sensitivity_weights":
+        return "SensitivityWeights_"
     return f"{args.experiment_mode.capitalize()}_"
 
-def experiment_variants(args: argparse.Namespace) -> List[Optional[float]]:
+def experiment_variants(args: argparse.Namespace) -> list:
     if args.experiment_mode == "sensitivity":
         return [float(value) for value in args.sensitivity_values]
+    if args.experiment_mode == "sensitivity_weights":
+        return list(args.sensitivity_weight_pairs)
     return [None]
 
 def validate_selection_options(args: argparse.Namespace) -> None:
@@ -586,6 +716,22 @@ def make_paths(args: argparse.Namespace) -> Paths:
     for p in (fig_dir, res_dir, cache_dir):
         os.makedirs(p, exist_ok=True)
     return Paths(exp_tag=exp_tag, mode=args.experiment_mode, fig_dir=fig_dir, res_dir=res_dir, cache_dir=cache_dir)
+
+def make_read_only_source_paths(args: argparse.Namespace) -> Optional[Paths]:
+    """Describe a source experiment without creating or modifying any directories."""
+    source_exp_id = getattr(args, "reuse_cache_from_exp_id", None)
+    if source_exp_id is None or int(source_exp_id) == int(args.exp_id):
+        return None
+    exp_tag = f"EXP{int(source_exp_id):03d}"
+    fig_dir = os.path.join(args.output_root, "Figures", exp_tag, args.experiment_mode)
+    res_dir = os.path.join(args.output_root, "Results", exp_tag, args.experiment_mode)
+    return Paths(
+        exp_tag=exp_tag,
+        mode=args.experiment_mode,
+        fig_dir=fig_dir,
+        res_dir=res_dir,
+        cache_dir=os.path.join(res_dir, "cache"),
+    )
 
 def resolve_mafese_dataset_names(args: argparse.Namespace) -> List[str]:
     if args.dataset_suite == "test14":
@@ -723,6 +869,15 @@ def build_cache_signature(args: argparse.Namespace) -> str:
         "sensitivity_parameter": str(args.sensitivity_parameter),
         "sensitivity_values": [float(value) for value in args.sensitivity_values],
     }
+    if str(args.experiment_mode) == "sensitivity_weights":
+        payload.update({
+            "fitness_alpha": float(args.fitness_alpha),
+            "fitness_beta": float(args.fitness_beta),
+            "sensitivity_weight_pairs": [
+                [float(alpha), float(beta)]
+                for alpha, beta in validate_sensitivity_weight_pairs(args.sensitivity_weight_pairs)
+            ],
+        })
     return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
 
 def build_alg_label(
@@ -857,6 +1012,11 @@ def run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: a
         fit_kwargs["verbose"] = False
     if "fs_problem" in fit_params:
         fit_kwargs["fs_problem"] = RobustClassificationFeatureSelectionProblem
+    if "fit_weights" in fit_params:
+        fit_kwargs["fit_weights"] = (
+            float(args.fitness_alpha),
+            float(args.fitness_beta),
+        )
     selector.fit(data.X_train, data.y_train, **fit_kwargs)
     runtime = time.time() - t0
 
@@ -1113,9 +1273,10 @@ def build_label_payload(
     time_runs: List[float],
     curves: List[np.ndarray],
     epochs: int,
+    scientific_metadata: Optional[dict] = None,
 ):
     curve_mean = pad_mean_curves(curves, epochs)
-    return {
+    payload = {
         "Estimator": estimator,
         "AccMean": float(np.nanmean(acc_runs)),
         "F1Mean": float(np.nanmean(f1_runs)),
@@ -1136,6 +1297,41 @@ def build_label_payload(
         "CurvesAll": curves,
         "CompletedRuns": len(acc_runs),
     }
+    if scientific_metadata:
+        payload.update(scientific_metadata)
+    return payload
+
+
+def weight_checkpoint_metadata(args: argparse.Namespace) -> Optional[dict]:
+    """Attach pair-level scientific identity only to weight-sensitivity rows."""
+    if str(args.experiment_mode) != "sensitivity_weights":
+        return None
+    return {
+        "ExperimentMode": "sensitivity_weights",
+        "FitnessAlpha": float(args.fitness_alpha),
+        "FitnessBeta": float(args.fitness_beta),
+    }
+
+
+def weight_checkpoint_metadata_matches(row: dict, expected_metadata: Optional[dict]) -> bool:
+    if expected_metadata is None:
+        return True
+    if not isinstance(row, dict):
+        return False
+    if row.get("ExperimentMode") != expected_metadata["ExperimentMode"]:
+        return False
+    try:
+        return all(
+            math.isclose(
+                float(row[key]),
+                float(expected_metadata[key]),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            for key in ("FitnessAlpha", "FitnessBeta")
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
 
 def save_cache(path: str, payload: dict):
     with open(path, "wb") as f:
@@ -1216,11 +1412,7 @@ def expected_result_labels(
     for method in args.optimizers:
         for tf in args.transfer_functions:
             for variant_value in experiment_variants(args):
-                variant_suffix = (
-                    sensitivity_label_suffix(args, variant_value)
-                    if variant_value is not None
-                    else None
-                )
+                variant_suffix = experiment_variant_label_suffix(args, variant_value)
                 labels.append(
                     (
                         build_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix),
@@ -1241,6 +1433,128 @@ def load_best_cache_payload(paths: Paths, dataset_name: str, estimator: str, cac
         return cache_payload
     return progress_payload
 
+def load_best_source_cache_payload(
+    source_paths: Paths,
+    dataset_name: str,
+    estimator: str,
+    cache_sig: str,
+):
+    """Load an exact-signature source checkpoint without legacy or write fallbacks."""
+    candidates = []
+    found_checkpoint = False
+    for checkpoint_kind in ("results", "progress"):
+        filename = (
+            f"{source_paths.exp_tag}_{dataset_name}_{estimator.lower()}_"
+            f"{cache_sig}_{checkpoint_kind}.pkl"
+        )
+        path = os.path.join(source_paths.cache_dir, filename)
+        if not os.path.exists(path):
+            continue
+        found_checkpoint = True
+        payload = load_cache_safe(path, f"source {checkpoint_kind} checkpoint")
+        if isinstance(payload, dict):
+            candidates.append(payload)
+    if not candidates:
+        reason = "checkpoint unreadable or not a dictionary" if found_checkpoint else None
+        return None, reason
+    return max(candidates, key=payload_completed_runs), None
+
+def validate_source_label_runs(
+    row: dict,
+    estimator: str,
+    requested_runs: int,
+    expected_metadata: Optional[dict] = None,
+):
+    """Validate a source label and return only its serialized per-run scientific output."""
+    if not isinstance(row, dict):
+        return None, "label payload is not a dictionary"
+    if str(row.get("Estimator", "")).lower() != str(estimator).lower():
+        return None, "classifier metadata does not match"
+    if expected_metadata:
+        if row.get("ExperimentMode") != expected_metadata["ExperimentMode"]:
+            return None, "experiment mode metadata does not match"
+        for key in ("FitnessAlpha", "FitnessBeta"):
+            try:
+                matches = math.isclose(
+                    float(row[key]),
+                    float(expected_metadata[key]),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            except (KeyError, TypeError, ValueError):
+                matches = False
+            if not matches:
+                return None, f"{key} metadata does not match"
+
+    run_fields = (
+        "AccRuns",
+        "PSRuns",
+        "RSRuns",
+        "F1Runs",
+        "FitRuns",
+        "FeatRuns",
+        "TimeRuns",
+        "CurvesAll",
+    )
+    try:
+        completed_runs = int(row.get("CompletedRuns", len(row.get("AccRuns", []))))
+        values = {field: list(row[field]) for field in run_fields}
+    except (KeyError, TypeError, ValueError) as exc:
+        return None, f"invalid run data: {exc}"
+
+    if completed_runs < 0 or completed_runs > int(requested_runs):
+        return None, f"completed run count {completed_runs} is outside 0..{requested_runs}"
+    mismatched = [field for field, items in values.items() if len(items) != completed_runs]
+    if mismatched:
+        return None, f"run arrays do not match CompletedRuns: {', '.join(mismatched)}"
+    try:
+        for field in run_fields[:-1]:
+            np.asarray(values[field], dtype=float)
+        for curve in values["CurvesAll"]:
+            np.asarray(curve, dtype=float)
+    except (TypeError, ValueError) as exc:
+        return None, f"non-numeric scientific output: {exc}"
+    return values, None
+
+def import_source_label_runs(
+    source_payload: dict,
+    label: str,
+    legacy_label: str,
+    estimator: str,
+    requested_runs: int,
+    current_runs: Dict[str, list],
+    expected_metadata: Optional[dict] = None,
+):
+    """Merge a validated source prefix after the current checkpoint prefix."""
+    source_row = source_payload.get(label)
+    if source_row is None and legacy_label != label:
+        source_row = source_payload.get(legacy_label)
+    if source_row is None:
+        return 0, "scientific label is absent"
+
+    source_runs, reason = validate_source_label_runs(
+        source_row,
+        estimator,
+        requested_runs,
+        expected_metadata=expected_metadata,
+    )
+    if source_runs is None:
+        return 0, reason
+
+    current_count = len(current_runs["AccRuns"])
+    source_count = len(source_runs["AccRuns"])
+    if source_count <= current_count:
+        return 0, None
+
+    import_stop = min(source_count, int(requested_runs))
+    for field, destination in current_runs.items():
+        for value in source_runs[field][current_count:import_stop]:
+            if field == "CurvesAll":
+                destination.append(np.array(value, dtype=float, copy=True))
+            else:
+                destination.append(value)
+    return import_stop - current_count, None
+
 def mode_cache_is_complete(
     paths: Paths,
     args: argparse.Namespace,
@@ -1257,6 +1571,16 @@ def mode_cache_is_complete(
             for label, legacy_label in expected_result_labels(args, estimator, show_tf, show_cls):
                 if payload_label_completed_runs(payload, label, legacy_label) < args.runs:
                     return False
+                if args.experiment_mode == "sensitivity_weights":
+                    row = payload.get(label, payload.get(legacy_label))
+                    parsed = parse_result_label(label, args)
+                    expected_metadata = {
+                        "ExperimentMode": "sensitivity_weights",
+                        "FitnessAlpha": parsed["fitness_alpha"],
+                        "FitnessBeta": parsed["fitness_beta"],
+                    }
+                    if not weight_checkpoint_metadata_matches(row, expected_metadata):
+                        return False
     return True
 
 
@@ -1264,6 +1588,8 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
     label_upper = str(label).upper()
     sensitivity_parameter = ""
     sensitivity_value = np.nan
+    fitness_alpha = np.nan
+    fitness_beta = np.nan
     optimizer_candidates = []
     for opt in args.optimizers:
         resolved = resolve_optimizer_name(opt)
@@ -1300,6 +1626,20 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
                 sensitivity_parameter = parameter.lower()
                 rest = remainder
                 break
+    elif rest.startswith("WEIGHTS_A"):
+        weight_tail = rest[len("WEIGHTS_A"):]
+        alpha_token, separator, beta_tail = weight_tail.partition("_B")
+        beta_token, _, remainder = beta_tail.partition("_")
+        if separator:
+            try:
+                fitness_alpha = float(alpha_token.replace("M", "-").replace("P", "."))
+                fitness_beta = float(beta_token.replace("M", "-").replace("P", "."))
+                sensitivity_parameter = "fitness_weights"
+                sensitivity_value = fitness_alpha
+                rest = remainder
+            except ValueError:
+                fitness_alpha = np.nan
+                fitness_beta = np.nan
 
     estimator = ""
     for est in sorted([str(e) for e in args.estimators], key=len, reverse=True):
@@ -1327,6 +1667,8 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
         "estimator": estimator,
         "sensitivity_parameter": sensitivity_parameter,
         "sensitivity_value": sensitivity_value,
+        "fitness_alpha": fitness_alpha,
+        "fitness_beta": fitness_beta,
     }
 
 
@@ -1562,6 +1904,12 @@ def export_statistical_excel(
     if args.experiment_mode == "sensitivity":
         optimizers = [f"{args.sensitivity_parameter}={float(value):g}" for value in args.sensitivity_values]
         index_name = "SensitivityValue"
+    elif args.experiment_mode == "sensitivity_weights":
+        optimizers = [
+            sensitivity_weight_display_label(pair)
+            for pair in args.sensitivity_weight_pairs
+        ]
+        index_name = "AlphaBeta"
     else:
         optimizers = optimizer_order_from_config(optimizer_order)
         index_name = "Optimizer"
@@ -1584,6 +1932,12 @@ def export_statistical_excel(
                 if not np.isfinite(parsed_value):
                     continue
                 optimizer = f"{args.sensitivity_parameter}={float(parsed_value):g}"
+            elif args.experiment_mode == "sensitivity_weights":
+                parsed_alpha = parsed.get("fitness_alpha", np.nan)
+                parsed_beta = parsed.get("fitness_beta", np.nan)
+                if not np.isfinite(parsed_alpha) or not np.isfinite(parsed_beta):
+                    continue
+                optimizer = sensitivity_weight_display_label((parsed_alpha, parsed_beta))
             else:
                 optimizer = optimizer_acronym(parsed["method"])
             if optimizer not in set(optimizers):
@@ -1826,6 +2180,14 @@ def generate_summary_dataframe(results_struct: Dict[str, Dict], args: argparse.N
                     "TransferFunction": parsed["transfer_function"],
                     "SensitivityParameter": parsed.get("sensitivity_parameter", ""),
                     "SensitivityValue": parsed.get("sensitivity_value", np.nan),
+                    **(
+                        {
+                            "FitnessAlpha": parsed.get("fitness_alpha", np.nan),
+                            "FitnessBeta": parsed.get("fitness_beta", np.nan),
+                        }
+                        if args.experiment_mode == "sensitivity_weights"
+                        else {}
+                    ),
                     "Configuracion": label,
                     "F1_test": float(row.get("F1Mean", np.nan)),
                     "AS_test": float(row.get("AccMean", np.nan)) / 100.0,
@@ -1944,6 +2306,207 @@ def generate_ablation_main_figure(df: pd.DataFrame, out_dir: str, opt_order: Lis
     _save_chart(fig, out_dir, filename)
     return filename
 
+def _ablation_figure_metadata():
+    optimizer_order = optimizer_order_from_config(ABLATION_OPTIMIZERS)
+    display_labels = {
+        "DE": "DE",
+        "DE-AWAD": "DE-AWAD",
+        "DE-DIVERSITYSELECTION": "DE-DiversitySelection",
+        "DE-MAHALANOBIS": "DE-Mahalanobis",
+        "DSADE": "DSA-DE",
+    }
+    colors = muted_color_palette(len(optimizer_order))
+    return optimizer_order, display_labels, dict(zip(optimizer_order, colors))
+
+def generate_ablation_classification_metrics_figure(
+    dataset_name: str,
+    results_struct: Dict[str, Dict],
+    out_dir: str,
+    args: argparse.Namespace,
+) -> Optional[str]:
+    alg_data = results_struct.get(dataset_name, {})
+    if not alg_data:
+        return None
+
+    optimizer_order, display_labels, _ = _ablation_figure_metadata()
+    estimator_order = ["knn", "svm", "rf"]
+    metric_fields = ["AccRuns", "PSRuns", "RSRuns", "F1Runs"]
+    metric_labels = ["Accuracy", "Precision", "Recall", "F1"]
+    values = {
+        (estimator, optimizer, field): []
+        for estimator in estimator_order
+        for optimizer in optimizer_order
+        for field in metric_fields
+    }
+    for label, row in alg_data.items():
+        parsed = parse_result_label(label, args)
+        estimator = str(parsed["estimator"] or row.get("Estimator", "")).lower()
+        optimizer = optimizer_acronym(parsed["method"])
+        if estimator not in estimator_order or optimizer not in optimizer_order:
+            continue
+        for field in metric_fields:
+            run_values = np.asarray(row.get(field, []), dtype=float).ravel()
+            run_values = run_values[np.isfinite(run_values)]
+            if field == "AccRuns":
+                run_values = run_values / 100.0
+            values[(estimator, optimizer, field)].extend(run_values.tolist())
+
+    if not any(values.values()):
+        return None
+
+    metric_colors = muted_color_palette(len(metric_fields))
+    x = np.arange(len(optimizer_order), dtype=float)
+    width = 0.19
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.8), sharey=True, facecolor="white")
+    panel_labels = ["(a) KNN", "(b) SVM", "(c) RF"]
+    for panel_idx, (ax, estimator) in enumerate(zip(axes, estimator_order)):
+        has_data = False
+        for metric_idx, (field, metric_label) in enumerate(zip(metric_fields, metric_labels)):
+            means = []
+            errors = []
+            for optimizer in optimizer_order:
+                run_values = np.asarray(values[(estimator, optimizer, field)], dtype=float)
+                means.append(float(np.mean(run_values)) if run_values.size else np.nan)
+                errors.append(float(np.std(run_values, ddof=1)) if run_values.size > 1 else 0.0)
+                has_data = has_data or bool(run_values.size)
+            offsets = x + (metric_idx - 1.5) * width
+            bars = ax.bar(
+                offsets,
+                means,
+                width,
+                yerr=errors,
+                capsize=2,
+                color=metric_colors[metric_idx],
+                edgecolor="white",
+                linewidth=0.7,
+                error_kw={"elinewidth": 0.7, "capthick": 0.7},
+                label=metric_label,
+                zorder=3,
+            )
+            dsade_idx = optimizer_order.index("DSADE") if "DSADE" in optimizer_order else -1
+            if dsade_idx >= 0:
+                bars[dsade_idx].set_edgecolor("black")
+                bars[dsade_idx].set_linewidth(1.3)
+        if not has_data:
+            ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center", color="#777777")
+        ax.set_title(panel_labels[panel_idx], fontsize=12, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [display_labels.get(opt, opt) for opt in optimizer_order],
+            rotation=32,
+            ha="right",
+            fontsize=9,
+        )
+        ax.set_ylim(0.0, 1.08)
+        ax.grid(axis="y", alpha=0.25)
+        ax.set_axisbelow(True)
+    axes[0].set_ylabel("Mean classification metric")
+    axes[1].set_xlabel("Ablation variant")
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, loc="lower center", ncol=4, frameon=False)
+    fig.suptitle(f"Ablation Classification Metrics — {dataset_name}", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=(0, 0.09, 1, 0.94))
+    filename = f"Ablation_Classification_Metrics_{dataset_name}.png"
+    _save_chart(fig, out_dir, filename)
+    return filename
+
+def generate_ablation_accuracy_features_tradeoff(
+    dataset_name: str,
+    summary_df: pd.DataFrame,
+    out_dir: str,
+) -> Optional[str]:
+    plot_df = summary_df[summary_df["Dataset"] == dataset_name].copy()
+    if plot_df.empty:
+        return None
+
+    optimizer_order, display_labels, color_map = _ablation_figure_metadata()
+    estimator_order = ["knn", "svm", "rf"]
+    plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
+    plot_df = plot_df[plot_df["Optimizer"].isin(optimizer_order)]
+    grouped = plot_df.groupby(["Estimator", "Optimizer"])[["N_Features_Selected", "AS_test"]].mean()
+    if grouped.empty:
+        return None
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.8), sharex=True, sharey=True, facecolor="white")
+    panel_labels = ["(a) KNN", "(b) SVM", "(c) RF"]
+    all_features = grouped["N_Features_Selected"].to_numpy(dtype=float)
+    finite_features = all_features[np.isfinite(all_features)]
+    all_accuracy = grouped["AS_test"].to_numpy(dtype=float)
+    finite_accuracy = all_accuracy[np.isfinite(all_accuracy)]
+    if finite_features.size:
+        feature_span = float(np.ptp(finite_features))
+        feature_padding = max(0.12 * feature_span, 0.75)
+        x_min = max(0.0, float(np.min(finite_features)) - feature_padding)
+        x_max = float(np.max(finite_features)) + feature_padding
+    else:
+        x_min, x_max = 0.0, 1.0
+    if finite_accuracy.size:
+        y_min = max(0.0, float(np.min(finite_accuracy)) - 0.06)
+        y_max = min(1.05, float(np.max(finite_accuracy)) + 0.06)
+    else:
+        y_min, y_max = 0.0, 1.05
+    label_positions = {
+        "DE": ((5, -12), "left"),
+        "DE-AWAD": ((0, 10), "center"),
+        "DE-DIVERSITYSELECTION": ((0, -14), "center"),
+        "DE-MAHALANOBIS": ((0, 10), "center"),
+        "DSADE": ((-5, -14), "right"),
+    }
+    for panel_idx, (ax, estimator) in enumerate(zip(axes, estimator_order)):
+        has_data = False
+        for optimizer in optimizer_order:
+            key = (estimator, optimizer)
+            if key not in grouped.index:
+                continue
+            x_value = float(grouped.loc[key, "N_Features_Selected"])
+            y_value = float(grouped.loc[key, "AS_test"])
+            if not np.isfinite(x_value) or not np.isfinite(y_value):
+                continue
+            is_dsade = is_exact_dsade_method(optimizer)
+            ax.scatter(
+                x_value,
+                y_value,
+                s=135 if is_dsade else 80,
+                marker="*" if is_dsade else "o",
+                color=color_map.get(optimizer, "#888888"),
+                edgecolor="black",
+                linewidth=1.3 if is_dsade else 0.7,
+                zorder=4,
+            )
+            ax.annotate(
+                display_labels.get(optimizer, optimizer),
+                (x_value, y_value),
+                xytext=label_positions.get(optimizer, ((5, 5), "left"))[0],
+                textcoords="offset points",
+                ha=label_positions.get(optimizer, ((5, 5), "left"))[1],
+                fontsize=8,
+            )
+            has_data = True
+        if not has_data:
+            ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center", color="#777777")
+        ax.text(
+            0.03,
+            0.96,
+            "Preferred region ↖",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            color="#315f45",
+        )
+        ax.set_title(panel_labels[panel_idx], fontsize=12, fontweight="bold")
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.grid(alpha=0.25)
+        ax.set_axisbelow(True)
+    axes[0].set_ylabel("Mean Accuracy")
+    axes[1].set_xlabel("Mean number of selected features")
+    fig.suptitle(f"Ablation Accuracy–Features Trade-off — {dataset_name}", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    filename = f"Ablation_Accuracy_Features_Tradeoff_{dataset_name}.png"
+    _save_chart(fig, out_dir, filename)
+    return filename
+
 def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argparse.Namespace) -> Optional[str]:
     if df.empty:
         return None
@@ -2018,6 +2581,104 @@ def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argpa
     fig.suptitle(f"Sensitivity Study: DSA-DE {args.sensitivity_parameter}", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     filename = f"sensitivity_{args.sensitivity_parameter}_f1_features.png"
+    _save_chart(fig, out_dir, filename)
+    return filename
+
+
+def generate_weight_sensitivity_main_figure(
+    dataset_name: str,
+    df: pd.DataFrame,
+    out_dir: str,
+    args: argparse.Namespace,
+) -> Optional[str]:
+    """Plot the wrapper-weight trade-off for one selected dataset."""
+    if df.empty:
+        return None
+
+    plot_df = df[df["Dataset"] == dataset_name].copy()
+    if plot_df.empty or not {"FitnessAlpha", "FitnessBeta"}.issubset(plot_df.columns):
+        return None
+    plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
+    plot_df["FitnessAlpha"] = pd.to_numeric(plot_df["FitnessAlpha"], errors="coerce")
+    plot_df["FitnessBeta"] = pd.to_numeric(plot_df["FitnessBeta"], errors="coerce")
+    plot_df = plot_df[np.isfinite(plot_df["FitnessAlpha"]) & np.isfinite(plot_df["FitnessBeta"])]
+    if plot_df.empty:
+        return None
+
+    weight_pairs = list(args.sensitivity_weight_pairs)
+    estimators = [str(estimator).lower() for estimator in args.estimators]
+    if not estimators:
+        return None
+    grouped = plot_df.groupby(["Estimator", "FitnessAlpha", "FitnessBeta"])[
+        ["F1_test", "N_Features_Selected"]
+    ].mean()
+
+    fig, axes = plt.subplots(
+        1,
+        len(estimators),
+        figsize=(max(5.2, 5.8 * len(estimators)), 5.4),
+        squeeze=False,
+        sharey=True,
+        facecolor="white",
+    )
+    x = np.arange(len(weight_pairs), dtype=float)
+    colors = muted_color_palette(len(weight_pairs))
+    xlabels = [f"{alpha:.2f} / {beta:.2f}" for alpha, beta in weight_pairs]
+
+    for idx, estimator in enumerate(estimators):
+        ax1 = axes[0, idx]
+        f1_values = []
+        feature_values = []
+        for alpha, beta in weight_pairs:
+            key = (estimator, float(alpha), float(beta))
+            if key in grouped.index:
+                f1_values.append(float(grouped.loc[key, "F1_test"]))
+                feature_values.append(float(grouped.loc[key, "N_Features_Selected"]))
+            else:
+                f1_values.append(np.nan)
+                feature_values.append(np.nan)
+
+        bars = ax1.bar(x, f1_values, color=colors, width=0.68, alpha=0.9, zorder=3)
+        for bar, value in zip(bars, f1_values):
+            if np.isfinite(value):
+                ax1.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    value + 0.008,
+                    f"{value:.3f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    rotation=90,
+                )
+        ax2 = ax1.twinx()
+        ax2.plot(
+            x,
+            feature_values,
+            color="#222222",
+            marker="o",
+            linewidth=2.0,
+            label="Selected features",
+            zorder=4,
+        )
+        ax1.set_title(f"({chr(97 + idx)}) {estimator.upper()}", fontsize=12, fontweight="bold")
+        ax1.set_xlabel("alpha / beta")
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(xlabels, rotation=32, ha="right")
+        ax1.set_ylim(0.0, 1.05)
+        ax1.grid(axis="y", alpha=0.25)
+        ax1.set_axisbelow(True)
+        if idx == 0:
+            ax1.set_ylabel("Mean F1-score")
+        if idx == len(estimators) - 1:
+            ax2.set_ylabel("Mean selected features")
+
+    fig.suptitle(
+        f"Fitness Weight Sensitivity — {dataset_name}",
+        fontsize=14,
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    filename = f"SensitivityWeights_AlphaBeta_{dataset_name}.png"
     _save_chart(fig, out_dir, filename)
     return filename
 
@@ -2888,6 +3549,17 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
         sensitivity_chart = generate_sensitivity_main_figure(summary_df, paths.fig_dir, args)
         if sensitivity_chart:
             generated_charts.append(sensitivity_chart)
+    elif args.experiment_mode == "sensitivity_weights":
+        generated_charts = []
+        for dataset_name in dataset_names:
+            sensitivity_chart = generate_weight_sensitivity_main_figure(
+                dataset_name,
+                summary_df,
+                paths.fig_dir,
+                args,
+            )
+            if sensitivity_chart:
+                generated_charts.append(sensitivity_chart)
     else:
         generated_charts = generate_seven_global_charts(
             summary_df,
@@ -2900,6 +3572,22 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
             ablation_chart = generate_ablation_main_figure(summary_df, paths.fig_dir, list(args.optimizers))
             if ablation_chart:
                 generated_charts.append(ablation_chart)
+            for dataset_name in dataset_names:
+                metrics_chart = generate_ablation_classification_metrics_figure(
+                    dataset_name,
+                    results_struct,
+                    paths.fig_dir,
+                    args,
+                )
+                if metrics_chart:
+                    generated_charts.append(metrics_chart)
+                tradeoff_chart = generate_ablation_accuracy_features_tradeoff(
+                    dataset_name,
+                    summary_df,
+                    paths.fig_dir,
+                )
+                if tradeoff_chart:
+                    generated_charts.append(tradeoff_chart)
     return exported, summary_csv, generated_charts, statistical_excel, friedman_excel
 
 def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str):
@@ -2913,6 +3601,7 @@ def clone_args_for_mode(base_args: argparse.Namespace, mode: str) -> argparse.Na
     mode_args.estimators = list(base_args.estimators)
     mode_args.transfer_functions = list(base_args.transfer_functions)
     mode_args.sensitivity_values = list(base_args.sensitivity_values)
+    mode_args.sensitivity_weight_pairs = list(base_args.sensitivity_weight_pairs)
     return mode_args
 
 def run_experiment_mode(args: argparse.Namespace) -> None:
@@ -2926,6 +3615,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
         raise ValueError("--n-workers must be >= 1")
 
     paths = make_paths(args)
+    source_paths = make_read_only_source_paths(args)
     cache_sig = build_cache_signature(args)
     show_tf = len(args.transfer_functions) > 1
     show_cls = len(args.estimators) > 1
@@ -2937,6 +3627,8 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
     print(f"Mode: {args.experiment_mode}")
     print_dataset_summary(args, dataset_specs)
     print(f"Cache signature: {cache_sig}")
+    if source_paths is not None:
+        print(f"Read-only cache source: {source_paths.exp_tag}/{args.experiment_mode}")
 
     if args.figures_only:
         exported, summary_csv, generated_charts, statistical_excel, friedman_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
@@ -3001,21 +3693,46 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                 cls_payload = progress_payload or {}
                 if progress_payload is not None:
                     print(f"[resume] Resuming {dataset_name} / {estimator} from partial checkpoint")
+            source_payload = None
+            source_load_reason = None
+            if source_paths is not None:
+                source_payload, source_load_reason = load_best_source_cache_payload(
+                    source_paths,
+                    dataset_name,
+                    estimator,
+                    cache_sig,
+                )
+                if source_load_reason is not None:
+                    print(
+                        "CACHE SOURCE INCOMPATIBLE | "
+                        f"from={source_paths.exp_tag} | to={paths.exp_tag} | "
+                        f"mode={args.experiment_mode} | dataset={dataset_name} | "
+                        f"classifier={estimator} | reason={source_load_reason}"
+                    )
             for method in args.optimizers:
                 for tf in args.transfer_functions:
                     for variant_value in experiment_variants(args):
-                        if variant_value is not None:
+                        if args.experiment_mode == "sensitivity" and variant_value is not None:
                             apply_sensitivity_value(args, variant_value)
-                        variant_suffix = (
-                            sensitivity_label_suffix(args, variant_value)
-                            if variant_value is not None
-                            else None
-                        )
+                        elif args.experiment_mode == "sensitivity_weights" and variant_value is not None:
+                            apply_sensitivity_weight_pair(args, variant_value)
+                        variant_suffix = experiment_variant_label_suffix(args, variant_value)
+                        scientific_metadata = weight_checkpoint_metadata(args)
                         label = build_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix)
                         legacy_label = build_legacy_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix)
                         if label not in cls_payload and legacy_label in cls_payload:
                             cls_payload[label] = cls_payload.pop(legacy_label)
                         prev = cls_payload.get(label, {})
+                        if prev and not weight_checkpoint_metadata_matches(
+                            prev,
+                            scientific_metadata,
+                        ):
+                            print(
+                                "[cache-warning] Ignored checkpoint with mismatched "
+                                f"weight metadata: {dataset_name} / {estimator} / {label}"
+                            )
+                            cls_payload.pop(label, None)
+                            prev = {}
                         acc_runs = list(np.asarray(prev.get("AccRuns", []), dtype=float))
                         ps_runs = list(np.asarray(prev.get("PSRuns", []), dtype=float))
                         rs_runs = list(np.asarray(prev.get("RSRuns", []), dtype=float))
@@ -3026,6 +3743,73 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                         curves = list(prev.get("CurvesAll", []))
 
                         done = len(acc_runs)
+                        if source_paths is not None and done >= args.runs:
+                            print(
+                                "CACHE HIT CURRENT | "
+                                f"exp={paths.exp_tag} | mode={args.experiment_mode} | "
+                                f"dataset={dataset_name} | classifier={estimator} | "
+                                f"label={label} | runs={args.runs}/{args.runs}"
+                            )
+                        elif source_paths is not None and source_payload is not None:
+                            current_runs = {
+                                "AccRuns": acc_runs,
+                                "PSRuns": ps_runs,
+                                "RSRuns": rs_runs,
+                                "F1Runs": f1_runs,
+                                "FitRuns": fit_runs,
+                                "FeatRuns": feat_runs,
+                                "TimeRuns": time_runs,
+                                "CurvesAll": curves,
+                            }
+                            imported, incompatibility = import_source_label_runs(
+                                source_payload,
+                                label,
+                                legacy_label,
+                                estimator,
+                                args.runs,
+                                current_runs,
+                                expected_metadata=scientific_metadata,
+                            )
+                            if incompatibility is not None:
+                                print(
+                                    "CACHE SOURCE INCOMPATIBLE | "
+                                    f"from={source_paths.exp_tag} | to={paths.exp_tag} | "
+                                    f"mode={args.experiment_mode} | dataset={dataset_name} | "
+                                    f"classifier={estimator} | label={label} | "
+                                    f"reason={incompatibility}"
+                                )
+                            if imported:
+                                cls_payload[label] = build_label_payload(
+                                    estimator,
+                                    acc_runs,
+                                    ps_runs,
+                                    rs_runs,
+                                    f1_runs,
+                                    fit_runs,
+                                    feat_runs,
+                                    time_runs,
+                                    curves,
+                                    args.epochs,
+                                    scientific_metadata=scientific_metadata,
+                                )
+                                save_cache(progress_file, cls_payload)
+                                save_cache(cache_file, cls_payload)
+                                done = len(acc_runs)
+                                print(
+                                    "CACHE IMPORTED | "
+                                    f"from={source_paths.exp_tag} | to={paths.exp_tag} | "
+                                    f"mode={args.experiment_mode} | dataset={dataset_name} | "
+                                    f"classifier={estimator} | label={label} | "
+                                    f"runs={imported} | completed={done}/{args.runs}"
+                                )
+                        if source_paths is not None and done < args.runs:
+                            print(
+                                "CACHE MISS | "
+                                f"exp={paths.exp_tag} | source={source_paths.exp_tag} | "
+                                f"mode={args.experiment_mode} | dataset={dataset_name} | "
+                                f"classifier={estimator} | label={label} | "
+                                f"missing={args.runs - done}"
+                            )
                         if done >= args.runs:
                             print(f"Running {dataset_name} | {label} | runs={args.runs} (already complete)")
                             continue
@@ -3057,6 +3841,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                 time_runs,
                                 curves,
                                 args.epochs,
+                                scientific_metadata=scientific_metadata,
                             )
                             save_cache(progress_file, cls_payload)
                             save_cache(cache_file, cls_payload)
@@ -3091,6 +3876,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             time_runs,
                             curves,
                             args.epochs,
+                            scientific_metadata=scientific_metadata,
                         )
                         save_cache(progress_file, cls_payload)
                         save_cache(cache_file, cls_payload)
@@ -3128,7 +3914,11 @@ def main():
     modes = [str(mode).lower() for mode in args.experiment_modes]
     if not modes:
         raise ValueError("EXPERIMENT_MODES / --experiment-modes requires at least one mode")
-    invalid_modes = [mode for mode in modes if mode not in {"full", "ablation", "sensitivity"}]
+    invalid_modes = [
+        mode
+        for mode in modes
+        if mode not in {"full", "ablation", "sensitivity", "sensitivity_weights"}
+    ]
     if invalid_modes:
         raise ValueError(f"Unsupported experiment modes: {invalid_modes}")
     if args.runs < 1:
