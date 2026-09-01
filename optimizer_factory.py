@@ -86,6 +86,11 @@ def _constructor_kwargs(resolved: ResolvedOptimizer, settings: Any) -> dict[str,
     return kwargs
 
 
+def optimizer_constructor_kwargs(name: str, settings: Any) -> dict[str, Any]:
+    """Return the exact adapter-resolved constructor configuration for an optimizer."""
+    return _constructor_kwargs(resolve_optimizer(name), settings)
+
+
 def build_optimizer(name: str, settings: Any):
     resolved = resolve_optimizer(name)
     optimizer = resolved.optimizer_class(**_constructor_kwargs(resolved, settings))

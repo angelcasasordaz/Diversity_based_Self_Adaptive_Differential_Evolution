@@ -39,6 +39,7 @@ from optimizer_factory import (
     build_optimizer,
     list_available_optimizers,
     optimizer_acronym,
+    optimizer_constructor_kwargs,
     resolve_optimizer,
     select_execution_strategy as select_backend_strategy,
 )
@@ -222,6 +223,11 @@ DSADE_BETA_MAX = 0.8
 DSADE_PCR = 0.2
 DSADE_MAHAL_Q = 0.68
 
+SENSITIVITY_OPTIMIZERS = [
+    "DSA-DE",
+    # "MaCRO-DE",
+]
+
 SENSITIVITY_PARAMETER = "mahalanobis_q"
 SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
 
@@ -251,6 +257,11 @@ SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
 
 DEFAULT_FITNESS_ALPHA = 0.90
 DEFAULT_FITNESS_BETA = 0.10
+SENSITIVITY_WEIGHTS_OPTIMIZERS = [
+    "DSA-DE",
+    # "MaCRO-DE",
+]
+
 SENSITIVITY_WEIGHT_PAIRS = [
     (0.70, 0.30),
     (0.80, 0.20),
@@ -402,8 +413,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dsade-beta-max", type=float, default=DSADE_BETA_MAX)
     parser.add_argument("--dsade-pcr", type=float, default=DSADE_PCR)
     parser.add_argument("--dsade-mahal-q", type=float, default=DSADE_MAHAL_Q)
+    parser.add_argument(
+        "--sensitivity-optimizers",
+        nargs="+",
+        default=list(SENSITIVITY_OPTIMIZERS),
+        help="Optimizers evaluated by sensitivity mode (DSA-DE and/or MaCRO-DE)",
+    )
     parser.add_argument("--sensitivity-parameter", default=SENSITIVITY_PARAMETER)
     parser.add_argument("--sensitivity-values", nargs="+", type=float, default=list(SENSITIVITY_VALUES))
+    parser.add_argument(
+        "--sensitivity-weights-optimizers",
+        nargs="+",
+        default=list(SENSITIVITY_WEIGHTS_OPTIMIZERS),
+        help="Optimizer names or acronyms evaluated by sensitivity_weights mode",
+    )
     parser.add_argument(
         "--sensitivity-weight-pairs",
         nargs="+",
@@ -488,8 +511,12 @@ def report_gpu_acceptance(args: argparse.Namespace, modes: List[str]) -> None:
         mode_args = clone_args_for_mode(args, "sensitivity_weights")
         apply_experiment_mode(mode_args)
         names = resolve_optimizers(mode_args)
-        total = len(mode_args.sensitivity_weight_pairs)
-        supported = int(resolve_optimizer(names[0]).capability.supports_gpu) * total
+        pair_count = len(mode_args.sensitivity_weight_pairs)
+        total = len(names) * pair_count
+        supported = sum(
+            int(resolve_optimizer(name).capability.supports_gpu) * pair_count
+            for name in names
+        )
         suites["sensitivity_weights"] = (supported, total)
 
     selected_supported = all(
@@ -647,12 +674,39 @@ def apply_experiment_mode(args: argparse.Namespace) -> None:
             )
         if not args.sensitivity_values:
             raise ValueError("Sensitivity mode requires at least one sensitivity value")
-        args.optimizers = ["DSA-DE"]
+        sensitivity_optimizers = list(
+            getattr(args, "sensitivity_optimizers", SENSITIVITY_OPTIMIZERS)
+        )
+        if not sensitivity_optimizers:
+            raise ValueError("Sensitivity mode requires at least one optimizer")
+        supported_optimizers = {"DSADE", "MaCRO-DE"}
+        invalid_optimizers = [
+            name
+            for name in sensitivity_optimizers
+            if resolve_optimizer_name(name) not in supported_optimizers
+        ]
+        if invalid_optimizers:
+            raise ValueError(
+                f"Unsupported sensitivity optimizers: {invalid_optimizers}. "
+                "Valid values: DSA-DE, MaCRO-DE"
+            )
+        args.optimizers = sensitivity_optimizers
     elif args.experiment_mode == "sensitivity_weights":
         args.sensitivity_weight_pairs = validate_sensitivity_weight_pairs(
             args.sensitivity_weight_pairs
         )
-        args.optimizers = ["DSA-DE"]
+        sensitivity_weights_optimizers = list(
+            getattr(
+                args,
+                "sensitivity_weights_optimizers",
+                SENSITIVITY_WEIGHTS_OPTIMIZERS,
+            )
+        )
+        if not sensitivity_weights_optimizers:
+            raise ValueError("sensitivity_weights mode requires at least one optimizer")
+        for name in sensitivity_weights_optimizers:
+            resolve_optimizer_name(name)
+        args.optimizers = sensitivity_weights_optimizers
 
 def apply_sensitivity_value(args: argparse.Namespace, value: float) -> None:
     parameter = args.sensitivity_parameter
@@ -670,10 +724,30 @@ def apply_sensitivity_value(args: argparse.Namespace, value: float) -> None:
         args.epochs = int(value)
 
 
+def sensitivity_variant_args(
+    args: argparse.Namespace,
+    value: float,
+) -> argparse.Namespace:
+    """Return an isolated OFAT configuration for one sensitivity value."""
+    variant_args = argparse.Namespace(**vars(args))
+    apply_sensitivity_value(variant_args, value)
+    return variant_args
+
+
 def apply_sensitivity_weight_pair(args: argparse.Namespace, pair: Tuple[float, float]) -> None:
     alpha, beta = validate_sensitivity_weight_pairs([pair])[0]
     args.fitness_alpha = alpha
     args.fitness_beta = beta
+
+
+def sensitivity_weight_variant_args(
+    args: argparse.Namespace,
+    pair: Tuple[float, float],
+) -> argparse.Namespace:
+    """Return an isolated weight configuration without changing optimizer science."""
+    variant_args = argparse.Namespace(**vars(args))
+    apply_sensitivity_weight_pair(variant_args, pair)
+    return variant_args
 
 def sensitivity_value_token(value: float) -> str:
     return str(value).replace("-", "m").replace(".", "p")
@@ -1326,14 +1400,50 @@ def build_label_payload(
     return payload
 
 
-def weight_checkpoint_metadata(args: argparse.Namespace) -> Optional[dict]:
-    """Attach pair-level scientific identity only to weight-sensitivity rows."""
+def weight_checkpoint_metadata(
+    args: argparse.Namespace,
+    optimizer_name: Optional[str] = None,
+) -> Optional[dict]:
+    """Attach pair and optimizer identity only to weight-sensitivity rows."""
     if str(args.experiment_mode) != "sensitivity_weights":
         return None
-    return {
+    metadata = {
         "ExperimentMode": "sensitivity_weights",
         "FitnessAlpha": float(args.fitness_alpha),
         "FitnessBeta": float(args.fitness_beta),
+    }
+    if optimizer_name is not None:
+        metadata["Optimizer"] = resolve_optimizer_name(optimizer_name)
+    return metadata
+
+
+def sensitivity_checkpoint_metadata(
+    args: argparse.Namespace,
+    optimizer_name: str,
+    sensitivity_value: float,
+) -> Optional[dict]:
+    """Attach optimizer-specific OFAT identity only to sensitivity rows."""
+    if str(args.experiment_mode) != "sensitivity":
+        return None
+    constructor_kwargs = optimizer_constructor_kwargs(optimizer_name, args)
+    scientific_names = {
+        "epoch",
+        "pop_size",
+        "beta_min",
+        "beta_max",
+        "pcr",
+        "mahalanobis_q",
+    }
+    scientific_parameters = {
+        name: constructor_kwargs[name]
+        for name in sorted(scientific_names.intersection(constructor_kwargs))
+    }
+    return {
+        "ExperimentMode": "sensitivity",
+        "Optimizer": resolve_optimizer_name(optimizer_name),
+        "SensitivityParameter": str(args.sensitivity_parameter),
+        "SensitivityValue": float(sensitivity_value),
+        "OptimizerScientificParameters": scientific_parameters,
     }
 
 
@@ -1344,6 +1454,16 @@ def weight_checkpoint_metadata_matches(row: dict, expected_metadata: Optional[di
         return False
     if row.get("ExperimentMode") != expected_metadata["ExperimentMode"]:
         return False
+    expected_optimizer = expected_metadata.get("Optimizer")
+    if expected_optimizer is not None:
+        actual_optimizer = row.get("Optimizer")
+        # Historical sensitivity_weights checkpoints were necessarily DSA-DE,
+        # so a missing optimizer field is unambiguous and remains reusable.
+        if actual_optimizer is None:
+            if expected_optimizer != "DSADE":
+                return False
+        elif actual_optimizer != expected_optimizer:
+            return False
     try:
         return all(
             math.isclose(
@@ -1356,6 +1476,50 @@ def weight_checkpoint_metadata_matches(row: dict, expected_metadata: Optional[di
         )
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def sensitivity_checkpoint_metadata_matches(
+    row: dict,
+    expected_metadata: Optional[dict],
+) -> bool:
+    if expected_metadata is None:
+        return True
+    if not isinstance(row, dict):
+        return False
+    for key in ("ExperimentMode", "Optimizer", "SensitivityParameter"):
+        if row.get(key) != expected_metadata.get(key):
+            return False
+    try:
+        if not math.isclose(
+            float(row["SensitivityValue"]),
+            float(expected_metadata["SensitivityValue"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            return False
+        actual_parameters = row["OptimizerScientificParameters"]
+        expected_parameters = expected_metadata["OptimizerScientificParameters"]
+        if set(actual_parameters) != set(expected_parameters):
+            return False
+        return all(
+            math.isclose(
+                float(actual_parameters[key]),
+                float(expected_parameters[key]),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            for key in expected_parameters
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def checkpoint_metadata_matches(row: dict, expected_metadata: Optional[dict]) -> bool:
+    if expected_metadata is None:
+        return True
+    if expected_metadata.get("ExperimentMode") == "sensitivity":
+        return sensitivity_checkpoint_metadata_matches(row, expected_metadata)
+    return weight_checkpoint_metadata_matches(row, expected_metadata)
 
 def save_cache(path: str, payload: dict):
     with open(path, "wb") as f:
@@ -1495,20 +1659,27 @@ def validate_source_label_runs(
     if str(row.get("Estimator", "")).lower() != str(estimator).lower():
         return None, "classifier metadata does not match"
     if expected_metadata:
-        if row.get("ExperimentMode") != expected_metadata["ExperimentMode"]:
+        if expected_metadata.get("ExperimentMode") == "sensitivity":
+            if not sensitivity_checkpoint_metadata_matches(row, expected_metadata):
+                return None, "sensitivity metadata does not match"
+        elif expected_metadata.get("ExperimentMode") == "sensitivity_weights":
+            if not weight_checkpoint_metadata_matches(row, expected_metadata):
+                return None, "weight metadata does not match"
+        elif row.get("ExperimentMode") != expected_metadata["ExperimentMode"]:
             return None, "experiment mode metadata does not match"
-        for key in ("FitnessAlpha", "FitnessBeta"):
-            try:
-                matches = math.isclose(
-                    float(row[key]),
-                    float(expected_metadata[key]),
-                    rel_tol=0.0,
-                    abs_tol=1e-12,
-                )
-            except (KeyError, TypeError, ValueError):
-                matches = False
-            if not matches:
-                return None, f"{key} metadata does not match"
+        else:
+            for key in ("FitnessAlpha", "FitnessBeta"):
+                try:
+                    matches = math.isclose(
+                        float(row[key]),
+                        float(expected_metadata[key]),
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    matches = False
+                if not matches:
+                    return None, f"{key} metadata does not match"
 
     run_fields = (
         "AccRuns",
@@ -1595,14 +1766,31 @@ def mode_cache_is_complete(
             for label, legacy_label in expected_result_labels(args, estimator, show_tf, show_cls):
                 if payload_label_completed_runs(payload, label, legacy_label) < args.runs:
                     return False
-                if args.experiment_mode == "sensitivity_weights":
+                if args.experiment_mode == "sensitivity":
                     row = payload.get(label, payload.get(legacy_label))
                     parsed = parse_result_label(label, args)
-                    expected_metadata = {
-                        "ExperimentMode": "sensitivity_weights",
-                        "FitnessAlpha": parsed["fitness_alpha"],
-                        "FitnessBeta": parsed["fitness_beta"],
-                    }
+                    variant_args = sensitivity_variant_args(
+                        args,
+                        parsed["sensitivity_value"],
+                    )
+                    expected_metadata = sensitivity_checkpoint_metadata(
+                        variant_args,
+                        parsed["method"],
+                        parsed["sensitivity_value"],
+                    )
+                    if not sensitivity_checkpoint_metadata_matches(row, expected_metadata):
+                        return False
+                elif args.experiment_mode == "sensitivity_weights":
+                    row = payload.get(label, payload.get(legacy_label))
+                    parsed = parse_result_label(label, args)
+                    variant_args = sensitivity_weight_variant_args(
+                        args,
+                        (parsed["fitness_alpha"], parsed["fitness_beta"]),
+                    )
+                    expected_metadata = weight_checkpoint_metadata(
+                        variant_args,
+                        parsed["method"],
+                    )
                     if not weight_checkpoint_metadata_matches(row, expected_metadata):
                         return False
     return True
@@ -1926,14 +2114,35 @@ def export_statistical_excel(
     }
     stats = ["Best", "Worst", "Mean", "Std"]
     if args.experiment_mode == "sensitivity":
-        optimizers = [f"{args.sensitivity_parameter}={float(value):g}" for value in args.sensitivity_values]
-        index_name = "SensitivityValue"
+        sensitivity_methods = optimizer_order_from_config(optimizer_order)
+        if len(sensitivity_methods) == 1:
+            optimizers = [
+                f"{args.sensitivity_parameter}={float(value):g}"
+                for value in args.sensitivity_values
+            ]
+            index_name = "SensitivityValue"
+        else:
+            optimizers = [
+                f"{method} | {args.sensitivity_parameter}={float(value):g}"
+                for method in sensitivity_methods
+                for value in args.sensitivity_values
+            ]
+            index_name = "OptimizerSensitivityValue"
     elif args.experiment_mode == "sensitivity_weights":
-        optimizers = [
-            sensitivity_weight_display_label(pair)
-            for pair in args.sensitivity_weight_pairs
-        ]
-        index_name = "AlphaBeta"
+        weight_methods = optimizer_order_from_config(optimizer_order)
+        if len(weight_methods) == 1:
+            optimizers = [
+                sensitivity_weight_display_label(pair)
+                for pair in args.sensitivity_weight_pairs
+            ]
+            index_name = "AlphaBeta"
+        else:
+            optimizers = [
+                f"{method} | {sensitivity_weight_display_label(pair)}"
+                for method in weight_methods
+                for pair in args.sensitivity_weight_pairs
+            ]
+            index_name = "OptimizerAlphaBeta"
     else:
         optimizers = optimizer_order_from_config(optimizer_order)
         index_name = "Optimizer"
@@ -1955,13 +2164,23 @@ def export_statistical_excel(
                 parsed_value = parsed.get("sensitivity_value", np.nan)
                 if not np.isfinite(parsed_value):
                     continue
-                optimizer = f"{args.sensitivity_parameter}={float(parsed_value):g}"
+                if len(sensitivity_methods) == 1:
+                    optimizer = f"{args.sensitivity_parameter}={float(parsed_value):g}"
+                else:
+                    optimizer = (
+                        f"{optimizer_acronym(parsed['method'])} | "
+                        f"{args.sensitivity_parameter}={float(parsed_value):g}"
+                    )
             elif args.experiment_mode == "sensitivity_weights":
                 parsed_alpha = parsed.get("fitness_alpha", np.nan)
                 parsed_beta = parsed.get("fitness_beta", np.nan)
                 if not np.isfinite(parsed_alpha) or not np.isfinite(parsed_beta):
                     continue
-                optimizer = sensitivity_weight_display_label((parsed_alpha, parsed_beta))
+                pair_label = sensitivity_weight_display_label((parsed_alpha, parsed_beta))
+                if len(weight_methods) == 1:
+                    optimizer = pair_label
+                else:
+                    optimizer = f"{optimizer_acronym(parsed['method'])} | {pair_label}"
             else:
                 optimizer = optimizer_acronym(parsed["method"])
             if optimizer not in set(optimizers):
@@ -2434,6 +2653,117 @@ def generate_ablation_classification_metrics_figure(
     _save_chart(fig, out_dir, filename)
     return filename
 
+def _bbox_overlap_area(first, second) -> float:
+    overlap_width = max(0.0, min(first.x1, second.x1) - max(first.x0, second.x0))
+    overlap_height = max(0.0, min(first.y1, second.y1) - max(first.y0, second.y0))
+    return overlap_width * overlap_height
+
+
+def _place_ablation_optimizer_labels(ax, point_labels: List[Tuple[float, float, str]]) -> None:
+    """Place short scatter labels close to markers and inside the axes."""
+    if not point_labels:
+        return
+    fig = ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    axes_bbox = ax.get_window_extent(renderer).padded(-3.0)
+    occupied = [
+        text.get_window_extent(renderer)
+        for text in ax.texts
+        if text.get_visible() and text.get_text()
+    ]
+    placed_points = []
+
+    placement_order = sorted(point_labels, key=lambda item: len(item[2]), reverse=True)
+    for index, (x_value, y_value, label) in enumerate(placement_order):
+        display_point = ax.transData.transform((x_value, y_value))
+        axes_point = ax.transAxes.inverted().transform(display_point)
+        near_count = sum(
+            abs(display_point[0] - previous[0]) < 58
+            and abs(display_point[1] - previous[1]) < 30
+            for previous in placed_points
+        )
+        placed_points.append(display_point)
+
+        if axes_point[0] > 0.78:
+            horizontal_direction = -1
+        elif axes_point[0] < 0.22:
+            horizontal_direction = 1
+        else:
+            horizontal_direction = 1 if (index + near_count) % 2 == 0 else -1
+        if axes_point[1] > 0.78:
+            vertical_direction = -1
+        elif axes_point[1] < 0.22:
+            vertical_direction = 1
+        else:
+            vertical_direction = 1 if near_count % 2 == 0 else -1
+
+        vertical_step = 7 + 4 * min(near_count, 2)
+        horizontal_step = 6 + 2 * min(near_count, 2)
+        candidates = [
+            (horizontal_direction * horizontal_step, vertical_direction * vertical_step),
+            (horizontal_direction * horizontal_step, -vertical_direction * vertical_step),
+            (-horizontal_direction * horizontal_step, vertical_direction * vertical_step),
+            (horizontal_direction * 12, vertical_direction * (vertical_step + 4)),
+            (0, vertical_direction * (vertical_step + 7)),
+            (-horizontal_direction * 12, -vertical_direction * (vertical_step + 3)),
+        ]
+        for horizontal_distance in (6, 17, 28):
+            for vertical_distance in (8, 19, 30):
+                candidates.extend(
+                    [
+                        (horizontal_direction * horizontal_distance, vertical_direction * vertical_distance),
+                        (horizontal_direction * horizontal_distance, -vertical_direction * vertical_distance),
+                        (-horizontal_direction * horizontal_distance, vertical_direction * vertical_distance),
+                        (-horizontal_direction * horizontal_distance, -vertical_direction * vertical_distance),
+                    ]
+                )
+        candidates = list(dict.fromkeys(candidates))
+
+        best = None
+        for dx, dy in candidates:
+            annotation = ax.annotate(
+                label,
+                (x_value, y_value),
+                xytext=(dx, dy),
+                textcoords="offset points",
+                ha="left" if dx > 0 else "right" if dx < 0 else "center",
+                va="bottom" if dy > 0 else "top",
+                fontsize=8,
+                annotation_clip=True,
+                clip_on=True,
+                zorder=5,
+            )
+            label_bbox = annotation.get_window_extent(renderer).expanded(1.02, 1.08)
+            outside = (
+                max(0.0, axes_bbox.x0 - label_bbox.x0)
+                + max(0.0, label_bbox.x1 - axes_bbox.x1)
+                + max(0.0, axes_bbox.y0 - label_bbox.y0)
+                + max(0.0, label_bbox.y1 - axes_bbox.y1)
+            )
+            overlap = sum(_bbox_overlap_area(label_bbox, other) for other in occupied)
+            score = outside * 10000.0 + overlap + 0.05 * (abs(dx) + abs(dy))
+            annotation.remove()
+            if best is None or score < best[0]:
+                best = (score, dx, dy)
+
+        _, dx, dy = best
+        final_annotation = ax.annotate(
+            label,
+            (x_value, y_value),
+            xytext=(dx, dy),
+            textcoords="offset points",
+            ha="left" if dx > 0 else "right" if dx < 0 else "center",
+            va="bottom" if dy > 0 else "top",
+            fontsize=8,
+            annotation_clip=True,
+            clip_on=True,
+            zorder=5,
+        )
+        fig.canvas.draw()
+        occupied.append(final_annotation.get_window_extent(renderer).expanded(1.02, 1.08))
+
+
 def generate_ablation_accuracy_features_tradeoff(
     dataset_name: str,
     summary_df: pd.DataFrame,
@@ -2469,15 +2799,9 @@ def generate_ablation_accuracy_features_tradeoff(
         y_max = min(1.05, float(np.max(finite_accuracy)) + 0.06)
     else:
         y_min, y_max = 0.0, 1.05
-    label_positions = {
-        "DE": ((5, -12), "left"),
-        "DE-AWAD": ((0, 10), "center"),
-        "DE-DIVERSITYSELECTION": ((0, -14), "center"),
-        "DE-MAHALANOBIS": ((0, 10), "center"),
-        "DSADE": ((-5, -14), "right"),
-    }
     for panel_idx, (ax, estimator) in enumerate(zip(axes, estimator_order)):
         has_data = False
+        point_labels = []
         for optimizer in optimizer_order:
             key = (estimator, optimizer)
             if key not in grouped.index:
@@ -2497,13 +2821,8 @@ def generate_ablation_accuracy_features_tradeoff(
                 linewidth=1.3 if is_dsade else 0.7,
                 zorder=4,
             )
-            ax.annotate(
-                display_labels.get(optimizer, optimizer),
-                (x_value, y_value),
-                xytext=label_positions.get(optimizer, ((5, 5), "left"))[0],
-                textcoords="offset points",
-                ha=label_positions.get(optimizer, ((5, 5), "left"))[1],
-                fontsize=8,
+            point_labels.append(
+                (x_value, y_value, display_labels.get(optimizer, optimizer))
             )
             has_data = True
         if not has_data:
@@ -2523,6 +2842,7 @@ def generate_ablation_accuracy_features_tradeoff(
         ax.set_ylim(y_min, y_max)
         ax.grid(alpha=0.25)
         ax.set_axisbelow(True)
+        _place_ablation_optimizer_labels(ax, point_labels)
     axes[0].set_ylabel("Mean Accuracy")
     axes[1].set_xlabel("Mean number of selected features")
     fig.suptitle(f"Ablation Accuracy–Features Trade-off — {dataset_name}", fontsize=14, fontweight="bold")
@@ -2548,7 +2868,16 @@ def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argpa
     if not estimators:
         return None
 
-    grouped = plot_df.groupby(["Estimator", "SensitivityValue"])[["F1_test", "N_Features_Selected"]].mean()
+    optimizer_order = optimizer_order_from_config(list(args.optimizers))
+    present_optimizers = set(plot_df["Optimizer"].astype(str))
+    optimizer_order = [optimizer for optimizer in optimizer_order if optimizer in present_optimizers]
+    optimizer_order += sorted(present_optimizers.difference(optimizer_order))
+    if not optimizer_order:
+        return None
+
+    grouped = plot_df.groupby(["Optimizer", "Estimator", "SensitivityValue"])[
+        ["F1_test", "N_Features_Selected"]
+    ].mean()
     n_cols = min(3, len(estimators))
     n_rows = int(np.ceil(len(estimators) / n_cols))
     fig, axes = plt.subplots(
@@ -2559,51 +2888,148 @@ def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argpa
         facecolor="white",
     )
     x = np.arange(len(value_order))
-    colors = muted_color_palette(len(value_order))
     xlabels = [f"{value:g}" for value in value_order]
+    value_colors = muted_color_palette(len(value_order))
+    feature_annotations_are_readable = len(optimizer_order) * len(value_order) <= 6
+    optimizer_linestyles = ["solid", "dashed", "dotted", "dashdot"]
 
     for idx, estimator in enumerate(estimators):
         ax1 = axes[idx // n_cols, idx % n_cols]
-        f1_vals = [
-            float(grouped.loc[(estimator, value), "F1_test"])
-            if (estimator, value) in grouped.index
-            else np.nan
-            for value in value_order
-        ]
-        feat_vals = [
-            float(grouped.loc[(estimator, value), "N_Features_Selected"])
-            if (estimator, value) in grouped.index
-            else np.nan
-            for value in value_order
-        ]
-        bars = ax1.bar(x, f1_vals, color=colors, width=0.68, alpha=0.9)
-        for bar, value in zip(bars, f1_vals):
-            if np.isfinite(value):
+        ax2 = ax1.twinx()
+        bar_width = min(0.34, 0.78 / (2.0 * len(optimizer_order)))
+        all_feature_values = []
+        for optimizer_idx, optimizer in enumerate(optimizer_order):
+            keys = [(optimizer, estimator, value) for value in value_order]
+            f1_vals = [
+                float(grouped.loc[key, "F1_test"]) if key in grouped.index else np.nan
+                for key in keys
+            ]
+            feat_vals = [
+                float(grouped.loc[key, "N_Features_Selected"])
+                if key in grouped.index
+                else np.nan
+                for key in keys
+            ]
+            all_feature_values.extend(value for value in feat_vals if np.isfinite(value))
+            pair_offset = (
+                optimizer_idx - (len(optimizer_order) - 1) / 2.0
+            ) * (2.0 * bar_width)
+            f1_positions = x + pair_offset - bar_width / 2.0
+            feature_positions = x + pair_offset + bar_width / 2.0
+            optimizer_alpha = max(0.58, 0.94 - 0.14 * optimizer_idx)
+            f1_bars = ax1.bar(
+                f1_positions,
+                f1_vals,
+                color=value_colors,
+                width=bar_width,
+                alpha=optimizer_alpha,
+                edgecolor=value_colors,
+                linewidth=0.8,
+                zorder=3,
+            )
+            feature_bars = ax2.bar(
+                feature_positions,
+                feat_vals,
+                width=bar_width,
+                facecolor="white",
+                edgecolor=value_colors,
+                linewidth=1.3,
+                linestyle=optimizer_linestyles[optimizer_idx % len(optimizer_linestyles)],
+                hatch="///",
+                alpha=0.82,
+                zorder=2,
+            )
+            for bar, value in zip(f1_bars, f1_vals):
+                if not np.isfinite(value):
+                    continue
+                near_top = value >= 0.98
                 ax1.text(
                     bar.get_x() + bar.get_width() / 2,
-                    value + 0.006,
+                    value - 0.018 if near_top else value + 0.006,
                     f"{value:.3f}",
                     ha="center",
-                    va="bottom",
-                    fontsize=8,
+                    va="top" if near_top else "bottom",
+                    fontsize=7 if len(optimizer_order) > 1 else 8,
                     rotation=90,
+                    clip_on=True,
+                    zorder=5,
                 )
-        ax2 = ax1.twinx()
-        ax2.plot(x, feat_vals, color="#222222", marker="o", linewidth=2.0, label="Selected features")
+            if feature_annotations_are_readable:
+                for bar, value in zip(feature_bars, feat_vals):
+                    if np.isfinite(value):
+                        ax2.text(
+                            bar.get_x() + bar.get_width() / 2,
+                            value,
+                            f"{value:.1f}",
+                            ha="center",
+                            va="bottom",
+                            fontsize=7,
+                            rotation=90,
+                            clip_on=True,
+                            zorder=5,
+                        )
+        feature_upper = max(all_feature_values, default=1.0)
+        ax2.set_ylim(0.0, max(1.0, feature_upper * 1.16))
         ax1.set_title(estimator.upper(), fontsize=11, fontweight="bold")
         ax1.set_ylabel("Mean F1-score")
         ax2.set_ylabel("Mean selected features")
         ax1.set_xlabel(args.sensitivity_parameter)
         ax1.set_xticks(x)
         ax1.set_xticklabels(xlabels, rotation=0)
+        ax1.set_xlim(-0.55, len(value_order) - 0.45)
         ax1.set_ylim(0.0, 1.05)
         ax1.grid(axis="y", alpha=0.25)
+        if len(optimizer_order) > 1:
+            optimizer_handles = [
+                mpatches.Patch(
+                    facecolor="#888888",
+                    edgecolor="#444444",
+                    alpha=max(0.58, 0.94 - 0.14 * optimizer_idx),
+                    linestyle=optimizer_linestyles[
+                        optimizer_idx % len(optimizer_linestyles)
+                    ],
+                    label=optimizer,
+                )
+                for optimizer_idx, optimizer in enumerate(optimizer_order)
+            ]
+            ax1.legend(
+                handles=optimizer_handles,
+                title="Optimizer",
+                fontsize=7,
+                title_fontsize=7,
+                loc="upper right",
+            )
 
     for idx in range(len(estimators), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].axis("off")
 
-    fig.suptitle(f"Sensitivity Study: DSA-DE {args.sensitivity_parameter}", fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    optimizer_title = " & ".join(optimizer_order)
+    fig.suptitle(
+        f"Sensitivity Study: {optimizer_title} {args.sensitivity_parameter}",
+        fontsize=14,
+        fontweight="bold",
+    )
+    metric_handles = [
+        mpatches.Patch(
+            facecolor="#777777",
+            edgecolor="#777777",
+            label="Mean F1-score",
+        ),
+        mpatches.Patch(
+            facecolor="white",
+            edgecolor="#777777",
+            hatch="///",
+            label="Mean selected features",
+        ),
+    ]
+    fig.legend(
+        handles=metric_handles,
+        loc="lower center",
+        ncol=2,
+        frameon=False,
+        fontsize=8,
+    )
+    fig.tight_layout(rect=(0, 0.08, 1, 0.95))
     filename = f"sensitivity_{args.sensitivity_parameter}_f1_features.png"
     _save_chart(fig, out_dir, filename)
     return filename
@@ -2614,8 +3040,9 @@ def generate_weight_sensitivity_main_figure(
     df: pd.DataFrame,
     out_dir: str,
     args: argparse.Namespace,
+    optimizer_name: Optional[str] = None,
 ) -> Optional[str]:
-    """Plot the wrapper-weight trade-off for one selected dataset."""
+    """Plot one optimizer's wrapper-weight trade-off for a selected dataset."""
     if df.empty:
         return None
 
@@ -2626,6 +3053,19 @@ def generate_weight_sensitivity_main_figure(
     plot_df["FitnessAlpha"] = pd.to_numeric(plot_df["FitnessAlpha"], errors="coerce")
     plot_df["FitnessBeta"] = pd.to_numeric(plot_df["FitnessBeta"], errors="coerce")
     plot_df = plot_df[np.isfinite(plot_df["FitnessAlpha"]) & np.isfinite(plot_df["FitnessBeta"])]
+    if plot_df.empty:
+        return None
+
+    present_optimizers = list(dict.fromkeys(plot_df["Optimizer"].astype(str)))
+    if optimizer_name is None:
+        if len(present_optimizers) > 1:
+            raise ValueError(
+                "Multiple optimizers require optimizer_name for separate weight-sensitivity plots"
+            )
+        selected_optimizer = present_optimizers[0]
+    else:
+        selected_optimizer = optimizer_acronym(optimizer_name)
+    plot_df = plot_df[plot_df["Optimizer"].astype(str) == selected_optimizer]
     if plot_df.empty:
         return None
 
@@ -2696,13 +3136,17 @@ def generate_weight_sensitivity_main_figure(
         if idx == len(estimators) - 1:
             ax2.set_ylabel("Mean selected features")
 
-    fig.suptitle(
-        f"Fitness Weight Sensitivity — {dataset_name}",
-        fontsize=14,
-        fontweight="bold",
-    )
+    plot_title = f"Fitness Weight Sensitivity — {dataset_name}"
+    if optimizer_name is not None:
+        plot_title = f"{plot_title} — {selected_optimizer}"
+    fig.suptitle(plot_title, fontsize=14, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
-    filename = f"SensitivityWeights_AlphaBeta_{dataset_name}.png"
+    if optimizer_name is None:
+        filename = f"SensitivityWeights_AlphaBeta_{dataset_name}.png"
+    else:
+        filename = (
+            f"SensitivityWeights_AlphaBeta_{dataset_name}_{selected_optimizer}.png"
+        )
     _save_chart(fig, out_dir, filename)
     return filename
 
@@ -3575,15 +4019,28 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
             generated_charts.append(sensitivity_chart)
     elif args.experiment_mode == "sensitivity_weights":
         generated_charts = []
+        weight_optimizers = optimizer_order_from_config(list(args.optimizers))
         for dataset_name in dataset_names:
-            sensitivity_chart = generate_weight_sensitivity_main_figure(
-                dataset_name,
-                summary_df,
-                paths.fig_dir,
-                args,
-            )
-            if sensitivity_chart:
-                generated_charts.append(sensitivity_chart)
+            if len(weight_optimizers) == 1:
+                sensitivity_chart = generate_weight_sensitivity_main_figure(
+                    dataset_name,
+                    summary_df,
+                    paths.fig_dir,
+                    args,
+                )
+                if sensitivity_chart:
+                    generated_charts.append(sensitivity_chart)
+            else:
+                for optimizer_name in weight_optimizers:
+                    sensitivity_chart = generate_weight_sensitivity_main_figure(
+                        dataset_name,
+                        summary_df,
+                        paths.fig_dir,
+                        args,
+                        optimizer_name=optimizer_name,
+                    )
+                    if sensitivity_chart:
+                        generated_charts.append(sensitivity_chart)
     else:
         generated_charts = generate_seven_global_charts(
             summary_df,
@@ -3625,6 +4082,12 @@ def clone_args_for_mode(base_args: argparse.Namespace, mode: str) -> argparse.Na
     mode_args.estimators = list(base_args.estimators)
     mode_args.transfer_functions = list(base_args.transfer_functions)
     mode_args.sensitivity_values = list(base_args.sensitivity_values)
+    if hasattr(base_args, "sensitivity_optimizers"):
+        mode_args.sensitivity_optimizers = list(base_args.sensitivity_optimizers)
+    if hasattr(base_args, "sensitivity_weights_optimizers"):
+        mode_args.sensitivity_weights_optimizers = list(
+            base_args.sensitivity_weights_optimizers
+        )
     mode_args.sensitivity_weight_pairs = list(base_args.sensitivity_weight_pairs)
     return mode_args
 
@@ -3736,24 +4199,35 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
             for method in args.optimizers:
                 for tf in args.transfer_functions:
                     for variant_value in experiment_variants(args):
+                        run_args = args
                         if args.experiment_mode == "sensitivity" and variant_value is not None:
-                            apply_sensitivity_value(args, variant_value)
+                            run_args = sensitivity_variant_args(args, variant_value)
                         elif args.experiment_mode == "sensitivity_weights" and variant_value is not None:
-                            apply_sensitivity_weight_pair(args, variant_value)
+                            run_args = sensitivity_weight_variant_args(args, variant_value)
                         variant_suffix = experiment_variant_label_suffix(args, variant_value)
-                        scientific_metadata = weight_checkpoint_metadata(args)
+                        if args.experiment_mode == "sensitivity":
+                            scientific_metadata = sensitivity_checkpoint_metadata(
+                                run_args,
+                                method,
+                                variant_value,
+                            )
+                        else:
+                            scientific_metadata = weight_checkpoint_metadata(
+                                run_args,
+                                method,
+                            )
                         label = build_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix)
                         legacy_label = build_legacy_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix)
                         if label not in cls_payload and legacy_label in cls_payload:
                             cls_payload[label] = cls_payload.pop(legacy_label)
                         prev = cls_payload.get(label, {})
-                        if prev and not weight_checkpoint_metadata_matches(
+                        if prev and not checkpoint_metadata_matches(
                             prev,
                             scientific_metadata,
                         ):
                             print(
                                 "[cache-warning] Ignored checkpoint with mismatched "
-                                f"weight metadata: {dataset_name} / {estimator} / {label}"
+                                f"scientific metadata: {dataset_name} / {estimator} / {label}"
                             )
                             cls_payload.pop(label, None)
                             prev = {}
@@ -3813,7 +4287,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                     feat_runs,
                                     time_runs,
                                     curves,
-                                    args.epochs,
+                                    run_args.epochs,
                                     scientific_metadata=scientific_metadata,
                                 )
                                 save_cache(progress_file, cls_payload)
@@ -3864,7 +4338,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                 feat_runs,
                                 time_runs,
                                 curves,
-                                args.epochs,
+                                run_args.epochs,
                                 scientific_metadata=scientific_metadata,
                             )
                             save_cache(progress_file, cls_payload)
@@ -3874,7 +4348,10 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             display_workers = min(args.n_workers, len(pending_runs))
                             if str(args.compute_device).lower() == "hybrid":
                                 preview_strategy = select_execution_strategy(
-                                    args, data, method, len(pending_runs)
+                                    run_args,
+                                    data,
+                                    method,
+                                    len(pending_runs),
                                 )
                                 if preview_strategy.gpu_owner_count > 0:
                                     display_workers = min(display_workers, HYBRID_MAX_RUN_WORKERS)
@@ -3884,7 +4361,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             estimator,
                             method,
                             tf,
-                            args,
+                            run_args,
                             pending_runs,
                             on_run_complete=checkpoint_run,
                         )
@@ -3899,7 +4376,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             feat_runs,
                             time_runs,
                             curves,
-                            args.epochs,
+                            run_args.epochs,
                             scientific_metadata=scientific_metadata,
                         )
                         save_cache(progress_file, cls_payload)
