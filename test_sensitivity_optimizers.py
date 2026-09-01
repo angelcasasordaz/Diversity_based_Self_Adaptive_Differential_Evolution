@@ -10,7 +10,7 @@ import main_best as study
 
 
 def make_args(mode="sensitivity", sensitivity_optimizers=None):
-    return argparse.Namespace(
+    args = argparse.Namespace(
         experiment_mode=mode,
         optimizers=["DE", "JADE"],
         sensitivity_optimizers=list(
@@ -30,8 +30,7 @@ def make_args(mode="sensitivity", sensitivity_optimizers=None):
         dsade_beta_max=0.8,
         dsade_pcr=0.2,
         dsade_mahal_q=0.68,
-        sensitivity_parameter="mahalanobis_q",
-        sensitivity_values=[0.50, 0.68],
+        sensitivity_configs=[("mahalanobis_q", [0.50, 0.68])],
         sensitivity_weight_pairs=list(study.SENSITIVITY_WEIGHT_PAIRS),
         fitness_alpha=study.DEFAULT_FITNESS_ALPHA,
         fitness_beta=study.DEFAULT_FITNESS_BETA,
@@ -39,9 +38,100 @@ def make_args(mode="sensitivity", sensitivity_optimizers=None):
         gpu_device_id=0,
         gpu_memory_fraction=0.85,
     )
+    return study.sensitivity_study_args(args)[0]
 
 
 class SensitivityOptimizerTests(unittest.TestCase):
+    def test_single_parameter_configuration_expands_once(self):
+        args = make_args()
+        args.sensitivity_configs = [("mahalanobis_q", [0.50, 0.68])]
+        studies = study.sensitivity_study_args(args)
+        self.assertEqual(len(studies), 1)
+        self.assertEqual(studies[0].sensitivity_parameter, "mahalanobis_q")
+        self.assertEqual(studies[0].sensitivity_values, [0.50, 0.68])
+
+    def test_multiple_parameter_configurations_expand_in_order(self):
+        cases = [
+            [
+                ("beta_min", [0.1, 0.2]),
+                ("mahalanobis_q", [0.5, 0.68]),
+            ],
+            [
+                ("beta_min", [0.1]),
+                ("beta_max", [0.9]),
+                ("pcr", [0.2]),
+                ("mahalanobis_q", [0.68]),
+            ],
+            [("pop_size", [30, 50]), ("epochs", [50, 100])],
+        ]
+        for configs in cases:
+            with self.subTest(configs=configs):
+                args = make_args()
+                args.sensitivity_configs = configs
+                studies = study.sensitivity_study_args(args)
+                self.assertEqual(
+                    [item.sensitivity_parameter for item in studies],
+                    [parameter for parameter, _ in configs],
+                )
+                self.assertEqual(
+                    [item.sensitivity_values for item in studies],
+                    [values for _, values in configs],
+                )
+
+    def test_empty_configuration_is_rejected(self):
+        for empty_config in (None, []):
+            with self.subTest(empty_config=empty_config):
+                args = make_args()
+                args.sensitivity_configs = empty_config
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "non-empty SENSITIVITY_CONFIGS",
+                ):
+                    study.sensitivity_study_args(args)
+
+    def test_parameter_studies_have_separate_cache_and_output_names(self):
+        args = make_args(sensitivity_optimizers=["DSA-DE", "MaCRO-DE"])
+        args.sensitivity_configs = [
+            ("beta_min", [0.1, 0.2]),
+            ("mahalanobis_q", [0.5, 0.68]),
+        ]
+        studies = study.sensitivity_study_args(args)
+        for item in studies:
+            study.apply_experiment_mode(item)
+        cache_tokens = [study.build_cache_signature(item) for item in studies]
+        output_prefixes = [study.experiment_output_prefix(item) for item in studies]
+        self.assertEqual(len(set(cache_tokens)), len(studies))
+        self.assertEqual(len(set(output_prefixes)), len(studies))
+        for item, cache_token, output_prefix in zip(
+            studies, cache_tokens, output_prefixes
+        ):
+            self.assertIn(item.sensitivity_parameter, cache_token)
+            self.assertIn(item.sensitivity_parameter, output_prefix)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            figure_names = []
+            for item in studies:
+                summary = pd.DataFrame(
+                    [
+                        {
+                            "Dataset": "Synthetic",
+                            "Optimizer": "DSA-DE",
+                            "Estimator": "knn",
+                            "SensitivityValue": value,
+                            "F1_test": 0.75,
+                            "N_Features_Selected": 3.0,
+                        }
+                        for value in item.sensitivity_values
+                    ]
+                )
+                figure_names.append(
+                    study.generate_sensitivity_main_figure(summary, tmp, item)
+                )
+            self.assertEqual(len(set(figure_names)), len(studies))
+            for item, figure_name in zip(studies, figure_names):
+                self.assertIn(item.sensitivity_parameter, figure_name)
+                self.assertTrue((Path(tmp) / figure_name).exists())
+
     def test_one_or_both_sensitivity_optimizers_are_selected(self):
         for selected in (["DSA-DE"], ["MaCRO-DE"], ["DSA-DE", "MaCRO-DE"]):
             with self.subTest(selected=selected):

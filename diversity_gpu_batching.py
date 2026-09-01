@@ -22,12 +22,15 @@ _REMOTE_GPU_CONNECTION = None
 _REMOTE_GPU_TIMEOUT = 10.0
 _REMOTE_GPU_DEBUG = False
 _REMOTE_REQUEST_COUNTER = itertools.count()
+_REMOTE_FIRST_REQUEST = True
 _LOCAL_GPU_WORKER_BACKEND = None
+_LOCAL_GPU_WORKER_DEBUG = False
+_LOCAL_FIRST_KERNEL = True
 
 
-def configure_local_gpu_worker(device_id=0, memory_fraction=0.85) -> None:
+def configure_local_gpu_worker(device_id=0, memory_fraction=0.85, debug=False) -> None:
     """Initialize and retain one local CUDA backend for a persistent run worker."""
-    global _LOCAL_GPU_WORKER_BACKEND
+    global _LOCAL_GPU_WORKER_BACKEND, _LOCAL_GPU_WORKER_DEBUG, _LOCAL_FIRST_KERNEL
     _LOCAL_GPU_WORKER_BACKEND = ComputeBackend(
         "gpu", device_id=device_id, memory_fraction=memory_fraction,
     )
@@ -35,14 +38,20 @@ def configure_local_gpu_worker(device_id=0, memory_fraction=0.85) -> None:
         raise GPUBackendError(
             _LOCAL_GPU_WORKER_BACKEND.fallback_reason or "CUDA/runtime backend is unavailable"
         )
+    _LOCAL_GPU_WORKER_DEBUG = bool(debug)
+    _LOCAL_FIRST_KERNEL = True
+    if _LOCAL_GPU_WORKER_DEBUG:
+        print(f"CUDA worker backend initialized pid={os.getpid()}", flush=True)
 
 
 def configure_remote_gpu_client(connection_pool, timeout=10.0, debug=False) -> None:
     """Give each spawned run worker its own bounded GPU-service channel."""
     global _REMOTE_GPU_CONNECTION, _REMOTE_GPU_TIMEOUT, _REMOTE_GPU_DEBUG
+    global _REMOTE_FIRST_REQUEST
     _REMOTE_GPU_CONNECTION = connection_pool.get(timeout=timeout)
     _REMOTE_GPU_TIMEOUT = float(timeout)
     _REMOTE_GPU_DEBUG = bool(debug)
+    _REMOTE_FIRST_REQUEST = True
 
 
 class GPUServiceUnavailable(RuntimeError):
@@ -74,14 +83,21 @@ class RemoteGPUClient:
                 return
 
     def call(self, operation: str, *args):
+        global _REMOTE_FIRST_REQUEST
         request_id = f"{os.getpid()}:{next(_REMOTE_REQUEST_COUNTER)}"
         submitted = time.monotonic()
         try:
             self._send_queue.put((request_id, operation, args, submitted), timeout=self.timeout)
         except queue.Full as exc:
             raise GPUServiceUnavailable("GPU request queue remained full") from exc
-        if self.debug:
-            print(f"GPU request submitted id={request_id} operation={operation} queue_depth={self._send_queue.qsize()}", flush=True)
+        first_request = _REMOTE_FIRST_REQUEST
+        _REMOTE_FIRST_REQUEST = False
+        if self.debug and first_request:
+            print(
+                f"GPU worker first kernel submitted pid={os.getpid()} "
+                f"operation={operation}",
+                flush=True,
+            )
         if not self.connection.poll(self.timeout):
             raise GPUServiceUnavailable(
                 f"GPU request {request_id} exceeded {self.timeout:.1f}s deadline"
@@ -95,8 +111,12 @@ class RemoteGPUClient:
                 f"GPU response mismatch: expected {request_id}, received {response_id}"
             )
         latency = time.monotonic() - submitted
-        if self.debug:
-            print(f"GPU request completed id={request_id} operation={operation} latency={latency:.4f}s", flush=True)
+        if self.debug and first_request:
+            print(
+                f"GPU worker first kernel completed pid={os.getpid()} "
+                f"operation={operation} latency={latency:.4f}s",
+                flush=True,
+            )
         if not succeeded:
             raise GPUServiceUnavailable(payload)
         return payload
@@ -112,10 +132,11 @@ def serve_gpu_requests(backend: ComputeBackend, connections, stop_event, debug=F
 
     pending = 0
     pending_lock = threading.Lock()
+    first_request = True
 
     def execute(connection, request):
         nonlocal pending
-        request_id, operation, args, submitted = request
+        request_id, operation, args, _submitted = request
         try:
             if backend.uses_gpu:
                 backend.xp.cuda.Device(backend.device_id).use()
@@ -131,10 +152,6 @@ def serve_gpu_requests(backend: ComputeBackend, connections, stop_event, debug=F
         finally:
             with pending_lock:
                 pending -= 1
-                depth = pending
-            if debug:
-                latency = time.monotonic() - submitted
-                print(f"GPU request serviced id={request_id} queue_depth={depth} latency={latency:.4f}s", flush=True)
 
     # Several host dispatch threads may enqueue work/transfer data concurrently,
     # while all of them use the same CUDA context owned by this process.
@@ -149,15 +166,45 @@ def serve_gpu_requests(backend: ComputeBackend, connections, stop_event, debug=F
                     continue
                 with pending_lock:
                     pending += 1
-                    depth = pending
-                if debug:
-                    print(f"GPU request accepted id={request[0]} queue_depth={depth}", flush=True)
+                if debug and first_request:
+                    print(
+                        f"GPU owner first kernel started pid={os.getpid()} "
+                        f"operation={request[1]}",
+                        flush=True,
+                    )
+                    first_request = False
                 pool.submit(execute, connection, request)
 
 
-def start_gpu_request_service(device_id, memory_fraction, connections, stop_event, debug=False):
+def start_gpu_request_service(
+    device_id,
+    memory_fraction,
+    connections,
+    stop_event,
+    debug=False,
+    ready_connection=None,
+):
     """Spawn target: create CUDA only in the killable service process."""
-    backend = ComputeBackend("gpu", device_id=device_id, memory_fraction=memory_fraction)
+    if debug:
+        print(f"GPU owner process started pid={os.getpid()}", flush=True)
+    try:
+        backend = ComputeBackend(
+            "gpu", device_id=device_id, memory_fraction=memory_fraction
+        )
+        if not backend.uses_gpu:
+            raise GPUBackendError(
+                backend.fallback_reason or "CUDA/runtime backend is unavailable"
+            )
+    except Exception as exc:
+        if ready_connection is not None:
+            ready_connection.send((False, f"{type(exc).__name__}: {exc}"))
+            ready_connection.close()
+        raise
+    if debug:
+        print(f"CUDA owner backend initialized pid={os.getpid()}", flush=True)
+    if ready_connection is not None:
+        ready_connection.send((True, os.getpid()))
+        ready_connection.close()
     serve_gpu_requests(backend, connections, stop_event, debug)
 
 
@@ -205,12 +252,20 @@ class DiversityMathBatcher:
 
     def awad(self, population, lb=None, ub=None) -> float:
         """Match the existing AWAD definition; bounds are intentionally unused."""
+        global _LOCAL_FIRST_KERNEL
         if self.remote is not None:
             return self._remote_or_cpu("awad", population, lb, ub)
         _ = lb, ub
         if not self.uses_gpu:
             return self._awad_cpu(population)
 
+        first_local_kernel = _LOCAL_FIRST_KERNEL
+        _LOCAL_FIRST_KERNEL = False
+        if _LOCAL_GPU_WORKER_DEBUG and first_local_kernel:
+            print(
+                f"GPU local worker first kernel started pid={os.getpid()} operation=awad",
+                flush=True,
+            )
         xp = self.backend.xp
         pop = self.backend.asarray(population, dtype=xp.float64)
         npop, n_dims = pop.shape
@@ -229,7 +284,13 @@ class DiversityMathBatcher:
             min_distance = xp.min(xp.where(diagonal, xp.inf, distances))
             min_distance = xp.where(xp.isfinite(min_distance), min_distance, 0.0)
         penalty = ((min_distance + 0.1) ** 2) / (1.0 + min_distance**2)
-        return self.backend.scalar(div * 0.1 * non_repeat_percent * penalty)
+        result = self.backend.scalar(div * 0.1 * non_repeat_percent * penalty)
+        if _LOCAL_GPU_WORKER_DEBUG and first_local_kernel:
+            print(
+                f"GPU local worker first kernel completed pid={os.getpid()} operation=awad",
+                flush=True,
+            )
+        return result
 
     def awad_candidate_parent_pairs(self, population, candidates, indices) -> np.ndarray:
         """Score local candidate/parent AWAD pairs with one backend round-trip.

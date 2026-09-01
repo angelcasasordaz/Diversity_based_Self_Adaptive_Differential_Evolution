@@ -7,6 +7,7 @@ import math
 import multiprocessing
 import os
 import pickle
+import queue
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -55,10 +56,10 @@ DATASET_SOURCE = "codesmell"
 # "mafese"
 
 EXPERIMENT_MODES = [
-    # "full",
+    "full",
     "ablation",
     "sensitivity",
-    # "sensitivity_weights",
+    "sensitivity_weights",
 ]
 # Options:
 # "full"
@@ -68,11 +69,7 @@ EXPERIMENT_MODES = [
 
 CODE_SMELL_DATASET_DIR = "Original"
 
-CODE_SMELL_DATASETS = [
-    "DataClass",
-    "FeatureEnvy",
-    "GodClass",
-]
+CODE_SMELL_DATASETS = None
 # None -> run all CSV files in CODE_SMELL_DATASET_DIR.
 #
 # Example:
@@ -81,6 +78,24 @@ CODE_SMELL_DATASETS = [
 #     "LongMethod",
 #     "GodClass",
 # ]
+
+ABLATION_DATASETS = [
+    "DataClass",
+    "FeatureEnvy",
+    "GodClass",
+]
+
+SENSITIVITY_DATASETS = [
+    "DataClass",
+    "FeatureEnvy",
+    "GodClass",
+]
+
+SENSITIVITY_WEIGHTS_DATASETS = [
+    "DataClass",
+    "FeatureEnvy",
+    "GodClass",
+]
 
 MAFESE_DATASET_SUITE = "test14"
 
@@ -193,8 +208,8 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 621
-REUSE_CACHE_FROM_EXP_ID = 620
+EXP_ID = 622
+REUSE_CACHE_FROM_EXP_ID = 622
 # None -> do not search another experiment.
 #
 # Example:
@@ -204,9 +219,9 @@ TEST_SIZE = 0.2
 RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
-REUSE_CACHE = False
+REUSE_CACHE = True
 FIGURES_ONLY = False
-COMPUTE_DEVICE = "hybrid"
+COMPUTE_DEVICE = "gpu"
 # Options:
 # "cpu"
 # "gpu"
@@ -228,32 +243,15 @@ SENSITIVITY_OPTIMIZERS = [
     # "MaCRO-DE",
 ]
 
-SENSITIVITY_PARAMETER = "mahalanobis_q"
-SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
-
-# Example: beta_min sensitivity
-# SENSITIVITY_PARAMETER = "beta_min"
-# SENSITIVITY_VALUES = [0.10, 0.20, 0.30, 0.40]
-
-# Example: beta_max sensitivity
-# SENSITIVITY_PARAMETER = "beta_max"
-# SENSITIVITY_VALUES = [0.60, 0.70, 0.80, 0.90]
-
-# Example: pcr sensitivity
-# SENSITIVITY_PARAMETER = "pcr"
-# SENSITIVITY_VALUES = [0.10, 0.20, 0.30, 0.40]
-
-# Example: mahalanobis_q sensitivity
-# SENSITIVITY_PARAMETER = "mahalanobis_q"
-# SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
-
-# Example: population size sensitivity
-# SENSITIVITY_PARAMETER = "pop_size"
-# SENSITIVITY_VALUES = [30, 50, 70, 100]
-
-# Example: epochs sensitivity
-# SENSITIVITY_PARAMETER = "epochs"
-# SENSITIVITY_VALUES = [50, 100, 150, 200]
+SENSITIVITY_CONFIGS = [
+    ("mahalanobis_q", [0.50, 0.68, 0.80, 0.90]),
+]
+# Add tuples to run multiple sequential OFAT studies. Optional entries include:
+# ("beta_min", [0.10, 0.20, 0.30, 0.40])
+# ("beta_max", [0.60, 0.70, 0.80, 0.90])
+# ("pcr", [0.10, 0.20, 0.30, 0.40])
+# ("pop_size", [30, 50, 70, 100])
+# ("epochs", [50, 100, 150, 200])
 
 DEFAULT_FITNESS_ALPHA = 0.90
 DEFAULT_FITNESS_BETA = 0.10
@@ -304,6 +302,15 @@ SUPPORTED_TRANSFER_FUNCTIONS = [
 
 CHART_CMAP = "Dark2"
 
+SUPPORTED_SENSITIVITY_PARAMETERS = {
+    "beta_min",
+    "beta_max",
+    "pcr",
+    "mahalanobis_q",
+    "pop_size",
+    "epochs",
+}
+
 # Qualitative:
 # "tab10"
 # "tab20"
@@ -315,7 +322,7 @@ CHART_CMAP = "Dark2"
 # "Accent"
 
 PARALLEL = True
-DEBUG_PARALLEL_PROGRESS = False
+DEBUG_PARALLEL_PROGRESS = True
 
 @dataclass
 class Paths:
@@ -380,7 +387,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-source", default=DATASET_SOURCE, choices=["mafese", "codesmell"], help="Dataset source")
     parser.add_argument("--dataset-suite", default=MAFESE_DATASET_SUITE, choices=["test14"], help="MAFESE dataset suite")
     parser.add_argument("--dataset-dir", default=CODE_SMELL_DATASET_DIR, help="Directory containing Code Smell CSV files")
-    parser.add_argument("--datasets", nargs="*", default=CODE_SMELL_DATASETS, help="Code Smell datasets to run, with or without .csv")
+    parser.add_argument(
+        "--datasets",
+        nargs="*",
+        default=None,
+        help="Override configured Code Smell datasets, with or without .csv",
+    )
     parser.add_argument("--optimizers", nargs="+", default=list(OPTIMIZERS), help="Optimizer names or acronyms")
     parser.add_argument("--estimators", nargs="+", default=list(ESTIMATORS), help="Classifier names")
     parser.add_argument("--transfer-functions", nargs="+", default=list(TRANSFER_FUNCTIONS), help="Transfer functions")
@@ -419,8 +431,6 @@ def parse_args() -> argparse.Namespace:
         default=list(SENSITIVITY_OPTIMIZERS),
         help="Optimizers evaluated by sensitivity mode (DSA-DE and/or MaCRO-DE)",
     )
-    parser.add_argument("--sensitivity-parameter", default=SENSITIVITY_PARAMETER)
-    parser.add_argument("--sensitivity-values", nargs="+", type=float, default=list(SENSITIVITY_VALUES))
     parser.add_argument(
         "--sensitivity-weights-optimizers",
         nargs="+",
@@ -440,6 +450,18 @@ def parse_args() -> argparse.Namespace:
         fitness_beta=DEFAULT_FITNESS_BETA,
     )
     args = parser.parse_args()
+    args.sensitivity_configs = (
+        [(parameter, list(values)) for parameter, values in SENSITIVITY_CONFIGS]
+        if SENSITIVITY_CONFIGS
+        else SENSITIVITY_CONFIGS
+    )
+    if args.sensitivity_configs:
+        parameter, values = args.sensitivity_configs[0]
+        args.sensitivity_parameter = str(parameter).lower()
+        args.sensitivity_values = list(values)
+    else:
+        args.sensitivity_parameter = None
+        args.sensitivity_values = []
     args.sensitivity_weight_pairs = validate_sensitivity_weight_pairs(args.sensitivity_weight_pairs)
     if args.experiment_mode is not None:
         args.experiment_modes = [args.experiment_mode]
@@ -497,12 +519,28 @@ def report_gpu_acceptance(args: argparse.Namespace, modes: List[str]) -> None:
     suites = {}
     for mode in ("full", "ablation", "sensitivity"):
         mode_args = clone_args_for_mode(args, mode)
-        apply_experiment_mode(mode_args)
-        names = resolve_optimizers(mode_args)
         if mode == "sensitivity":
-            supported = int(resolve_optimizer(names[0]).capability.supports_gpu) * len(mode_args.sensitivity_values)
-            total = len(mode_args.sensitivity_values)
+            if mode not in modes and not getattr(
+                mode_args,
+                "sensitivity_configs",
+                None,
+            ):
+                suites[mode] = (0, 0)
+                continue
+            supported = 0
+            total = 0
+            for study_args in sensitivity_study_args(mode_args):
+                apply_experiment_mode(study_args)
+                names = resolve_optimizers(study_args)
+                variant_count = len(study_args.sensitivity_values)
+                supported += (
+                    int(resolve_optimizer(names[0]).capability.supports_gpu)
+                    * variant_count
+                )
+                total += variant_count
         else:
+            apply_experiment_mode(mode_args)
+            names = resolve_optimizers(mode_args)
             supported = sum(resolve_optimizer(name).capability.supports_gpu for name in names)
             total = len(names)
         suites[mode] = (supported, total)
@@ -659,18 +697,17 @@ def print_execution_strategy(
 
 def apply_experiment_mode(args: argparse.Namespace) -> None:
     args.experiment_mode = str(args.experiment_mode).lower()
-    args.sensitivity_parameter = str(args.sensitivity_parameter).lower()
     # The established modes always retain the historical wrapper objective.
     args.fitness_alpha = DEFAULT_FITNESS_ALPHA
     args.fitness_beta = DEFAULT_FITNESS_BETA
     if args.experiment_mode == "ablation":
         args.optimizers = list(ABLATION_OPTIMIZERS)
     elif args.experiment_mode == "sensitivity":
-        valid_parameters = {"beta_min", "beta_max", "pcr", "mahalanobis_q", "pop_size", "epochs"}
-        if args.sensitivity_parameter not in valid_parameters:
+        args.sensitivity_parameter = str(args.sensitivity_parameter).lower()
+        if args.sensitivity_parameter not in SUPPORTED_SENSITIVITY_PARAMETERS:
             raise ValueError(
                 f"Unsupported sensitivity parameter: {args.sensitivity_parameter}. "
-                f"Valid values: {', '.join(sorted(valid_parameters))}"
+                f"Valid values: {', '.join(sorted(SUPPORTED_SENSITIVITY_PARAMETERS))}"
             )
         if not args.sensitivity_values:
             raise ValueError("Sensitivity mode requires at least one sensitivity value")
@@ -707,6 +744,45 @@ def apply_experiment_mode(args: argparse.Namespace) -> None:
         for name in sensitivity_weights_optimizers:
             resolve_optimizer_name(name)
         args.optimizers = sensitivity_weights_optimizers
+
+
+def sensitivity_study_args(args: argparse.Namespace) -> List[argparse.Namespace]:
+    """Expand normal sensitivity configuration into ordered, isolated OFAT studies."""
+    configured = getattr(args, "sensitivity_configs", None)
+    if not configured:
+        raise ValueError(
+            "Sensitivity mode requires a non-empty SENSITIVITY_CONFIGS list"
+        )
+    configs = list(configured)
+
+    studies = []
+    seen_parameters = set()
+    for config in configs:
+        if not isinstance(config, (tuple, list)) or len(config) != 2:
+            raise ValueError(
+                "Each SENSITIVITY_CONFIGS entry must be a (parameter, values) pair"
+            )
+        parameter, values = config
+        parameter = str(parameter).lower()
+        if parameter not in SUPPORTED_SENSITIVITY_PARAMETERS:
+            raise ValueError(
+                f"Unsupported sensitivity parameter: {parameter}. "
+                f"Valid values: {', '.join(sorted(SUPPORTED_SENSITIVITY_PARAMETERS))}"
+            )
+        if parameter in seen_parameters:
+            raise ValueError(
+                f"Duplicate sensitivity parameter in SENSITIVITY_CONFIGS: {parameter}"
+            )
+        if not values:
+            raise ValueError(
+                f"Sensitivity parameter '{parameter}' requires at least one value"
+            )
+        study_args = argparse.Namespace(**vars(args))
+        study_args.sensitivity_parameter = parameter
+        study_args.sensitivity_values = list(values)
+        studies.append(study_args)
+        seen_parameters.add(parameter)
+    return studies
 
 def apply_sensitivity_value(args: argparse.Namespace, value: float) -> None:
     parameter = args.sensitivity_parameter
@@ -783,6 +859,8 @@ def experiment_output_prefix(args: argparse.Namespace) -> str:
         return ""
     if args.experiment_mode == "sensitivity_weights":
         return "SensitivityWeights_"
+    if args.experiment_mode == "sensitivity":
+        return f"Sensitivity_{args.sensitivity_parameter}_"
     return f"{args.experiment_mode.capitalize()}_"
 
 def experiment_variants(args: argparse.Namespace) -> list:
@@ -831,12 +909,61 @@ def make_read_only_source_paths(args: argparse.Namespace) -> Optional[Paths]:
         cache_dir=os.path.join(res_dir, "cache"),
     )
 
-def resolve_mafese_dataset_names(args: argparse.Namespace) -> List[str]:
-    if args.dataset_suite == "test14":
-        return list(TEST_DATASETS_CLASSIFICATION_14)
-    raise ValueError(f"Unsupported dataset suite: {args.dataset_suite}")
+def configured_dataset_names(args: argparse.Namespace) -> Optional[List[str]]:
+    """Select dataset names for one mode while retaining the global source selector."""
+    source = str(args.dataset_source).lower()
+    if source not in {"codesmell", "mafese"}:
+        raise ValueError(f"Unsupported dataset source: {args.dataset_source}")
 
-def resolve_codesmell_dataset_specs(args: argparse.Namespace) -> List[DatasetSpec]:
+    explicit_datasets = getattr(args, "datasets", None)
+    if source == "codesmell" and explicit_datasets is not None:
+        return list(explicit_datasets)
+
+    mode = str(getattr(args, "experiment_mode", "full")).lower()
+    if mode == "full":
+        if source == "codesmell":
+            return (
+                list(CODE_SMELL_DATASETS)
+                if CODE_SMELL_DATASETS is not None
+                else None
+            )
+        return list(TEST_DATASETS_CLASSIFICATION_14)
+    if mode == "ablation":
+        return list(ABLATION_DATASETS)
+    if mode == "sensitivity":
+        return list(SENSITIVITY_DATASETS)
+    if mode == "sensitivity_weights":
+        return list(SENSITIVITY_WEIGHTS_DATASETS)
+    raise ValueError(f"Unsupported experiment mode: {args.experiment_mode}")
+
+
+def resolve_mafese_dataset_names(
+    args: argparse.Namespace,
+    dataset_names: Optional[List[str]] = None,
+) -> List[str]:
+    if args.dataset_suite != "test14":
+        raise ValueError(f"Unsupported dataset suite: {args.dataset_suite}")
+    selected = (
+        list(dataset_names)
+        if dataset_names is not None
+        else list(TEST_DATASETS_CLASSIFICATION_14)
+    )
+    if not selected:
+        raise ValueError("At least one MAFESE dataset is required")
+    invalid = [
+        name for name in selected if name not in TEST_DATASETS_CLASSIFICATION_14
+    ]
+    if invalid:
+        raise ValueError(
+            f"Unsupported MAFESE datasets for test14: {invalid}. "
+            f"Valid values: {', '.join(TEST_DATASETS_CLASSIFICATION_14)}"
+        )
+    return selected
+
+def resolve_codesmell_dataset_specs(
+    args: argparse.Namespace,
+    dataset_names: Optional[List[str]] = None,
+) -> List[DatasetSpec]:
     dataset_dir = Path(args.dataset_dir)
     if not dataset_dir.exists():
         raise FileNotFoundError(f"Code Smell dataset directory not found: {dataset_dir}")
@@ -844,10 +971,11 @@ def resolve_codesmell_dataset_specs(args: argparse.Namespace) -> List[DatasetSpe
         raise NotADirectoryError(f"--dataset-dir must be a directory: {dataset_dir}")
 
     csv_files = sorted(dataset_dir.glob("*.csv"), key=lambda p: p.stem.lower())
-    if args.datasets is not None:
-        if not args.datasets:
+    selected = args.datasets if dataset_names is None else dataset_names
+    if selected is not None:
+        if not selected:
             raise ValueError("--datasets requires at least one dataset name when used")
-        requested = list(dict.fromkeys(Path(name).stem for name in args.datasets))
+        requested = list(dict.fromkeys(Path(name).stem for name in selected))
         by_name = {path.stem: path for path in csv_files}
         missing = [name for name in requested if name not in by_name]
         if missing:
@@ -864,12 +992,16 @@ def resolve_codesmell_dataset_specs(args: argparse.Namespace) -> List[DatasetSpe
     return [DatasetSpec(name=path.stem, source="codesmell", path=path) for path in csv_files]
 
 def resolve_dataset_specs(args: argparse.Namespace) -> List[DatasetSpec]:
+    dataset_names = configured_dataset_names(args)
     if args.dataset_source == "mafese":
-        if args.datasets is not None:
+        if getattr(args, "datasets", None) is not None:
             raise ValueError("--datasets is only supported with --dataset-source codesmell")
-        return [DatasetSpec(name=name, source="mafese") for name in resolve_mafese_dataset_names(args)]
+        return [
+            DatasetSpec(name=name, source="mafese")
+            for name in resolve_mafese_dataset_names(args, dataset_names)
+        ]
     if args.dataset_source == "codesmell":
-        return resolve_codesmell_dataset_specs(args)
+        return resolve_codesmell_dataset_specs(args, dataset_names)
     raise ValueError(f"Unsupported dataset source: {args.dataset_source}")
 
 def validate_xy(dataset_name: str, X: np.ndarray, y: np.ndarray) -> None:
@@ -976,7 +1108,10 @@ def build_cache_signature(args: argparse.Namespace) -> str:
                 for alpha, beta in validate_sensitivity_weight_pairs(args.sensitivity_weight_pairs)
             ],
         })
-    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+    if str(args.experiment_mode) == "sensitivity":
+        return f"{args.sensitivity_parameter}_{digest}"
+    return digest
 
 def build_alg_label(
     method: str,
@@ -1039,6 +1174,9 @@ class RobustClassificationFeatureSelectionProblem(FeatureSelectionProblem):
         self._objective_cache = (
             {} if isinstance(self.estimator, (KNeighborsClassifier, SVC)) else None
         )
+        self._debug_first_fitness = bool(
+            DEBUG_PARALLEL_PROGRESS or _RUN_WORKER_DEBUG
+        )
 
     def obj_func(self, solution):
         x = self.decode_solution(solution)["my_var"]
@@ -1049,8 +1187,14 @@ class RobustClassificationFeatureSelectionProblem(FeatureSelectionProblem):
             if cached is not None:
                 return list(cached)
         cols = np.flatnonzero(x)
+        debug_first_fitness = self._debug_first_fitness
+        self._debug_first_fitness = False
+        if debug_first_fitness:
+            print(f"First CPU fitness evaluation started pid={os.getpid()}", flush=True)
         self.estimator.fit(self.data.X_train[:, cols], self.data.y_train)
         y_valid_pred = self.estimator.predict(self.data.X_test[:, cols])
+        if debug_first_fitness:
+            print(f"First CPU fitness evaluation completed pid={os.getpid()}", flush=True)
         obj = self._score(self.data.y_test, y_valid_pred)
         feature_ratio = np.sum(x) / self.n_dims
         fitness = self.fit_weights[0] * (1.0 - obj) + self.fit_weights[1] * feature_ratio
@@ -1087,7 +1231,18 @@ class RobustClassificationFeatureSelectionProblem(FeatureSelectionProblem):
 def run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: argparse.Namespace, seed: int):
     logging.disable(logging.INFO)
     np.random.seed(seed)
+    debug_worker = bool(DEBUG_PARALLEL_PROGRESS or _RUN_WORKER_DEBUG)
+    if debug_worker:
+        print(
+            f"Optimizer construction started pid={os.getpid()} seed={seed}",
+            flush=True,
+        )
     optimizer = build_optimizer(optimizer_name, args)
+    if debug_worker:
+        print(
+            f"Optimizer construction completed pid={os.getpid()} seed={seed}",
+            flush=True,
+        )
     selector_kwargs = dict(
         problem="classification",
         estimator=estimator,
@@ -1115,7 +1270,17 @@ def run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: a
             float(args.fitness_alpha),
             float(args.fitness_beta),
         )
+    if debug_worker:
+        print(
+            f"First optimization call started pid={os.getpid()} seed={seed}",
+            flush=True,
+        )
     selector.fit(data.X_train, data.y_train, **fit_kwargs)
+    if debug_worker:
+        print(
+            f"First optimization call completed pid={os.getpid()} seed={seed}",
+            flush=True,
+        )
     runtime = time.time() - t0
 
     fit_curve = np.array(selector.optimizer.history.list_global_best_fit, dtype=float)
@@ -1162,20 +1327,43 @@ def run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: a
 
 _RUN_WORKER_DATA_SPLIT = None
 _RUN_WORKER_THREAD_LIMIT = None
+_RUN_WORKER_DEBUG = False
 
 
-def initialize_run_worker(data_split, gpu_mode=None, gpu_args=()):
+def initialize_run_worker(
+    data_split,
+    gpu_mode=None,
+    gpu_args=(),
+    ready_queue=None,
+    debug=False,
+):
     """Install immutable run-group data once per process, plus its GPU client."""
-    global _RUN_WORKER_DATA_SPLIT, _RUN_WORKER_THREAD_LIMIT
+    global _RUN_WORKER_DATA_SPLIT, _RUN_WORKER_THREAD_LIMIT, _RUN_WORKER_DEBUG
+    _RUN_WORKER_DEBUG = bool(debug)
+    if _RUN_WORKER_DEBUG:
+        print(f"Run worker initializer entered pid={os.getpid()}", flush=True)
     _RUN_WORKER_DATA_SPLIT = data_split
     _RUN_WORKER_THREAD_LIMIT = threadpool_limits(limits=1)
     if gpu_mode == "local":
         configure_local_gpu_worker(*gpu_args)
     elif gpu_mode == "remote":
         configure_remote_gpu_client(*gpu_args)
+    if _RUN_WORKER_DEBUG:
+        backend_label = "remote GPU client" if gpu_mode == "remote" else (gpu_mode or "CPU")
+        print(
+            f"Run worker initialized pid={os.getpid()} backend={backend_label}",
+            flush=True,
+        )
+    if ready_queue is not None:
+        ready_queue.put(os.getpid())
 
 
 def run_single_parallel_task(task: dict):
+    if _RUN_WORKER_DEBUG:
+        print(
+            f"Run task received pid={os.getpid()} run={task['run'] + 1:02d}",
+            flush=True,
+        )
     data_split = _RUN_WORKER_DATA_SPLIT
     if data_split is None:
         # Retain compatibility for direct callers using the former task shape.
@@ -1195,6 +1383,11 @@ def run_single_parallel_task(task: dict):
         task["args"],
         task["seed"],
     )
+    if _RUN_WORKER_DEBUG:
+        print(
+            f"Run task completed pid={os.getpid()} run={task['run'] + 1:02d}",
+            flush=True,
+        )
     return task["run"], out
 
 
@@ -1242,7 +1435,12 @@ def execute_pending_runs(
     if requested_device in {"gpu", "hybrid"}:
         display_args = argparse.Namespace(**vars(args))
         display_args.n_workers = max_workers
-        print_execution_strategy(strategy, display_args, len(pending_runs), max_workers if requested_device == "gpu" else None)
+        print_execution_strategy(
+            strategy,
+            display_args,
+            len(pending_runs),
+            max_workers if requested_device == "gpu" else None,
+        )
     tasks = [
         {
             "run": run,
@@ -1266,24 +1464,31 @@ def execute_pending_runs(
     gpu_service_process = None
     if requested_device == "gpu":
         spawn_context = multiprocessing.get_context("spawn")
-        initializer = initialize_run_worker
-        initargs = (
-            data_split,
-            "local",
-            (args.gpu_device_id, worker_args.gpu_memory_fraction),
-        )
         executor_kwargs.update({
             "mp_context": spawn_context,
-            "initializer": initializer,
-            "initargs": initargs,
+            "initializer": initialize_run_worker,
+            "initargs": (
+                data_split,
+                "local",
+                (
+                    args.gpu_device_id,
+                    worker_args.gpu_memory_fraction,
+                    DEBUG_PARALLEL_PROGRESS,
+                ),
+                None,
+                DEBUG_PARALLEL_PROGRESS,
+            ),
         })
-        print(f"GPU worker architecture: {max_workers} local persistent CUDA run worker(s)")
+        print(
+            f"GPU worker architecture: {max_workers} local persistent CUDA run worker(s)"
+        )
     elif strategy.gpu_owner_count > 0:
         if GPU_OWNER_BACKEND is None:
             raise RuntimeError("GPU execution requires an initialized parent-owned GPU backend")
         spawn_context = multiprocessing.get_context("spawn")
         gpu_service_manager = spawn_context.Manager()
         connection_pool = gpu_service_manager.Queue(max_workers)
+        worker_ready_queue = gpu_service_manager.Queue(max_workers)
         server_connections = []
         client_connections = []
         for _ in range(max_workers):
@@ -1292,6 +1497,7 @@ def execute_pending_runs(
             client_connections.append(client_connection)
             connection_pool.put(client_connection)
         gpu_service_stop = spawn_context.Event()
+        owner_ready_parent, owner_ready_child = spawn_context.Pipe(duplex=False)
         gpu_service_process = spawn_context.Process(
             target=start_gpu_request_service,
             args=(
@@ -1300,33 +1506,74 @@ def execute_pending_runs(
                 server_connections,
                 gpu_service_stop,
                 DEBUG_PARALLEL_PROGRESS,
+                owner_ready_child,
             ),
             name="diversity-gpu-owner",
             daemon=True,
         )
         gpu_service_process.start()
+        owner_ready_child.close()
+        if not owner_ready_parent.poll(60.0):
+            gpu_service_process.terminate()
+            gpu_service_process.join(timeout=2.0)
+            gpu_service_manager.shutdown()
+            raise RuntimeError("GPU owner did not reach ready state within 60 seconds")
+        owner_succeeded, owner_payload = owner_ready_parent.recv()
+        owner_ready_parent.close()
+        if not owner_succeeded:
+            gpu_service_process.join(timeout=2.0)
+            gpu_service_manager.shutdown()
+            raise RuntimeError(f"GPU owner initialization failed: {owner_payload}")
+        if DEBUG_PARALLEL_PROGRESS:
+            print(f"GPU owner ready pid={owner_payload}", flush=True)
         initializer = initialize_run_worker
         initargs = (
             data_split,
             "remote",
-            (connection_pool, 10.0, DEBUG_PARALLEL_PROGRESS),
+            (connection_pool, 60.0, DEBUG_PARALLEL_PROGRESS),
+            worker_ready_queue,
+            DEBUG_PARALLEL_PROGRESS,
         )
         executor_kwargs.update({
             "mp_context": spawn_context,
             "initializer": initializer,
             "initargs": initargs,
         })
-        print("GPU worker architecture: one CUDA owner with concurrent, deadline-bound per-worker channels")
+        print(
+            "GPU worker architecture: one persistent CUDA owner + "
+            f"{max_workers} CPU run worker client(s)"
+        )
     try:
         with ProcessPoolExecutor(**executor_kwargs) as executor:
             futures = [executor.submit(run_single_parallel_task, task) for task in tasks]
+            if requested_device != "gpu" and strategy.gpu_owner_count > 0:
+                ready_pids = []
+                try:
+                    for _ in range(max_workers):
+                        ready_pids.append(worker_ready_queue.get(timeout=60.0))
+                except queue.Empty as exc:
+                    raise RuntimeError(
+                        "Not every GPU client worker reached ready state within 60 seconds"
+                    ) from exc
+                if DEBUG_PARALLEL_PROGRESS:
+                    print(
+                        "All GPU client workers ready: "
+                        + ", ".join(str(pid) for pid in sorted(ready_pids)),
+                        flush=True,
+                    )
             for future in as_completed(futures):
                 run, out = future.result()
                 if DEBUG_PARALLEL_PROGRESS:
                     if run == next_run:
-                        print(f"  Run {run + 1:02d} worker completed; ready for ordered output.")
+                        print(
+                            f"  Run {run + 1:02d} worker completed; ready for ordered output.",
+                            flush=True,
+                        )
                     else:
-                        print(f"  Run {run + 1:02d} worker completed; waiting for ordered output.")
+                        print(
+                            f"  Run {run + 1:02d} worker completed; waiting for ordered output.",
+                            flush=True,
+                        )
                 completed_by_run[run] = out
                 while next_run in completed_by_run:
                     item = (next_run, completed_by_run.pop(next_run))
@@ -1334,7 +1581,10 @@ def execute_pending_runs(
                         on_run_complete(*item)
                     completed.append(item)
                     if DEBUG_PARALLEL_PROGRESS:
-                        print(f"  Run {next_run + 1:02d} ordered result emitted.")
+                        print(
+                            f"  Run {next_run + 1:02d} ordered result emitted.",
+                            flush=True,
+                        )
                     next_run += 1
     finally:
         if gpu_service_process is not None:
@@ -4081,7 +4331,17 @@ def clone_args_for_mode(base_args: argparse.Namespace, mode: str) -> argparse.Na
     mode_args.optimizers = list(base_args.optimizers)
     mode_args.estimators = list(base_args.estimators)
     mode_args.transfer_functions = list(base_args.transfer_functions)
-    mode_args.sensitivity_values = list(base_args.sensitivity_values)
+    if hasattr(base_args, "sensitivity_values"):
+        mode_args.sensitivity_values = list(base_args.sensitivity_values)
+    if hasattr(base_args, "sensitivity_configs"):
+        mode_args.sensitivity_configs = (
+            [
+                (parameter, list(values))
+                for parameter, values in base_args.sensitivity_configs
+            ]
+            if base_args.sensitivity_configs
+            else base_args.sensitivity_configs
+        )
     if hasattr(base_args, "sensitivity_optimizers"):
         mode_args.sensitivity_optimizers = list(base_args.sensitivity_optimizers)
     if hasattr(base_args, "sensitivity_weights_optimizers"):
@@ -4346,7 +4606,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
 
                         if args.parallel == "yes" and len(pending_runs) > 1:
                             display_workers = min(args.n_workers, len(pending_runs))
-                            if str(args.compute_device).lower() == "hybrid":
+                            if str(args.compute_device).lower() in {"gpu", "hybrid"}:
                                 preview_strategy = select_execution_strategy(
                                     run_args,
                                     data,
@@ -4354,8 +4614,30 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                     len(pending_runs),
                                 )
                                 if preview_strategy.gpu_owner_count > 0:
-                                    display_workers = min(display_workers, HYBRID_MAX_RUN_WORKERS)
-                            print(f"  Parallel: yes | workers={display_workers}")
+                                    if str(args.compute_device).lower() == "gpu":
+                                        gpu_info = getattr(GPU_OWNER_BACKEND, "gpu_info", None)
+                                        free_bytes = int(
+                                            getattr(gpu_info, "free_memory_bytes", 0)
+                                        )
+                                        per_worker_reserve = max(
+                                            preview_strategy.estimated_gpu_bytes,
+                                            512 * 1024**2,
+                                        )
+                                        display_workers = min(display_workers, 2)
+                                        while (
+                                            display_workers > 1
+                                            and free_bytes
+                                            < 2 * display_workers * per_worker_reserve
+                                        ):
+                                            display_workers -= 1
+                                    else:
+                                        display_workers = min(
+                                            display_workers,
+                                            HYBRID_MAX_RUN_WORKERS,
+                                        )
+                            print(
+                                f"  Parallel: yes | CPU run workers={display_workers}"
+                            )
                         execute_pending_runs(
                             data,
                             estimator,
@@ -4431,18 +4713,30 @@ def main():
 
     comparison_optimizers = []
     for mode in modes:
-        validation_args = clone_args_for_mode(args, mode)
-        apply_experiment_mode(validation_args)
-        validate_selection_options(validation_args)
-        for optimizer in resolve_optimizers(validation_args):
-            if optimizer not in comparison_optimizers:
-                comparison_optimizers.append(optimizer)
+        validation_args_list = [clone_args_for_mode(args, mode)]
+        if mode == "sensitivity":
+            validation_args_list = sensitivity_study_args(validation_args_list[0])
+        for validation_args in validation_args_list:
+            apply_experiment_mode(validation_args)
+            validate_selection_options(validation_args)
+            for optimizer in resolve_optimizers(validation_args):
+                if optimizer not in comparison_optimizers:
+                    comparison_optimizers.append(optimizer)
     report_gpu_acceptance(args, modes)
     validate_comparison_backend(args, comparison_optimizers)
 
     for idx, mode in enumerate(modes, start=1):
         print(f"\n=== Mode {idx}/{len(modes)}: {mode} ===")
-        run_experiment_mode(clone_args_for_mode(args, mode))
+        mode_args_list = [clone_args_for_mode(args, mode)]
+        if mode == "sensitivity":
+            mode_args_list = sensitivity_study_args(mode_args_list[0])
+        for study_idx, mode_args in enumerate(mode_args_list, start=1):
+            if mode == "sensitivity":
+                print(
+                    f"\n--- Sensitivity study {study_idx}/{len(mode_args_list)}: "
+                    f"{mode_args.sensitivity_parameter} ---"
+                )
+            run_experiment_mode(mode_args)
 
 if __name__ == "__main__":
     main()
