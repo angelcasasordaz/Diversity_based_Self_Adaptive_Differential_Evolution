@@ -222,7 +222,7 @@ SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = True
 FIGURES_ONLY = False
-COMPUTE_DEVICE = "gpu"
+COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
 # "gpu"
@@ -246,6 +246,9 @@ SENSITIVITY_OPTIMIZERS = [
 
 SENSITIVITY_CONFIGS = [
     ("mahalanobis_q", [0.50, 0.68, 0.80, 0.90]),
+    ("beta_min", [0.10, 0.20, 0.30, 0.40]),
+    ("beta_max", [0.60, 0.70, 0.80, 0.90]),
+    ("pcr", [0.10, 0.20, 0.30, 0.40]),
 ]
 # Add tuples to run multiple sequential OFAT studies. Optional entries include:
 # ("beta_min", [0.10, 0.20, 0.30, 0.40])
