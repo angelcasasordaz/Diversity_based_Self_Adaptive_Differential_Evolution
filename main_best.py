@@ -672,41 +672,6 @@ def select_execution_strategy(
     )
 
 
-def execution_architecture_device(args: argparse.Namespace, estimator: str) -> str:
-    """Use the shared-owner GPU architecture for CPU-bound RF fitness work."""
-    requested_device = str(getattr(args, "compute_device", "cpu")).lower()
-    if requested_device == "gpu" and str(estimator).lower() == "rf":
-        return "hybrid"
-    return requested_device
-
-
-def parallel_run_worker_count(
-    args: argparse.Namespace,
-    pending_run_count: int,
-    strategy: ExecutionStrategy,
-    estimator: str,
-) -> int:
-    """Apply the existing GPU, hybrid, CPU, and RAM worker safeguards."""
-    max_workers = min(args.n_workers, pending_run_count)
-    architecture_device = execution_architecture_device(args, estimator)
-    if architecture_device == "gpu":
-        gpu_info = getattr(GPU_OWNER_BACKEND, "gpu_info", None)
-        free_bytes = int(getattr(gpu_info, "free_memory_bytes", 0))
-        per_worker_reserve = max(strategy.estimated_gpu_bytes, 512 * 1024**2)
-        safe_workers = min(2, max_workers)
-        while safe_workers > 1 and free_bytes < 2 * safe_workers * per_worker_reserve:
-            safe_workers -= 1
-        return max(1, safe_workers)
-    if architecture_device == "hybrid" and strategy.gpu_owner_count > 0:
-        max_workers = min(max_workers, HYBRID_MAX_RUN_WORKERS)
-        if (
-            str(getattr(args, "compute_device", "cpu")).lower() == "gpu"
-            and str(estimator).lower() == "rf"
-        ):
-            max_workers = min(max_workers, automatic_worker_count())
-    return max(1, max_workers)
-
-
 def print_execution_strategy(
     strategy: ExecutionStrategy,
     args: argparse.Namespace,
@@ -1265,11 +1230,73 @@ class RobustClassificationFeatureSelectionProblem(FeatureSelectionProblem):
             return float(evaluator.get_metric_by_name(self.obj_name, paras=paras)[self.obj_name])
 
 
-def build_run_estimator(estimator: str):
-    """Retain MAFESE's sklearn RF while preventing nested run-level parallelism."""
-    if str(estimator).lower() == "rf":
-        return get_general_estimator("classification", "rf", paras={"n_jobs": 1})
+def gpu_random_forest_class():
+    """Resolve the optional single-GPU cuML RF implementation without fallback."""
+    try:
+        from cuml.ensemble import RandomForestClassifier as CuMLRandomForestClassifier
+    except Exception as exc:
+        raise RuntimeError("GPU Random Forest backend unavailable") from exc
+    return CuMLRandomForestClassifier
+
+
+def build_gpu_random_forest(seed: int):
+    """Construct cuML RF with sklearn/MAFESE-equivalent supported defaults."""
+    classifier_class = gpu_random_forest_class()
+    parameters = inspect.signature(classifier_class.__init__).parameters
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    desired_parameters = {
+        "n_estimators": 100,
+        "split_criterion": "gini",
+        "bootstrap": True,
+        "max_samples": 1.0,
+        "max_features": "sqrt",
+        "min_samples_leaf": 1,
+        "min_samples_split": 2,
+        "min_impurity_decrease": 0.0,
+        "random_state": int(seed),
+        "oob_score": False,
+        "class_weight": None,
+        "verbose": False,
+        "output_type": "numpy",
+    }
+    kwargs = {
+        name: value
+        for name, value in desired_parameters.items()
+        if accepts_kwargs or name in parameters
+    }
+    max_depth = parameters.get("max_depth")
+    if max_depth is not None and max_depth.default is None:
+        kwargs["max_depth"] = None
+    try:
+        return classifier_class(**kwargs)
+    except Exception as exc:
+        raise RuntimeError("GPU Random Forest backend unavailable") from exc
+
+
+def build_run_estimator(estimator: str, args: argparse.Namespace, seed: int):
+    """Select GPU RF only for strict GPU mode; retain MAFESE elsewhere."""
+    if (
+        str(estimator).lower() == "rf"
+        and str(getattr(args, "compute_device", "cpu")).lower() == "gpu"
+    ):
+        return build_gpu_random_forest(seed)
     return estimator
+
+
+def validate_gpu_random_forest_backend(args: argparse.Namespace) -> None:
+    """Fail before experiments when strict GPU RF cannot be constructed."""
+    strict_gpu_rf = (
+        str(getattr(args, "compute_device", "cpu")).lower() == "gpu"
+        and any(str(estimator).lower() == "rf" for estimator in args.estimators)
+    )
+    if not strict_gpu_rf:
+        return
+    if GPU_OWNER_BACKEND is None or not GPU_OWNER_BACKEND.uses_gpu:
+        raise RuntimeError("GPU Random Forest backend unavailable")
+    build_gpu_random_forest(args.seed_base)
 
 
 def _run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: argparse.Namespace, seed: int):
@@ -1289,7 +1316,7 @@ def _run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: 
         )
     selector_kwargs = dict(
         problem="classification",
-        estimator=build_run_estimator(estimator),
+        estimator=build_run_estimator(estimator, args, seed),
         optimizer=optimizer,
         optimizer_paras=({"epoch": args.epochs, "pop_size": args.pop_size} if isinstance(optimizer, str) else None),
         obj_name="AS",
@@ -1347,6 +1374,11 @@ def _run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: 
         X_test_sel = selector.transform(data.X_test)
         if isinstance(selector.estimator, str):
             est = get_general_estimator("classification", selector.estimator)
+        elif (
+            str(estimator).lower() == "rf"
+            and str(getattr(args, "compute_device", "cpu")).lower() == "gpu"
+        ):
+            est = build_gpu_random_forest(seed)
         else:
             est = clone(selector.estimator)
         est.fit(X_train_sel, data.y_train)
@@ -1498,7 +1530,7 @@ def execute_pending_runs(
     strategy = select_execution_strategy(args, data, method, len(pending_runs))
     worker_args = argparse.Namespace(**vars(args))
     worker_args.optimizer_compute_device = strategy.optimizer_compute_device
-    architecture_device = execution_architecture_device(args, estimator)
+    requested_device = str(getattr(args, "compute_device", "cpu")).lower()
 
     if args.parallel != "yes" or len(pending_runs) <= 1:
         completed = []
@@ -1528,22 +1560,26 @@ def execute_pending_runs(
         "X_test": data.X_test,
         "y_test": data.y_test,
     }
-    max_workers = parallel_run_worker_count(
-        args,
-        len(pending_runs),
-        strategy,
-        estimator,
-    )
-    if architecture_device == "gpu":
+    max_workers = min(args.n_workers, len(pending_runs))
+    if requested_device == "gpu":
+        gpu_info = getattr(GPU_OWNER_BACKEND, "gpu_info", None)
+        free_bytes = int(getattr(gpu_info, "free_memory_bytes", 0))
+        per_worker_reserve = max(strategy.estimated_gpu_bytes, 512 * 1024**2)
+        safe_workers = min(2, max_workers)
+        while safe_workers > 1 and free_bytes < 2 * safe_workers * per_worker_reserve:
+            safe_workers -= 1
+        max_workers = max(1, safe_workers)
         worker_args.gpu_memory_fraction = args.gpu_memory_fraction / max_workers
-    if architecture_device in {"gpu", "hybrid"}:
+    elif requested_device == "hybrid" and strategy.gpu_owner_count > 0:
+        max_workers = min(max_workers, HYBRID_MAX_RUN_WORKERS)
+    if requested_device in {"gpu", "hybrid"}:
         display_args = argparse.Namespace(**vars(args))
         display_args.n_workers = max_workers
         print_execution_strategy(
             strategy,
             display_args,
             len(pending_runs),
-            max_workers if architecture_device == "gpu" else None,
+            max_workers if requested_device == "gpu" else None,
         )
     tasks = [
         {
@@ -1568,7 +1604,7 @@ def execute_pending_runs(
     }
     gpu_service_manager = None
     gpu_service_process = None
-    if architecture_device == "gpu":
+    if requested_device == "gpu":
         spawn_context = multiprocessing.get_context("spawn")
         executor_kwargs.update({
             "mp_context": spawn_context,
@@ -1652,7 +1688,7 @@ def execute_pending_runs(
     try:
         with ProcessPoolExecutor(**executor_kwargs) as executor:
             futures = [executor.submit(run_single_parallel_task, task) for task in tasks]
-            if architecture_device != "gpu" and strategy.gpu_owner_count > 0:
+            if requested_device != "gpu" and strategy.gpu_owner_count > 0:
                 ready_pids = []
                 try:
                     for _ in range(max_workers):
@@ -4711,18 +4747,36 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             save_cache(cache_file, cls_payload)
 
                         if args.parallel == "yes" and len(pending_runs) > 1:
-                            preview_strategy = select_execution_strategy(
-                                run_args,
-                                data,
-                                method,
-                                len(pending_runs),
-                            )
-                            display_workers = parallel_run_worker_count(
-                                run_args,
-                                len(pending_runs),
-                                preview_strategy,
-                                estimator,
-                            )
+                            display_workers = min(args.n_workers, len(pending_runs))
+                            if str(args.compute_device).lower() in {"gpu", "hybrid"}:
+                                preview_strategy = select_execution_strategy(
+                                    run_args,
+                                    data,
+                                    method,
+                                    len(pending_runs),
+                                )
+                                if preview_strategy.gpu_owner_count > 0:
+                                    if str(args.compute_device).lower() == "gpu":
+                                        gpu_info = getattr(GPU_OWNER_BACKEND, "gpu_info", None)
+                                        free_bytes = int(
+                                            getattr(gpu_info, "free_memory_bytes", 0)
+                                        )
+                                        per_worker_reserve = max(
+                                            preview_strategy.estimated_gpu_bytes,
+                                            512 * 1024**2,
+                                        )
+                                        display_workers = min(display_workers, 2)
+                                        while (
+                                            display_workers > 1
+                                            and free_bytes
+                                            < 2 * display_workers * per_worker_reserve
+                                        ):
+                                            display_workers -= 1
+                                    else:
+                                        display_workers = min(
+                                            display_workers,
+                                            HYBRID_MAX_RUN_WORKERS,
+                                        )
                             print(
                                 f"  Parallel: yes | CPU run workers={display_workers}"
                             )
@@ -4799,6 +4853,7 @@ def main():
         raise ValueError("--n-workers must be >= 1")
 
     configure_compute_backend(args)
+    validate_gpu_random_forest_backend(args)
 
     comparison_optimizers = []
     for mode in modes:
