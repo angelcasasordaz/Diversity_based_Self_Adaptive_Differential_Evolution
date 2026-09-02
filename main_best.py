@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import pickle
 import queue
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -240,7 +241,7 @@ DSADE_MAHAL_Q = 0.68
 
 SENSITIVITY_OPTIMIZERS = [
     "DSA-DE",
-    # "MaCRO-DE",
+    "MaCRO-DE",
 ]
 
 SENSITIVITY_CONFIGS = [
@@ -257,7 +258,7 @@ DEFAULT_FITNESS_ALPHA = 0.90
 DEFAULT_FITNESS_BETA = 0.10
 SENSITIVITY_WEIGHTS_OPTIMIZERS = [
     "DSA-DE",
-    # "MaCRO-DE",
+    "MaCRO-DE",
 ]
 
 SENSITIVITY_WEIGHT_PAIRS = [
@@ -322,7 +323,8 @@ SUPPORTED_SENSITIVITY_PARAMETERS = {
 # "Accent"
 
 PARALLEL = True
-DEBUG_PARALLEL_PROGRESS = True
+DEBUG_PARALLEL_PROGRESS = False
+PROGRESS_HEARTBEAT_SECONDS = 60.0
 
 @dataclass
 class Paths:
@@ -668,6 +670,41 @@ def select_execution_strategy(
         HYBRID_GPU_MIN_KERNEL_WORK,
         HYBRID_GPU_MIN_EPOCHS,
     )
+
+
+def execution_architecture_device(args: argparse.Namespace, estimator: str) -> str:
+    """Use the shared-owner GPU architecture for CPU-bound RF fitness work."""
+    requested_device = str(getattr(args, "compute_device", "cpu")).lower()
+    if requested_device == "gpu" and str(estimator).lower() == "rf":
+        return "hybrid"
+    return requested_device
+
+
+def parallel_run_worker_count(
+    args: argparse.Namespace,
+    pending_run_count: int,
+    strategy: ExecutionStrategy,
+    estimator: str,
+) -> int:
+    """Apply the existing GPU, hybrid, CPU, and RAM worker safeguards."""
+    max_workers = min(args.n_workers, pending_run_count)
+    architecture_device = execution_architecture_device(args, estimator)
+    if architecture_device == "gpu":
+        gpu_info = getattr(GPU_OWNER_BACKEND, "gpu_info", None)
+        free_bytes = int(getattr(gpu_info, "free_memory_bytes", 0))
+        per_worker_reserve = max(strategy.estimated_gpu_bytes, 512 * 1024**2)
+        safe_workers = min(2, max_workers)
+        while safe_workers > 1 and free_bytes < 2 * safe_workers * per_worker_reserve:
+            safe_workers -= 1
+        return max(1, safe_workers)
+    if architecture_device == "hybrid" and strategy.gpu_owner_count > 0:
+        max_workers = min(max_workers, HYBRID_MAX_RUN_WORKERS)
+        if (
+            str(getattr(args, "compute_device", "cpu")).lower() == "gpu"
+            and str(estimator).lower() == "rf"
+        ):
+            max_workers = min(max_workers, automatic_worker_count())
+    return max(1, max_workers)
 
 
 def print_execution_strategy(
@@ -1228,7 +1265,14 @@ class RobustClassificationFeatureSelectionProblem(FeatureSelectionProblem):
             return float(evaluator.get_metric_by_name(self.obj_name, paras=paras)[self.obj_name])
 
 
-def run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: argparse.Namespace, seed: int):
+def build_run_estimator(estimator: str):
+    """Retain MAFESE's sklearn RF while preventing nested run-level parallelism."""
+    if str(estimator).lower() == "rf":
+        return get_general_estimator("classification", "rf", paras={"n_jobs": 1})
+    return estimator
+
+
+def _run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: argparse.Namespace, seed: int):
     logging.disable(logging.INFO)
     np.random.seed(seed)
     debug_worker = bool(DEBUG_PARALLEL_PROGRESS or _RUN_WORKER_DEBUG)
@@ -1245,7 +1289,7 @@ def run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: a
         )
     selector_kwargs = dict(
         problem="classification",
-        estimator=estimator,
+        estimator=build_run_estimator(estimator),
         optimizer=optimizer,
         optimizer_paras=({"epoch": args.epochs, "pop_size": args.pop_size} if isinstance(optimizer, str) else None),
         obj_name="AS",
@@ -1325,6 +1369,53 @@ def run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: a
     }
 
 
+def run_single(
+    data: Data,
+    estimator: str,
+    optimizer_name: str,
+    tf: str,
+    args: argparse.Namespace,
+    seed: int,
+    *,
+    dataset_name: Optional[str] = None,
+    run_number: Optional[int] = None,
+    total_runs: Optional[int] = None,
+):
+    """Execute one run, optionally reporting a lightweight periodic heartbeat."""
+    if dataset_name is None or run_number is None or total_runs is None:
+        return _run_single(data, estimator, optimizer_name, tf, args, seed)
+
+    stop_heartbeat = threading.Event()
+    started_at = time.monotonic()
+    optimizer_estimator_label = (
+        f"{optimizer_acronym(optimizer_name).upper()}_{estimator.upper()}"
+    )
+
+    def report_progress():
+        while not stop_heartbeat.wait(PROGRESS_HEARTBEAT_SECONDS):
+            elapsed_seconds = int(time.monotonic() - started_at)
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"[{timestamp}] PROGRESS | dataset={dataset_name} | "
+                f"optimizer={optimizer_estimator_label} | "
+                f"run={run_number}/{total_runs} | elapsed={elapsed_seconds}s | "
+                "status=running",
+                flush=True,
+            )
+
+    heartbeat_thread = threading.Thread(
+        target=report_progress,
+        name=f"progress-heartbeat-run-{run_number}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        return _run_single(data, estimator, optimizer_name, tf, args, seed)
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join()
+
+
 _RUN_WORKER_DATA_SPLIT = None
 _RUN_WORKER_THREAD_LIMIT = None
 _RUN_WORKER_DEBUG = False
@@ -1382,6 +1473,9 @@ def run_single_parallel_task(task: dict):
         task["tf"],
         task["args"],
         task["seed"],
+        dataset_name=task["dataset_name"],
+        run_number=task["run"] + 1,
+        total_runs=task["total_runs"],
     )
     if _RUN_WORKER_DEBUG:
         print(
@@ -1399,16 +1493,30 @@ def execute_pending_runs(
     args: argparse.Namespace,
     pending_runs: List[int],
     on_run_complete=None,
+    dataset_name: Optional[str] = None,
 ):
     strategy = select_execution_strategy(args, data, method, len(pending_runs))
     worker_args = argparse.Namespace(**vars(args))
     worker_args.optimizer_compute_device = strategy.optimizer_compute_device
-    requested_device = str(getattr(args, "compute_device", "cpu")).lower()
+    architecture_device = execution_architecture_device(args, estimator)
 
     if args.parallel != "yes" or len(pending_runs) <= 1:
         completed = []
         for run in pending_runs:
-            item = (run, run_single(data, estimator, method, tf, worker_args, args.seed_base + run))
+            item = (
+                run,
+                run_single(
+                    data,
+                    estimator,
+                    method,
+                    tf,
+                    worker_args,
+                    args.seed_base + run,
+                    dataset_name=dataset_name,
+                    run_number=run + 1,
+                    total_runs=args.runs,
+                ),
+            )
             if on_run_complete is not None:
                 on_run_complete(*item)
             completed.append(item)
@@ -1420,35 +1528,33 @@ def execute_pending_runs(
         "X_test": data.X_test,
         "y_test": data.y_test,
     }
-    max_workers = min(args.n_workers, len(pending_runs))
-    if requested_device == "gpu":
-        gpu_info = getattr(GPU_OWNER_BACKEND, "gpu_info", None)
-        free_bytes = int(getattr(gpu_info, "free_memory_bytes", 0))
-        per_worker_reserve = max(strategy.estimated_gpu_bytes, 512 * 1024**2)
-        safe_workers = min(2, max_workers)
-        while safe_workers > 1 and free_bytes < 2 * safe_workers * per_worker_reserve:
-            safe_workers -= 1
-        max_workers = max(1, safe_workers)
+    max_workers = parallel_run_worker_count(
+        args,
+        len(pending_runs),
+        strategy,
+        estimator,
+    )
+    if architecture_device == "gpu":
         worker_args.gpu_memory_fraction = args.gpu_memory_fraction / max_workers
-    elif requested_device == "hybrid" and strategy.gpu_owner_count > 0:
-        max_workers = min(max_workers, HYBRID_MAX_RUN_WORKERS)
-    if requested_device in {"gpu", "hybrid"}:
+    if architecture_device in {"gpu", "hybrid"}:
         display_args = argparse.Namespace(**vars(args))
         display_args.n_workers = max_workers
         print_execution_strategy(
             strategy,
             display_args,
             len(pending_runs),
-            max_workers if requested_device == "gpu" else None,
+            max_workers if architecture_device == "gpu" else None,
         )
     tasks = [
         {
             "run": run,
+            "dataset_name": dataset_name,
             "estimator": estimator,
             "method": method,
             "tf": tf,
             "args": worker_args,
             "seed": args.seed_base + run,
+            "total_runs": args.runs,
         }
         for run in pending_runs
     ]
@@ -1462,7 +1568,7 @@ def execute_pending_runs(
     }
     gpu_service_manager = None
     gpu_service_process = None
-    if requested_device == "gpu":
+    if architecture_device == "gpu":
         spawn_context = multiprocessing.get_context("spawn")
         executor_kwargs.update({
             "mp_context": spawn_context,
@@ -1546,7 +1652,7 @@ def execute_pending_runs(
     try:
         with ProcessPoolExecutor(**executor_kwargs) as executor:
             futures = [executor.submit(run_single_parallel_task, task) for task in tasks]
-            if requested_device != "gpu" and strategy.gpu_owner_count > 0:
+            if architecture_device != "gpu" and strategy.gpu_owner_count > 0:
                 ready_pids = []
                 try:
                     for _ in range(max_workers):
@@ -4605,36 +4711,18 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             save_cache(cache_file, cls_payload)
 
                         if args.parallel == "yes" and len(pending_runs) > 1:
-                            display_workers = min(args.n_workers, len(pending_runs))
-                            if str(args.compute_device).lower() in {"gpu", "hybrid"}:
-                                preview_strategy = select_execution_strategy(
-                                    run_args,
-                                    data,
-                                    method,
-                                    len(pending_runs),
-                                )
-                                if preview_strategy.gpu_owner_count > 0:
-                                    if str(args.compute_device).lower() == "gpu":
-                                        gpu_info = getattr(GPU_OWNER_BACKEND, "gpu_info", None)
-                                        free_bytes = int(
-                                            getattr(gpu_info, "free_memory_bytes", 0)
-                                        )
-                                        per_worker_reserve = max(
-                                            preview_strategy.estimated_gpu_bytes,
-                                            512 * 1024**2,
-                                        )
-                                        display_workers = min(display_workers, 2)
-                                        while (
-                                            display_workers > 1
-                                            and free_bytes
-                                            < 2 * display_workers * per_worker_reserve
-                                        ):
-                                            display_workers -= 1
-                                    else:
-                                        display_workers = min(
-                                            display_workers,
-                                            HYBRID_MAX_RUN_WORKERS,
-                                        )
+                            preview_strategy = select_execution_strategy(
+                                run_args,
+                                data,
+                                method,
+                                len(pending_runs),
+                            )
+                            display_workers = parallel_run_worker_count(
+                                run_args,
+                                len(pending_runs),
+                                preview_strategy,
+                                estimator,
+                            )
                             print(
                                 f"  Parallel: yes | CPU run workers={display_workers}"
                             )
@@ -4646,6 +4734,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             run_args,
                             pending_runs,
                             on_run_complete=checkpoint_run,
+                            dataset_name=dataset_name,
                         )
 
                         cls_payload[label] = build_label_payload(
