@@ -250,6 +250,8 @@ SENSITIVITY_CONFIGS = [
     ("beta_max", [0.60, 0.70, 0.80, 0.90]),
     ("pcr", [0.10, 0.20, 0.30, 0.40]),
 ]
+SENSITIVITY_PLOT_METRIC = "f1"
+# Accepted values: "accuracy", "precision", "recall", "f1".
 # Add tuples to run multiple sequential OFAT studies. Optional entries include:
 # ("beta_min", [0.10, 0.20, 0.30, 0.40])
 # ("beta_max", [0.60, 0.70, 0.80, 0.90])
@@ -3430,6 +3432,158 @@ def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argpa
     return filename
 
 
+def generate_sensitivity_dataset_figures(
+    df: pd.DataFrame,
+    out_dir: str,
+    args: argparse.Namespace,
+    estimator_filter: str = "svm",
+) -> List[str]:
+    """Add per-optimizer sensitivity charts without changing the legacy chart."""
+    metric_options = {
+        "accuracy": ("AS_test", "Accuracy"),
+        "precision": ("PS_test", "Precision"),
+        "recall": ("RS_test", "Recall"),
+        "f1": ("F1_test", "F1-score"),
+    }
+    metric_key = str(SENSITIVITY_PLOT_METRIC).strip().lower()
+    if metric_key not in metric_options:
+        raise ValueError(
+            "SENSITIVITY_PLOT_METRIC must be one of: "
+            + ", ".join(metric_options)
+        )
+    metric_column, metric_label = metric_options[metric_key]
+    required_columns = {
+        "Dataset",
+        "Estimator",
+        "Optimizer",
+        "SensitivityValue",
+        metric_column,
+        "N_Features_Selected",
+    }
+    if df.empty or not required_columns.issubset(df.columns):
+        return []
+
+    plot_df = df.copy()
+    plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
+    plot_df = plot_df[
+        plot_df["Estimator"].eq(str(estimator_filter).lower())
+        & plot_df["Dataset"].isin(SENSITIVITY_DATASETS)
+    ].copy()
+    plot_df["SensitivityValue"] = pd.to_numeric(
+        plot_df["SensitivityValue"], errors="coerce"
+    )
+    plot_df = plot_df[np.isfinite(plot_df["SensitivityValue"])].copy()
+    if plot_df.empty:
+        return []
+
+    value_order = [float(value) for value in args.sensitivity_values]
+    dataset_order = [
+        dataset for dataset in SENSITIVITY_DATASETS
+        if dataset in set(plot_df["Dataset"])
+    ]
+    optimizer_order = optimizer_order_from_config(list(args.optimizers))
+    present_optimizers = set(plot_df["Optimizer"].astype(str))
+    optimizer_order = [
+        optimizer for optimizer in optimizer_order
+        if optimizer in present_optimizers
+    ]
+    if not dataset_order or not optimizer_order:
+        return []
+
+    grouped = plot_df.groupby(
+        ["Optimizer", "Dataset", "SensitivityValue"], sort=False
+    )[[metric_column, "N_Features_Selected"]].mean()
+    x = np.arange(len(value_order), dtype=float)
+    width = 0.78 / len(dataset_order)
+    colors = muted_color_palette(len(dataset_order))
+    filenames = []
+
+    for optimizer in optimizer_order:
+        fig, ax1 = plt.subplots(figsize=(10.5, 6.2), facecolor="white")
+        ax2 = ax1.twinx()
+        feature_values = []
+        for dataset_idx, (dataset, color) in enumerate(
+            zip(dataset_order, colors)
+        ):
+            keys = [(optimizer, dataset, value) for value in value_order]
+            metric_values = [
+                float(grouped.loc[key, metric_column])
+                if key in grouped.index else np.nan
+                for key in keys
+            ]
+            selected_features = [
+                float(grouped.loc[key, "N_Features_Selected"])
+                if key in grouped.index else np.nan
+                for key in keys
+            ]
+            feature_values.extend(
+                value for value in selected_features if np.isfinite(value)
+            )
+            positions = x + (dataset_idx - (len(dataset_order) - 1) / 2.0) * width
+            ax1.bar(
+                positions,
+                metric_values,
+                width=width * 0.92,
+                color=color,
+                edgecolor="white",
+                linewidth=0.8,
+                label=dataset,
+                zorder=3,
+            )
+            ax2.plot(
+                positions,
+                selected_features,
+                color=color,
+                marker="o",
+                markeredgecolor="black",
+                markeredgewidth=0.6,
+                linewidth=1.8,
+                label=f"{dataset} selected features",
+                zorder=4,
+            )
+
+        feature_upper = max(feature_values, default=1.0)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([f"{value:g}" for value in value_order])
+        ax1.set_xlim(-0.55, len(value_order) - 0.45)
+        ax1.set_ylim(0.0, 1.05)
+        ax2.set_ylim(0.0, max(1.0, feature_upper * 1.16))
+        ax1.set_xlabel(args.sensitivity_parameter)
+        ax1.set_ylabel(f"Mean {metric_label}")
+        ax2.set_ylabel("Mean selected features")
+        ax1.grid(axis="y", alpha=0.25)
+        ax1.set_axisbelow(True)
+        ax1.set_title(
+            f"Sensitivity Study: {optimizer} — "
+            f"{args.sensitivity_parameter} — {metric_label}",
+            fontweight="bold",
+        )
+        bar_handles, bar_labels = ax1.get_legend_handles_labels()
+        line_handles, line_labels = ax2.get_legend_handles_labels()
+        ax1.legend(
+            bar_handles + line_handles,
+            bar_labels + line_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.15),
+            ncol=2,
+            frameon=False,
+            fontsize=8,
+        )
+        fig.tight_layout(rect=(0, 0.12, 1, 1))
+
+        optimizer_token = optimizer.upper().replace("-", "_")
+        if optimizer == "DSADE":
+            optimizer_token = "DSADE"
+        filename = (
+            f"Sensitivity_dataset_{optimizer_token}_"
+            f"{args.sensitivity_parameter}_{metric_key}.png"
+        )
+        _save_chart(fig, out_dir, filename)
+        filenames.append(filename)
+
+    return filenames
+
+
 def generate_weight_sensitivity_main_figure(
     dataset_name: str,
     df: pd.DataFrame,
@@ -4412,6 +4566,9 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
         sensitivity_chart = generate_sensitivity_main_figure(summary_df, paths.fig_dir, args)
         if sensitivity_chart:
             generated_charts.append(sensitivity_chart)
+        generated_charts.extend(
+            generate_sensitivity_dataset_figures(summary_df, paths.fig_dir, args)
+        )
     elif args.experiment_mode == "sensitivity_weights":
         generated_charts = []
         weight_optimizers = optimizer_order_from_config(list(args.optimizers))
