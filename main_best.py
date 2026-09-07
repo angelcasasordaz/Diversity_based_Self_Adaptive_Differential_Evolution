@@ -57,16 +57,18 @@ DATASET_SOURCE = "mafese"
 # "mafese"
 
 EXPERIMENT_MODES = [
-    "full",
+    # "full",
     # "ablation",
     # "sensitivity",
     # "sensitivity_weights",
+    "transfer_functions",
 ]
 # Options:
 # "full"
 # "ablation"
 # "sensitivity"
 # "sensitivity_weights"
+# "transfer_functions"
 
 CODE_SMELL_DATASET_DIR = "Original"
 
@@ -104,6 +106,14 @@ SENSITIVITY_WEIGHTS_DATASETS = [
     "Zoo",
 ]
 
+TRANSFER_FUNCTION_DATASETS = [
+    "BreastCancer",
+    "Ionosphere",
+    "Tic-tac-toe",
+    "Wine",
+    "Zoo",
+]
+
 MAFESE_DATASET_SUITE = "test14"
 
 OPTIMIZERS = [
@@ -121,6 +131,7 @@ OPTIMIZERS = [
     # "RUN",
     # "FOX",
     # "DSADE",
+    # MaCRO-DE Corrections
     "MaCRO-DE",
     "BRO",
     "DBO",
@@ -230,8 +241,8 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 625
-REUSE_CACHE_FROM_EXP_ID = 625
+EXP_ID = 626
+REUSE_CACHE_FROM_EXP_ID = 626
 # None -> do not search another experiment.
 #
 # Example:
@@ -242,7 +253,7 @@ RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = True
-FIGURES_ONLY = True
+FIGURES_ONLY = False
 COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
@@ -271,6 +282,7 @@ SENSITIVITY_CONFIGS = [
     ("beta_max", [0.60, 0.70, 0.80, 0.90]),
     ("pcr", [0.10, 0.20, 0.30, 0.40]),
 ]
+
 SENSITIVITY_PLOT_METRIC = "accuracy"
 # Accepted values: "accuracy", "precision", "recall", "f1".
 # Add tuples to run multiple sequential OFAT studies. Optional entries include:
@@ -282,6 +294,7 @@ SENSITIVITY_PLOT_METRIC = "accuracy"
 
 DEFAULT_FITNESS_ALPHA = 0.90
 DEFAULT_FITNESS_BETA = 0.10
+
 SENSITIVITY_WEIGHTS_OPTIMIZERS = [
     # "DSA-DE",
     "MaCRO-DE",
@@ -293,6 +306,25 @@ SENSITIVITY_WEIGHT_PAIRS = [
     (0.90, 0.10),
     (0.95, 0.05),
     (0.99, 0.01),
+]
+
+TRANSFER_FUNCTION_OPTIMIZERS = [
+    "MaCRO-DE",
+]
+
+TRANSFER_FUNCTION_ESTIMATORS = [
+    "knn",
+]
+
+TRANSFER_FUNCTION_TESTS = [
+    "vstf_01",
+    "vstf_02",
+    "vstf_03",
+    "vstf_04",
+    "sstf_01",
+    "sstf_02",
+    "sstf_03",
+    "sstf_04",
 ]
 
 plt.rcParams.update({
@@ -315,6 +347,7 @@ TEST_DATASETS_CLASSIFICATION_14 = [
     "WaveformEW",
     "Zoo",
 ]
+
 SUPPORTED_ESTIMATORS = ["knn", "svm", "rf", "adaboost", "xgb", "tree", "ann"]
 SUPPORTED_TRANSFER_FUNCTIONS = [
     "vstf_01",
@@ -403,7 +436,7 @@ def validate_sensitivity_weight_pairs(weight_pairs) -> List[Tuple[float, float]]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Feature-selection comparison framework with cache and multi-run support")
-    supported_modes = ["full", "ablation", "sensitivity", "sensitivity_weights"]
+    supported_modes = ["full", "ablation", "sensitivity", "sensitivity_weights", "transfer_functions"]
     parser.add_argument("--experiment-modes", nargs="+", default=list(EXPERIMENT_MODES), choices=supported_modes)
     parser.add_argument("--experiment-mode", default=None, choices=supported_modes, help=argparse.SUPPRESS)
     parser.add_argument("--exp-id", type=int, default=EXP_ID, help="Numeric experiment ID")
@@ -581,6 +614,13 @@ def report_gpu_acceptance(args: argparse.Namespace, modes: List[str]) -> None:
         )
         suites["sensitivity_weights"] = (supported, total)
 
+    if "transfer_functions" in modes:
+        mode_args = clone_args_for_mode(args, "transfer_functions")
+        apply_experiment_mode(mode_args)
+        names = resolve_optimizers(mode_args)
+        supported = sum(resolve_optimizer(name).capability.supports_gpu for name in names)
+        suites["transfer_functions"] = (supported, len(names))
+
     selected_supported = all(
         suites[mode][0] == suites[mode][1] for mode in modes
     )
@@ -599,6 +639,11 @@ def report_gpu_acceptance(args: argparse.Namespace, modes: List[str]) -> None:
         print(
             "SENSITIVITY_WEIGHTS GPU support: "
             f"{suites['sensitivity_weights'][0]}/{suites['sensitivity_weights'][1]}"
+        )
+    if "transfer_functions" in modes:
+        print(
+            "TRANSFER_FUNCTIONS GPU support: "
+            f"{suites['transfer_functions'][0]}/{suites['transfer_functions'][1]}"
         )
 
 def print_available_optimizers() -> None:
@@ -771,6 +816,10 @@ def apply_experiment_mode(args: argparse.Namespace) -> None:
         for name in sensitivity_weights_optimizers:
             resolve_optimizer_name(name)
         args.optimizers = sensitivity_weights_optimizers
+    elif args.experiment_mode == "transfer_functions":
+        args.optimizers = list(TRANSFER_FUNCTION_OPTIMIZERS)
+        args.estimators = list(TRANSFER_FUNCTION_ESTIMATORS)
+        args.transfer_functions = list(TRANSFER_FUNCTION_TESTS)
 
 
 def sensitivity_study_args(args: argparse.Namespace) -> List[argparse.Namespace]:
@@ -884,10 +933,14 @@ def experiment_variant_label_suffix(args: argparse.Namespace, variant) -> Option
 def experiment_output_prefix(args: argparse.Namespace) -> str:
     if args.experiment_mode == "full":
         return ""
-    if args.experiment_mode == "sensitivity_weights":
-        return "SensitivityWeights_"
+    if args.experiment_mode == "ablation":
+        return "Ablation_"
     if args.experiment_mode == "sensitivity":
         return f"Sensitivity_{args.sensitivity_parameter}_"
+    if args.experiment_mode == "sensitivity_weights":
+        return "SensitivityWeights_"
+    if args.experiment_mode == "transfer_functions":
+        return "TransferFunctions_"
     return f"{args.experiment_mode.capitalize()}_"
 
 def experiment_variants(args: argparse.Namespace) -> list:
@@ -961,6 +1014,8 @@ def configured_dataset_names(args: argparse.Namespace) -> Optional[List[str]]:
         return list(SENSITIVITY_DATASETS)
     if mode == "sensitivity_weights":
         return list(SENSITIVITY_WEIGHTS_DATASETS)
+    if mode == "transfer_functions":
+        return list(TRANSFER_FUNCTION_DATASETS)
     raise ValueError(f"Unsupported experiment mode: {args.experiment_mode}")
 
 
@@ -5339,7 +5394,7 @@ def main():
     invalid_modes = [
         mode
         for mode in modes
-        if mode not in {"full", "ablation", "sensitivity", "sensitivity_weights"}
+        if mode not in {"full", "ablation", "sensitivity", "sensitivity_weights", "transfer_functions"}
     ]
     if invalid_modes:
         raise ValueError(f"Unsupported experiment modes: {invalid_modes}")
