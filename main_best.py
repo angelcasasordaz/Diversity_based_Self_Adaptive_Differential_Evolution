@@ -51,16 +51,16 @@ from optimizer_interceptor import Workload
 # EXPERIMENT CONFIGURATION
 # ============================================================
 
-DATASET_SOURCE = "codesmell"
+DATASET_SOURCE = "mafese"
 # Options:
 # "codesmell"
 # "mafese"
 
 EXPERIMENT_MODES = [
     "full",
-    "ablation",
-    "sensitivity",
-    "sensitivity_weights",
+    # "ablation",
+    # "sensitivity",
+    # "sensitivity_weights",
 ]
 # Options:
 # "full"
@@ -81,39 +81,60 @@ CODE_SMELL_DATASETS = None
 # ]
 
 ABLATION_DATASETS = [
-    "DataClass",
-    "FeatureEnvy",
-    "GodClass",
+    "BreastCancer",
+    "Ionosphere",
+    "Tic-tac-toe",
+    "Wine",
+    "Zoo",
 ]
 
 SENSITIVITY_DATASETS = [
-    "DataClass",
-    "FeatureEnvy",
-    "GodClass",
+    "BreastCancer",
+    "Ionosphere",
+    "Tic-tac-toe",
+    "Wine",
+    "Zoo",
 ]
 
 SENSITIVITY_WEIGHTS_DATASETS = [
-    "DataClass",
-    "FeatureEnvy",
-    "GodClass",
+    "BreastCancer",
+    "Ionosphere",
+    "Tic-tac-toe",
+    "Wine",
+    "Zoo",
 ]
 
 MAFESE_DATASET_SUITE = "test14"
 
 OPTIMIZERS = [
     # "MaCRO-DE",
-    "DSADE",
-    "DE",
-    "JADE",
-    "SHADE",
-    "PSO",
-    "WOA",
-    "HHO",
-    "GOA",
-    "SA",
+    # "DSADE",
+    # "DE",
+    # "JADE",
+    # "SHADE",
+    # "PSO",
+    # "WOA",
+    # "HHO",
+    # "GOA",
+    # "SA",
+    # "BRO",
+    # "RUN",
+    # "FOX",
+    # "DSADE",
+    "MaCRO-DE",
     "BRO",
-    "RUN",
-    "FOX",
+    "DBO",
+    "DE",
+    "DMOA",
+    "GWO",
+    "HHO",
+    "MFO",
+    "MGO",
+    "PSO",
+    "SHADE",
+    "WOA",
+    "JADE",
+    "FLA",
 ]
 
 ABLATION_OPTIMIZERS = [
@@ -127,7 +148,7 @@ ABLATION_OPTIMIZERS = [
 ESTIMATORS = [
     "knn",
     "svm",
-    "rf",
+    # "rf",
 ]
 
 TRANSFER_FUNCTIONS = [
@@ -209,8 +230,8 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 622
-REUSE_CACHE_FROM_EXP_ID = 622
+EXP_ID = 625
+REUSE_CACHE_FROM_EXP_ID = 625
 # None -> do not search another experiment.
 #
 # Example:
@@ -221,7 +242,7 @@ RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = True
-FIGURES_ONLY = False
+FIGURES_ONLY = True
 COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
@@ -234,13 +255,13 @@ HYBRID_GPU_MIN_EPOCHS = 2
 
 GPU_OWNER_BACKEND = None
 
-DSADE_BETA_MIN = 0.2
-DSADE_BETA_MAX = 0.8
-DSADE_PCR = 0.2
-DSADE_MAHAL_Q = 0.68
+DSADE_BETA_MIN = 0.10
+DSADE_BETA_MAX = 0.60
+DSADE_PCR = 0.10
+DSADE_MAHAL_Q = 0.50
 
 SENSITIVITY_OPTIMIZERS = [
-    "DSA-DE",
+    # "DSA-DE",
     "MaCRO-DE",
 ]
 
@@ -250,7 +271,7 @@ SENSITIVITY_CONFIGS = [
     ("beta_max", [0.60, 0.70, 0.80, 0.90]),
     ("pcr", [0.10, 0.20, 0.30, 0.40]),
 ]
-SENSITIVITY_PLOT_METRIC = "f1"
+SENSITIVITY_PLOT_METRIC = "accuracy"
 # Accepted values: "accuracy", "precision", "recall", "f1".
 # Add tuples to run multiple sequential OFAT studies. Optional entries include:
 # ("beta_min", [0.10, 0.20, 0.30, 0.40])
@@ -262,7 +283,7 @@ SENSITIVITY_PLOT_METRIC = "f1"
 DEFAULT_FITNESS_ALPHA = 0.90
 DEFAULT_FITNESS_BETA = 0.10
 SENSITIVITY_WEIGHTS_OPTIMIZERS = [
-    "DSA-DE",
+    # "DSA-DE",
     "MaCRO-DE",
 ]
 
@@ -307,6 +328,7 @@ SUPPORTED_TRANSFER_FUNCTIONS = [
 ]
 
 CHART_CMAP = "Dark2"
+MACRO_DE_COLOR = "#19365f"
 
 SUPPORTED_SENSITIVITY_PARAMETERS = {
     "beta_min",
@@ -522,18 +544,13 @@ def validate_comparison_backend(args: argparse.Namespace, optimizer_names: List[
 
 
 def report_gpu_acceptance(args: argparse.Namespace, modes: List[str]) -> None:
-    """Report genuine GPU coverage for each configured comparison suite."""
+    """Report genuine GPU coverage for each selected comparison suite."""
     suites = {}
     for mode in ("full", "ablation", "sensitivity"):
+        if mode not in modes:
+            continue
         mode_args = clone_args_for_mode(args, mode)
         if mode == "sensitivity":
-            if mode not in modes and not getattr(
-                mode_args,
-                "sensitivity_configs",
-                None,
-            ):
-                suites[mode] = (0, 0)
-                continue
             supported = 0
             total = 0
             for study_args in sensitivity_study_args(mode_args):
@@ -572,9 +589,12 @@ def report_gpu_acceptance(args: argparse.Namespace, modes: List[str]) -> None:
         "GPU comparison backend validation: "
         f"{'PASSED' if selected_supported and backend_available else 'FAILED'}"
     )
-    print(f"GPU-supported FULL optimizers: {suites['full'][0]}/{suites['full'][1]}")
-    print(f"ABLATION GPU support: {suites['ablation'][0]}/{suites['ablation'][1]}")
-    print(f"SENSITIVITY GPU support: {suites['sensitivity'][0]}/{suites['sensitivity'][1]}")
+    if "full" in modes:
+        print(f"GPU-supported FULL optimizers: {suites['full'][0]}/{suites['full'][1]}")
+    if "ablation" in modes:
+        print(f"ABLATION GPU support: {suites['ablation'][0]}/{suites['ablation'][1]}")
+    if "sensitivity" in modes:
+        print(f"SENSITIVITY GPU support: {suites['sensitivity'][0]}/{suites['sensitivity'][1]}")
     if "sensitivity_weights" in modes:
         print(
             "SENSITIVITY_WEIGHTS GPU support: "
@@ -2368,7 +2388,7 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.Data
         meta = group_meta[group]
         method = meta["Optimizer"]
         tf = meta["TransferFunction"]
-        color_map[group] = colors[i]
+        color_map[group] = MACRO_DE_COLOR if str(method).upper() == "MACRO-DE" else colors[i]
         base_label = optimizer_display_label(method)
         label_map[group] = f"{base_label} {tf.upper()}" if tf and method in variant_methods else base_label
 
@@ -2379,7 +2399,7 @@ def plot_bar(values: np.ndarray, labels: List[str], ylabel: str, title: str, out
     plt.figure(figsize=(10, 5), facecolor="white")
     bars = plt.bar(np.arange(len(labels)), values)
     for i, (b, label) in enumerate(zip(bars, labels)):
-        b.set_color(colors[i])
+        b.set_color(MACRO_DE_COLOR if str(label).upper().startswith("MACRO-DE") else colors[i])
         apply_dsade_patch_highlight(b, label)
     plt.xticks(np.arange(len(labels)), labels, rotation=45, ha="right")
     plt.ylabel(ylabel)
@@ -2400,15 +2420,17 @@ def plot_lines(curves_by_label: Dict[str, np.ndarray], title: str, ylabel: str, 
             continue
         ax = plt.gca()
         is_dsade = is_exact_dsade_method(label)
+        is_macro = str(label).upper().startswith("MACRO-DE")
         add_dsade_line_highlight(
             ax,
             np.arange(curve.size),
             curve,
-            colors[i],
+            MACRO_DE_COLOR if is_macro else colors[i],
             is_dsade,
-            linewidth=2.4,
+            linewidth=3.8 if is_macro else 2.4,
+            zorder=10 if is_macro else 2,
             linestyle=styles[i % len(styles)],
-            label=label,
+            label="MaCRO-DE" if is_macro else label,
         )
     plt.xlabel("Iteration")
     plt.ylabel(ylabel)
@@ -2956,7 +2978,11 @@ def _ablation_figure_metadata():
         "DSADE": "DSA-DE",
     }
     colors = muted_color_palette(len(optimizer_order))
-    return optimizer_order, display_labels, dict(zip(optimizer_order, colors))
+    color_map = dict(zip(optimizer_order, colors))
+    for optimizer in optimizer_order:
+        if str(optimizer).upper() == "MACRO-DE":
+            color_map[optimizer] = MACRO_DE_COLOR
+    return optimizer_order, display_labels, color_map
 
 def generate_ablation_classification_metrics_figure(
     dataset_name: str,
@@ -3458,7 +3484,6 @@ def generate_sensitivity_dataset_figures(
         "Optimizer",
         "SensitivityValue",
         metric_column,
-        "N_Features_Selected",
     }
     if df.empty or not required_columns.issubset(df.columns):
         return []
@@ -3492,7 +3517,7 @@ def generate_sensitivity_dataset_figures(
 
     grouped = plot_df.groupby(
         ["Optimizer", "Dataset", "SensitivityValue"], sort=False
-    )[[metric_column, "N_Features_Selected"]].mean()
+    )[[metric_column]].mean()
     x = np.arange(len(value_order), dtype=float)
     width = 0.78 / len(dataset_order)
     colors = muted_color_palette(len(dataset_order))
@@ -3500,8 +3525,6 @@ def generate_sensitivity_dataset_figures(
 
     for optimizer in optimizer_order:
         fig, ax1 = plt.subplots(figsize=(10.5, 6.2), facecolor="white")
-        ax2 = ax1.twinx()
-        feature_values = []
         for dataset_idx, (dataset, color) in enumerate(
             zip(dataset_order, colors)
         ):
@@ -3511,14 +3534,6 @@ def generate_sensitivity_dataset_figures(
                 if key in grouped.index else np.nan
                 for key in keys
             ]
-            selected_features = [
-                float(grouped.loc[key, "N_Features_Selected"])
-                if key in grouped.index else np.nan
-                for key in keys
-            ]
-            feature_values.extend(
-                value for value in selected_features if np.isfinite(value)
-            )
             positions = x + (dataset_idx - (len(dataset_order) - 1) / 2.0) * width
             ax1.bar(
                 positions,
@@ -3530,27 +3545,13 @@ def generate_sensitivity_dataset_figures(
                 label=dataset,
                 zorder=3,
             )
-            ax2.plot(
-                positions,
-                selected_features,
-                color=color,
-                marker="o",
-                markeredgecolor="black",
-                markeredgewidth=0.6,
-                linewidth=1.8,
-                label=f"{dataset} selected features",
-                zorder=4,
-            )
 
-        feature_upper = max(feature_values, default=1.0)
         ax1.set_xticks(x)
         ax1.set_xticklabels([f"{value:g}" for value in value_order])
         ax1.set_xlim(-0.55, len(value_order) - 0.45)
         ax1.set_ylim(0.0, 1.05)
-        ax2.set_ylim(0.0, max(1.0, feature_upper * 1.16))
         ax1.set_xlabel(args.sensitivity_parameter)
         ax1.set_ylabel(f"Mean {metric_label}")
-        ax2.set_ylabel("Mean selected features")
         ax1.grid(axis="y", alpha=0.25)
         ax1.set_axisbelow(True)
         ax1.set_title(
@@ -3559,10 +3560,9 @@ def generate_sensitivity_dataset_figures(
             fontweight="bold",
         )
         bar_handles, bar_labels = ax1.get_legend_handles_labels()
-        line_handles, line_labels = ax2.get_legend_handles_labels()
         ax1.legend(
-            bar_handles + line_handles,
-            bar_labels + line_labels,
+            bar_handles,
+            bar_labels,
             loc="upper center",
             bbox_to_anchor=(0.5, -0.15),
             ncol=2,
@@ -3696,6 +3696,298 @@ def generate_weight_sensitivity_main_figure(
         filename = (
             f"SensitivityWeights_AlphaBeta_{dataset_name}_{selected_optimizer}.png"
         )
+    _save_chart(fig, out_dir, filename)
+    return filename
+
+
+def _prepare_weight_sensitivity_companion_data(
+    dataset_name: str,
+    df: pd.DataFrame,
+    args: argparse.Namespace,
+    optimizer_name: Optional[str] = None,
+):
+    """Prepare stored values for additive sensitivity-weight figures only."""
+    if df.empty:
+        return None
+    required = {
+        "Dataset",
+        "Estimator",
+        "Optimizer",
+        "FitnessAlpha",
+        "FitnessBeta",
+        "F1_test",
+        "N_Features_Selected",
+    }
+    if not required.issubset(df.columns):
+        return None
+
+    plot_df = df[df["Dataset"] == dataset_name].copy()
+    if plot_df.empty:
+        return None
+    plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
+    plot_df["FitnessAlpha"] = pd.to_numeric(
+        plot_df["FitnessAlpha"], errors="coerce"
+    )
+    plot_df["FitnessBeta"] = pd.to_numeric(
+        plot_df["FitnessBeta"], errors="coerce"
+    )
+    plot_df = plot_df[
+        np.isfinite(plot_df["FitnessAlpha"])
+        & np.isfinite(plot_df["FitnessBeta"])
+    ]
+    if plot_df.empty:
+        return None
+
+    present_optimizers = list(dict.fromkeys(plot_df["Optimizer"].astype(str)))
+    if optimizer_name is None:
+        if len(present_optimizers) > 1:
+            raise ValueError(
+                "Multiple optimizers require optimizer_name for separate "
+                "weight-sensitivity plots"
+            )
+        selected_optimizer = present_optimizers[0]
+    else:
+        selected_optimizer = optimizer_acronym(optimizer_name)
+    plot_df = plot_df[plot_df["Optimizer"].astype(str) == selected_optimizer]
+    if plot_df.empty:
+        return None
+
+    grouped = plot_df.groupby(
+        ["Estimator", "FitnessAlpha", "FitnessBeta"]
+    )[["F1_test", "N_Features_Selected"]].mean()
+    weight_pairs = list(args.sensitivity_weight_pairs)
+    values = {}
+    for estimator in ("knn", "svm"):
+        f1_values = []
+        feature_values = []
+        for alpha, beta in weight_pairs:
+            key = (estimator, float(alpha), float(beta))
+            if key in grouped.index:
+                f1_values.append(float(grouped.loc[key, "F1_test"]))
+                feature_values.append(
+                    float(grouped.loc[key, "N_Features_Selected"])
+                )
+            else:
+                f1_values.append(np.nan)
+                feature_values.append(np.nan)
+        values[estimator] = (f1_values, feature_values)
+    return selected_optimizer, weight_pairs, values
+
+
+def _annotate_weight_sensitivity_bars(
+    ax,
+    bars,
+    values: List[float],
+    value_format: str,
+    offset: float,
+) -> None:
+    for bar, value in zip(bars, values):
+        if np.isfinite(value):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                value + offset,
+                value_format.format(value),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                rotation=90,
+            )
+
+
+def _weight_sensitivity_companion_filename(
+    dataset_name: str,
+    family: str,
+    selected_optimizer: str,
+    optimizer_name: Optional[str],
+) -> str:
+    optimizer_suffix = f"_{selected_optimizer}" if optimizer_name is not None else ""
+    return (
+        f"SensitivityWeights_AlphaBeta_{dataset_name}"
+        f"{optimizer_suffix}_{family}.png"
+    )
+
+
+def generate_weight_sensitivity_dual_bars_figure(
+    dataset_name: str,
+    df: pd.DataFrame,
+    out_dir: str,
+    args: argparse.Namespace,
+    optimizer_name: Optional[str] = None,
+) -> Optional[str]:
+    """Plot F1 and selected features as adjacent bars on dual axes."""
+    prepared = _prepare_weight_sensitivity_companion_data(
+        dataset_name, df, args, optimizer_name
+    )
+    if prepared is None:
+        return None
+    selected_optimizer, weight_pairs, values = prepared
+    x = np.arange(len(weight_pairs), dtype=float)
+    colors = muted_color_palette(len(weight_pairs))
+    xlabels = [f"{alpha:.2f} / {beta:.2f}" for alpha, beta in weight_pairs]
+    fig, axes = plt.subplots(
+        1, 2, figsize=(11.6, 5.4), sharey=True, facecolor="white"
+    )
+
+    for idx, (ax1, estimator) in enumerate(zip(axes, ("knn", "svm"))):
+        f1_values, feature_values = values[estimator]
+        ax2 = ax1.twinx()
+        f1_bars = ax1.bar(
+            x - 0.13,
+            f1_values,
+            width=0.62,
+            color=colors,
+            alpha=0.9,
+            label="Mean F1-score",
+            zorder=3,
+        )
+        feature_bars = ax2.bar(
+            x + 0.29,
+            feature_values,
+            width=0.20,
+            color="#d9d9d9",
+            edgecolor="black",
+            linewidth=1.0,
+            hatch="///",
+            label="Mean selected features",
+            zorder=4,
+        )
+        _annotate_weight_sensitivity_bars(
+            ax1, f1_bars, f1_values, "{:.3f}", 0.008
+        )
+        finite_features = [value for value in feature_values if np.isfinite(value)]
+        feature_upper = max(finite_features, default=1.0)
+        ax2.set_ylim(0.0, max(1.0, feature_upper * 1.20))
+        _annotate_weight_sensitivity_bars(
+            ax2,
+            feature_bars,
+            feature_values,
+            "{:.1f}",
+            max(0.02 * feature_upper, 0.05),
+        )
+        ax1.set_title(
+            f"({chr(97 + idx)}) {estimator.upper()}",
+            fontsize=12,
+            fontweight="bold",
+        )
+        ax1.set_xlabel("alpha / beta")
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(xlabels, rotation=32, ha="right")
+        ax1.set_ylim(0.0, 1.05)
+        ax1.grid(axis="y", alpha=0.25)
+        ax1.set_axisbelow(True)
+        if idx == 0:
+            ax1.set_ylabel("Mean F1-score")
+        if idx == 1:
+            ax2.set_ylabel("Mean selected features")
+
+    legend_handles = [
+        mpatches.Patch(facecolor="#777777", label="Mean F1-score"),
+        mpatches.Patch(
+            facecolor="#d9d9d9",
+            edgecolor="black",
+            hatch="///",
+            label="Mean selected features",
+        ),
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        ncol=2,
+        frameon=False,
+        fontsize=9,
+    )
+    fig.suptitle(
+        f"Fitness Weight Sensitivity — {dataset_name} — {selected_optimizer}",
+        fontsize=14,
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0.08, 1, 0.94))
+    filename = _weight_sensitivity_companion_filename(
+        dataset_name, "DualBars", selected_optimizer, optimizer_name
+    )
+    _save_chart(fig, out_dir, filename)
+    return filename
+
+
+def generate_weight_sensitivity_separated_panels_figure(
+    dataset_name: str,
+    df: pd.DataFrame,
+    out_dir: str,
+    args: argparse.Namespace,
+    optimizer_name: Optional[str] = None,
+) -> Optional[str]:
+    """Plot F1 and selected features in separate KNN/SVM panels."""
+    prepared = _prepare_weight_sensitivity_companion_data(
+        dataset_name, df, args, optimizer_name
+    )
+    if prepared is None:
+        return None
+    selected_optimizer, weight_pairs, values = prepared
+    x = np.arange(len(weight_pairs), dtype=float)
+    colors = muted_color_palette(len(weight_pairs))
+    xlabels = [f"{alpha:.2f} / {beta:.2f}" for alpha, beta in weight_pairs]
+    fig, axes = plt.subplots(2, 2, figsize=(12.2, 9.2), facecolor="white")
+    panel_specs = (
+        (axes[0, 0], "knn", "F1_test", "(a) KNN Mean F1-score"),
+        (axes[0, 1], "svm", "F1_test", "(b) SVM Mean F1-score"),
+        (
+            axes[1, 0],
+            "knn",
+            "N_Features_Selected",
+            "(c) KNN Mean selected features",
+        ),
+        (
+            axes[1, 1],
+            "svm",
+            "N_Features_Selected",
+            "(d) SVM Mean selected features",
+        ),
+    )
+    for ax, estimator, metric, title in panel_specs:
+        f1_values, feature_values = values[estimator]
+        is_f1 = metric == "F1_test"
+        panel_values = f1_values if is_f1 else feature_values
+        bars = ax.bar(
+            x,
+            panel_values,
+            width=0.68,
+            color=colors,
+            alpha=0.9,
+            edgecolor="black" if not is_f1 else "white",
+            linewidth=0.8,
+            zorder=3,
+        )
+        finite_values = [value for value in panel_values if np.isfinite(value)]
+        upper = max(finite_values, default=1.0)
+        if is_f1:
+            ax.set_ylim(0.0, 1.05)
+            value_format = "{:.3f}"
+            offset = 0.008
+            ax.set_ylabel("Mean F1-score")
+        else:
+            ax.set_ylim(0.0, max(1.0, upper * 1.20))
+            value_format = "{:.1f}"
+            offset = max(0.02 * upper, 0.05)
+            ax.set_ylabel("Mean selected features")
+        _annotate_weight_sensitivity_bars(
+            ax, bars, panel_values, value_format, offset
+        )
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel("alpha / beta")
+        ax.set_xticks(x)
+        ax.set_xticklabels(xlabels, rotation=32, ha="right")
+        ax.grid(axis="y", alpha=0.25)
+        ax.set_axisbelow(True)
+
+    fig.suptitle(
+        f"Fitness Weight Sensitivity — {dataset_name} — {selected_optimizer}",
+        fontsize=14,
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    filename = _weight_sensitivity_companion_filename(
+        dataset_name, "SeparatedPanels", selected_optimizer, optimizer_name
+    )
     _save_chart(fig, out_dir, filename)
     return filename
 
@@ -4064,7 +4356,7 @@ def build_run_level_dataframe(results_struct: Dict[str, Dict], args: argparse.Na
     return pd.DataFrame(rows)
 
 
-def build_curve_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace, estimator_filter: str = "svm") -> pd.DataFrame:
+def build_curve_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace, estimator_filter: str = "knn") -> pd.DataFrame:
     rows = []
     for dataset_name, alg_data in results_struct.items():
         for label, row in alg_data.items():
@@ -4253,7 +4545,8 @@ def generate_seven_global_charts(
                 curve,
                 curve_color_map.get(opt, "#888"),
                 is_dsade,
-                linewidth=2.4 if is_macro else (2.4 if is_dsade else 1.4),
+                linewidth=3.8 if is_macro else (2.4 if is_dsade else 1.4),
+                zorder=10 if is_macro else 2,
                 linestyle="-",
             )
             #ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.4, linestyle="-" if is_dsade else "--")
@@ -4497,26 +4790,20 @@ def generate_global_features_runtime(df, out_dir, opt_order):
             bar.set_linewidth(3)
         apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.8)
 
-    for i, v in enumerate(feat_vals):
-
-        ax1.text(
-            i - w/2,
-            v + 0.2,
-            f"{v:.2f}",
-            ha="center",
-            fontsize=9,
-            fontweight="bold"
-        )
-
-    for i, v in enumerate(rt_vals):
-
-        ax2.text(
-            i + w/2,
-            v + 0.5,
-            f"{v:.1f}s",
-            ha="center",
-            fontsize=9
-        )
+    # Point offsets stay readable across the two different axis scales.
+    value_labels = []
+    for ax, values, shift, fmt, weight in (
+        (ax1, feat_vals, -w / 2, "{:.2f}", "bold"),
+        (ax2, rt_vals, w / 2, "{:.1f}s", "normal"),
+    ):
+        for i, value in enumerate(values):
+            if np.isfinite(value):
+                value_labels.append(ax.annotate(
+                    fmt.format(value), (i + shift, value),
+                    xytext=(0, 6), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=9,
+                    fontweight=weight,
+                ))
 
     ax1.set_ylabel("Average selected features")
     ax2.set_ylabel("Average runtime (sec)")
@@ -4531,6 +4818,30 @@ def generate_global_features_runtime(df, out_dir, opt_order):
     ax1.grid(axis="y", alpha=0.3)
 
     fig.tight_layout()
+
+    # Resolve collisions in display coordinates, including labels on twin axes.
+    # Repeat after adding headroom because changing limits moves the bar tops.
+    for _ in range(12):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        gap = renderer.points_to_pixels(4)
+        placed = []
+        for label in value_labels:
+            label.set_position((0, 6))
+            bbox = label.get_window_extent(renderer)
+            for previous in sorted(placed, key=lambda box: box.y0):
+                if (bbox.x0 < previous.x1 + gap and bbox.x1 > previous.x0 - gap
+                        and bbox.y0 < previous.y1 + gap and bbox.y1 > previous.y0 - gap):
+                    offset = (previous.y1 + gap - bbox.y0) * 72 / fig.dpi
+                    label.set_position((0, label.get_position()[1] + offset))
+                    bbox = label.get_window_extent(renderer)
+            placed.append(bbox)
+        overflow = max((box.y1 + gap - ax1.bbox.y1 for box in placed), default=0)
+        if overflow <= 0:
+            break
+        for ax in (ax1, ax2):
+            lower, upper = ax.get_ylim()
+            ax.set_ylim(lower, lower + (upper - lower) * (1.08 + overflow / ax.bbox.height))
 
     _save_chart(
         fig,
@@ -4582,6 +4893,18 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
                 )
                 if sensitivity_chart:
                     generated_charts.append(sensitivity_chart)
+                for companion_generator in (
+                    generate_weight_sensitivity_dual_bars_figure,
+                    generate_weight_sensitivity_separated_panels_figure,
+                ):
+                    companion_chart = companion_generator(
+                        dataset_name,
+                        summary_df,
+                        paths.fig_dir,
+                        args,
+                    )
+                    if companion_chart:
+                        generated_charts.append(companion_chart)
             else:
                 for optimizer_name in weight_optimizers:
                     sensitivity_chart = generate_weight_sensitivity_main_figure(
@@ -4593,6 +4916,19 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
                     )
                     if sensitivity_chart:
                         generated_charts.append(sensitivity_chart)
+                    for companion_generator in (
+                        generate_weight_sensitivity_dual_bars_figure,
+                        generate_weight_sensitivity_separated_panels_figure,
+                    ):
+                        companion_chart = companion_generator(
+                            dataset_name,
+                            summary_df,
+                            paths.fig_dir,
+                            args,
+                            optimizer_name=optimizer_name,
+                        )
+                        if companion_chart:
+                            generated_charts.append(companion_chart)
     else:
         generated_charts = generate_seven_global_charts(
             summary_df,
