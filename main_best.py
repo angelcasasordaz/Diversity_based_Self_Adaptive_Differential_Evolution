@@ -313,7 +313,7 @@ TRANSFER_FUNCTION_OPTIMIZERS = [
 ]
 
 TRANSFER_FUNCTION_ESTIMATORS = [
-    "knn",
+    "svm",
 ]
 
 TRANSFER_FUNCTION_TESTS = [
@@ -327,10 +327,15 @@ TRANSFER_FUNCTION_TESTS = [
     "sstf_04",
 ]
 
+FIGURE_DPI = 600
+SAVEFIG_DPI = 600
+
 plt.rcParams.update({
+    "figure.dpi": FIGURE_DPI,
     "figure.facecolor": "white",
     "axes.facecolor": "white",
     "savefig.facecolor": "white",
+    "savefig.dpi": SAVEFIG_DPI,
 })
 
 TEST_DATASETS_CLASSIFICATION_14 = [
@@ -2031,18 +2036,22 @@ def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_name
     missing = []
     for dataset_name in dataset_names:
         results_struct[dataset_name] = {}
-        for estimator in args.estimators:
+        estimators = (list(dict.fromkeys([*args.estimators, *SUPPORTED_ESTIMATORS]))
+                      if args.experiment_mode == "transfer_functions" else args.estimators)
+        for estimator in estimators:
             payload = load_best_cache_payload(paths, dataset_name, estimator, cache_sig)
             if payload is None:
                 missing.append(f"{dataset_name}/{estimator}")
                 continue
             results_struct[dataset_name].update(payload)
 
+    if args.experiment_mode == "transfer_functions":
+        missing = [dataset for dataset, payload in results_struct.items() if not payload]
     if missing:
         raise FileNotFoundError(
             "No cache files were found for: "
             + ", ".join(missing)
-            + ". Run the full experiment or verify that the parameters match the existing cache."
+            + ". Verify that the parameters match the existing cache."
         )
     return results_struct
 
@@ -2397,7 +2406,7 @@ def optimizer_order_from_config(opt_order: List[str]) -> List[str]:
             ordered.append(display_name)
     return ordered
 
-def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.DataFrame, List[str], Dict[str, str], Dict[str, str]]:
+def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str], transfer_variants: bool = False) -> tuple[pd.DataFrame, List[str], Dict[str, str], Dict[str, str]]:
     if df.empty:
         return df.copy(), [], {}, {}
 
@@ -2412,7 +2421,7 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.Data
     def make_group(row):
         opt = str(row["Optimizer"])
         tf = str(row["TransferFunction"]).lower()
-        return f"{opt}_{tf.upper()}" if opt in variant_methods and tf else opt
+        return f"{opt}_{tf.upper()}" if (transfer_variants or opt in variant_methods) and tf else opt
 
     plot_df["PlotGroup"] = plot_df.apply(make_group, axis=1)
     group_meta = (
@@ -2445,7 +2454,16 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.Data
         tf = meta["TransferFunction"]
         color_map[group] = MACRO_DE_COLOR if str(method).upper() == "MACRO-DE" else colors[i]
         base_label = optimizer_display_label(method)
-        label_map[group] = f"{base_label} {tf.upper()}" if tf and method in variant_methods else base_label
+        label_map[group] = f"{base_label} {tf.upper()}" if tf and (transfer_variants or method in variant_methods) else base_label
+
+    if transfer_variants:
+        # Use a fixed mapping so each transfer function keeps its style across classifiers.
+        transfer_order = list(SUPPORTED_TRANSFER_FUNCTIONS)
+        colors = muted_color_palette(len(transfer_order))
+        for group in opts:
+            tf = str(group_meta[group]["TransferFunction"]).lower()
+            if tf in transfer_order:
+                color_map[group] = colors[transfer_order.index(tf)]
 
     return plot_df, opts, color_map, label_map
 
@@ -2461,7 +2479,7 @@ def plot_bar(values: np.ndarray, labels: List[str], ylabel: str, title: str, out
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     _force_white_background(plt.gcf())
-    plt.savefig(out_path, dpi=600, facecolor="white")
+    _save_figure(plt.gcf(), out_path)
     plt.close()
 
 def plot_lines(curves_by_label: Dict[str, np.ndarray], title: str, ylabel: str, out_path: str):
@@ -2493,7 +2511,7 @@ def plot_lines(curves_by_label: Dict[str, np.ndarray], title: str, ylabel: str, 
     plt.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=min(4, max(1, len(labels))), frameon=False)
     plt.tight_layout()
     _force_white_background(plt.gcf())
-    plt.savefig(out_path, dpi=600, facecolor="white")
+    _save_figure(plt.gcf(), out_path)
     plt.close()
 
 def export_global_excel(results_struct: Dict[str, Dict], dataset_names: List[str], out_path: str):
@@ -2928,10 +2946,27 @@ def _force_white_background(fig):
         ax.set_facecolor("white")
 
 
+def _save_figure(fig, path, **kwargs):
+    """Export at the global resolution and add a vector PDF alongside each PNG."""
+    _force_white_background(fig)
+    fig.savefig(path, dpi=SAVEFIG_DPI, facecolor="white", **kwargs)
+    if Path(path).suffix.lower() == ".png":
+        fig.savefig(Path(path).with_suffix(".pdf"), dpi=SAVEFIG_DPI,
+                    facecolor="white", **kwargs)
+
+
+def _rename_chart_exports(out_dir: str, old_name: str, new_name: str):
+    """Keep companion filenames aligned with the numbered PNG convention."""
+    old_path = Path(out_dir, old_name)
+    new_path = Path(out_dir, new_name)
+    os.replace(old_path, new_path)
+    if old_path.with_suffix(".pdf").exists():
+        os.replace(old_path.with_suffix(".pdf"), new_path.with_suffix(".pdf"))
+
+
 def _save_chart(fig, out_dir: str, filename: str):
     path = os.path.join(out_dir, filename)
-    _force_white_background(fig)
-    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+    _save_figure(fig, path, bbox_inches="tight")
     plt.close(fig)
 
 def generate_ablation_main_figure(df: pd.DataFrame, out_dir: str, opt_order: List[str]) -> Optional[str]:
@@ -4047,13 +4082,13 @@ def generate_weight_sensitivity_separated_panels_figure(
     return filename
 
 
-def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str]):
+def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str], transfer_variants: bool = False):
     if df.empty:
         return None
 
     plot_df = df.copy()
     plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
-    plot_df, opts, color_map, label_map = prepare_plot_groups(plot_df, opt_order)
+    plot_df, opts, color_map, label_map = prepare_plot_groups(plot_df, opt_order, transfer_variants)
     if not opts:
         return None
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
@@ -4068,7 +4103,7 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
     ]
 
     present_estimators = [str(e).lower() for e in plot_df["Estimator"].dropna().unique()]
-    required_estimators = [e for e in ESTIMATORS if e in SUPPORTED_ESTIMATORS]
+    required_estimators = [] if transfer_variants else [e for e in ESTIMATORS if e in SUPPORTED_ESTIMATORS]
     estimators = [e for e in SUPPORTED_ESTIMATORS if e in set(required_estimators + present_estimators)]
     estimators += sorted(e for e in present_estimators if e not in set(estimators))
     if not estimators:
@@ -4379,7 +4414,7 @@ def generate_notebook_style_charts(df: pd.DataFrame, out_dir: str, opt_order: Li
         saved.append(grid_chart)
     return saved
 
-def build_run_level_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace, estimator_filter: str = "knn") -> pd.DataFrame:
+def build_run_level_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace, estimator_filter: str = "svm") -> pd.DataFrame:
     rows = []
     for dataset_name, alg_data in results_struct.items():
         for label, row in alg_data.items():
@@ -4411,7 +4446,7 @@ def build_run_level_dataframe(results_struct: Dict[str, Dict], args: argparse.Na
     return pd.DataFrame(rows)
 
 
-def build_curve_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace, estimator_filter: str = "knn") -> pd.DataFrame:
+def build_curve_dataframe(results_struct: Dict[str, Dict], args: argparse.Namespace, estimator_filter: str = "svm") -> pd.DataFrame:
     rows = []
     for dataset_name, alg_data in results_struct.items():
         for label, row in alg_data.items():
@@ -4438,35 +4473,25 @@ def _grid_shape(n_items: int) -> tuple[int, int]:
     return n_rows, n_cols
 
 
-def generate_seven_global_charts(
-    df: pd.DataFrame,
-    results_struct: Dict[str, Dict],
-    out_dir: str,
-    opt_order: List[str],
-    args: argparse.Namespace,
-    estimator_filter: str = "svm", # Change here for knn
-):
-    if df.empty:
-        return []
-    os.makedirs(out_dir, exist_ok=True)
-    saved = []
+def transfer_line_style(group: str) -> dict:
+    tf = next((tf for tf in SUPPORTED_TRANSFER_FUNCTIONS if group.upper().endswith(tf.upper())), None)
+    index = list(SUPPORTED_TRANSFER_FUNCTIONS).index(tf) if tf else 0
+    return {"linestyle": ["-", "--", ":", "-."][index % 4],
+            "marker": ["o", "s", "^", "D", "v", "P", "X", "*"][index % 8]}
 
-    chart1 = generate_classifier_metric_grid_chart(df, out_dir, opt_order)
-    if chart1:
-        new_chart1 = "01_resultados_clasificador_todos_datasets.png"
-        os.replace(os.path.join(out_dir, chart1), os.path.join(out_dir, new_chart1))
-        saved.append(new_chart1)
 
-    knn_df = df[df["Estimator"].astype(str).str.lower() == estimator_filter.lower()].copy()
-    if knn_df.empty:
-        return saved
-    plot_df, opts, color_map, label_map = prepare_plot_groups(knn_df, opt_order)
-    if not opts:
-        return saved
+def result_line_legend(opts, color_map, label_map, transfer_variants=False):
+    if transfer_variants:
+        return [plt.Line2D([], [], color=color_map[opt], label=label_map[opt],
+                           **transfer_line_style(opt)) for opt in opts]
+    return _plot_legend_patches(opts, color_map, label_map)
+
+
+def generate_dataset_radar(df, out_dir, opt_order, filename="02_radar_por_dataset_knn.png", transfer_variants=False):
+    plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order, transfer_variants)
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
     datasets = sorted(plot_df["Dataset"].dropna().unique())
     n_rows, n_cols = _grid_shape(len(datasets))
-
     categories = ["Accuracy", "Precision", "Recall", "F1-Score", "Feat.\nEfficiency"]
     angles = [n / 5.0 * 2 * np.pi for n in range(5)]
     angles += angles[:1]
@@ -4498,7 +4523,8 @@ def generate_seven_global_charts(
                 color_map.get(opt, "#888"),
                 is_dsade,
                 linewidth=4.0 if is_macro else (2.4 if is_dsade else 1.1),
-                linestyle="-" if is_macro else ("-" if is_dsade else "--"),
+                linestyle=transfer_line_style(opt)["linestyle"] if transfer_variants else ("-" if is_macro else ("-" if is_dsade else "--")),
+                **({"marker": transfer_line_style(opt)["marker"], "markersize": 4} if transfer_variants else {}),
                 zorder=10 if is_macro else 2
             )
 
@@ -4506,7 +4532,7 @@ def generate_seven_global_charts(
                 angles,
                 vals,
                 color=color_map.get(opt, "#888"),
-                alpha=0.20 if is_macro else (0.12 if is_dsade else 0.04)
+                alpha=0.025 if transfer_variants else (0.20 if is_macro else (0.12 if is_dsade else 0.04))
             )
             # ax.plot(angles, vals, color=color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.1, linestyle="-" if is_dsade else "--")
             # ax.fill(angles, vals, color=color_map.get(opt, "#888"), alpha=0.12 if is_dsade else 0.04)
@@ -4516,10 +4542,134 @@ def generate_seven_global_charts(
         ax.set_title(dataset, fontsize=11, fontweight="bold", pad=14)
     for idx in range(len(datasets), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].set_visible(False)
-    fig.legend(handles=_plot_legend_patches(opts, color_map, label_map), loc="lower center", ncol=min(len(opts), 6), fontsize=9)
+    fig.legend(handles=result_line_legend(opts, color_map, label_map, transfer_variants), loc="lower center", ncol=min(len(opts), 6), fontsize=9)
     fig.tight_layout(rect=[0.0, 0.05, 1.0, 1.0])
-    _save_chart(fig, out_dir, "02_radar_por_dataset_knn.png")
-    saved.append("02_radar_por_dataset_knn.png")
+    _save_chart(fig, out_dir, filename)
+    return filename
+
+
+def generate_dataset_convergence(df, results_struct, out_dir, opt_order, args, estimator_filter,
+                                 filename="05_convergence_por_dataset_knn.png", transfer_variants=False):
+    plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order, transfer_variants)
+    method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
+    datasets = sorted(plot_df["Dataset"].dropna().unique())
+    n_rows, n_cols = _grid_shape(len(datasets))
+    curve_df = build_curve_dataframe(results_struct, args, estimator_filter)
+    if curve_df.empty:
+        curve_plot_df = pd.DataFrame()
+        curve_opts, curve_color_map, curve_label_map = opts, color_map, label_map
+    else:
+        curve_plot_df, curve_opts, curve_color_map, curve_label_map = prepare_plot_groups(curve_df, opt_order, transfer_variants)
+    if transfer_variants:
+        if curve_plot_df.empty:
+            return None
+        curve_plot_df = curve_plot_df[curve_plot_df["Curve"].map(lambda c: np.isfinite(c).any())]
+        datasets = sorted(curve_plot_df["Dataset"].unique())
+        if not datasets:
+            return None
+        n_rows, n_cols = _grid_shape(len(datasets))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.4 * n_rows), squeeze=False)
+    for idx, dataset in enumerate(datasets):
+        ax = axes[idx // n_cols, idx % n_cols]
+        sub = curve_plot_df[curve_plot_df["Dataset"] == dataset] if not curve_plot_df.empty else pd.DataFrame()
+        plotted = False
+        for opt in curve_opts:
+            rows_opt = sub[sub["PlotGroup"] == opt] if not sub.empty else pd.DataFrame()
+            if rows_opt.empty:
+                continue
+            curve = np.asarray(rows_opt.iloc[0]["Curve"], dtype=float)
+            if curve.size == 0:
+                continue
+            is_dsade = is_exact_dsade_method(rows_opt.iloc[0]["Optimizer"])
+            is_macro = str(rows_opt.iloc[0]["Optimizer"]).upper() == "MACRO-DE"
+            add_dsade_line_highlight(
+                ax,
+                np.arange(curve.size),
+                curve,
+                curve_color_map.get(opt, "#888"),
+                is_dsade,
+                linewidth=3.8 if is_macro else (2.4 if is_dsade else 1.4),
+                zorder=10 if is_macro else 2,
+                **(dict(transfer_line_style(opt), markevery=max(1, curve.size // 12), markersize=4) if transfer_variants else {"linestyle": "-"}),
+            )
+            #ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.4, linestyle="-" if is_dsade else "--")
+            plotted = True
+        if not plotted:
+            ax.text(0.5, 0.5, "Sin curvas", transform=ax.transAxes, ha="center", va="center", color="#777")
+        ax.set_title(dataset, fontsize=11, fontweight="bold")
+        ax.set_xlabel("Iteration", fontsize=9)
+        ax.set_ylabel("Fitness", fontsize=9)
+        ax.grid(alpha=0.25)
+    for idx in range(len(datasets), n_rows * n_cols):
+        axes[idx // n_cols, idx % n_cols].set_visible(False)
+    fig.legend(handles=result_line_legend(curve_opts, curve_color_map, curve_label_map, transfer_variants), loc="lower center", ncol=min(len(curve_opts), 6), fontsize=9)
+    fig.tight_layout(rect=[0.0, 0.05, 1.0, 1.0])
+    _save_chart(fig, out_dir, filename)
+    return filename
+
+
+def generate_transfer_function_charts(df, results_struct, out_dir, opt_order, args):
+    """Render the applicable FULL panels using only classifiers with saved results."""
+    if df.empty:
+        return []
+    metrics = ["AS_test", "PS_test", "RS_test", "F1_test"]
+    plot_df = df.dropna(subset=metrics, how="all").copy()
+    if plot_df.empty:
+        return []
+    os.makedirs(out_dir, exist_ok=True)
+    saved = []
+    chart = generate_classifier_metric_grid_chart(plot_df, out_dir, opt_order, transfer_variants=True)
+    if chart:
+        filename = "01_resultados_clasificador_todos_datasets.png"
+        _rename_chart_exports(out_dir, chart, filename)
+        saved.append(filename)
+    for estimator in sorted(plot_df["Estimator"].str.lower().unique()):
+        sub = plot_df[plot_df["Estimator"].str.lower() == estimator]
+        saved.append(generate_dataset_radar(
+            sub, out_dir, opt_order, f"02_radar_por_dataset_{estimator}.png", transfer_variants=True
+        ))
+        chart = generate_dataset_convergence(
+            sub, results_struct, out_dir, opt_order, args, estimator,
+            f"05_convergence_por_dataset_{estimator}.png", transfer_variants=True
+        )
+        if chart:
+            saved.append(chart)
+        filename = f"09_global_features_runtime_tradeoff_{estimator}.png"
+        generate_global_features_runtime(sub, out_dir, opt_order, filename=filename, transfer_variants=True)
+        saved.append(filename)
+    return saved
+
+
+def generate_seven_global_charts(
+    df: pd.DataFrame,
+    results_struct: Dict[str, Dict],
+    out_dir: str,
+    opt_order: List[str],
+    args: argparse.Namespace,
+    estimator_filter: str = "svm", # Change here for knn
+):
+    if df.empty:
+        return []
+    os.makedirs(out_dir, exist_ok=True)
+    saved = []
+
+    chart1 = generate_classifier_metric_grid_chart(df, out_dir, opt_order)
+    if chart1:
+        new_chart1 = "01_resultados_clasificador_todos_datasets.png"
+        _rename_chart_exports(out_dir, chart1, new_chart1)
+        saved.append(new_chart1)
+
+    knn_df = df[df["Estimator"].astype(str).str.lower() == estimator_filter.lower()].copy()
+    if knn_df.empty:
+        return saved
+    plot_df, opts, color_map, label_map = prepare_plot_groups(knn_df, opt_order)
+    if not opts:
+        return saved
+    method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
+    datasets = sorted(plot_df["Dataset"].dropna().unique())
+    n_rows, n_cols = _grid_shape(len(datasets))
+
+    saved.append(generate_dataset_radar(plot_df, out_dir, opt_order))
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.6 * n_rows), squeeze=False)
     for idx, dataset in enumerate(datasets):
@@ -4574,50 +4724,9 @@ def generate_seven_global_charts(
     _save_chart(fig, out_dir, "04_boxplot_accuracy_por_dataset_knn.png")
     saved.append("04_boxplot_accuracy_por_dataset_knn.png")
 
-    curve_df = build_curve_dataframe(results_struct, args, estimator_filter)
-    if curve_df.empty:
-        curve_plot_df = pd.DataFrame()
-        curve_opts, curve_color_map, curve_label_map = opts, color_map, label_map
-    else:
-        curve_plot_df, curve_opts, curve_color_map, curve_label_map = prepare_plot_groups(curve_df, opt_order)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.4 * n_rows), squeeze=False)
-    for idx, dataset in enumerate(datasets):
-        ax = axes[idx // n_cols, idx % n_cols]
-        sub = curve_plot_df[curve_plot_df["Dataset"] == dataset] if not curve_plot_df.empty else pd.DataFrame()
-        plotted = False
-        for opt in curve_opts:
-            rows_opt = sub[sub["PlotGroup"] == opt] if not sub.empty else pd.DataFrame()
-            if rows_opt.empty:
-                continue
-            curve = np.asarray(rows_opt.iloc[0]["Curve"], dtype=float)
-            if curve.size == 0:
-                continue
-            is_dsade = is_exact_dsade_method(rows_opt.iloc[0]["Optimizer"])
-            is_macro = str(rows_opt.iloc[0]["Optimizer"]).upper() == "MACRO-DE"
-            add_dsade_line_highlight(
-                ax,
-                np.arange(curve.size),
-                curve,
-                curve_color_map.get(opt, "#888"),
-                is_dsade,
-                linewidth=3.8 if is_macro else (2.4 if is_dsade else 1.4),
-                zorder=10 if is_macro else 2,
-                linestyle="-",
-            )
-            #ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.4, linestyle="-" if is_dsade else "--")
-            plotted = True
-        if not plotted:
-            ax.text(0.5, 0.5, "Sin curvas", transform=ax.transAxes, ha="center", va="center", color="#777")
-        ax.set_title(dataset, fontsize=11, fontweight="bold")
-        ax.set_xlabel("Iteration", fontsize=9)
-        ax.set_ylabel("Fitness", fontsize=9)
-        ax.grid(alpha=0.25)
-    for idx in range(len(datasets), n_rows * n_cols):
-        axes[idx // n_cols, idx % n_cols].set_visible(False)
-    fig.legend(handles=_plot_legend_patches(curve_opts, curve_color_map, curve_label_map), loc="lower center", ncol=min(len(curve_opts), 6), fontsize=9)
-    fig.tight_layout(rect=[0.0, 0.05, 1.0, 1.0])
-    _save_chart(fig, out_dir, "05_convergence_por_dataset_knn.png")
-    saved.append("05_convergence_por_dataset_knn.png")
+    saved.append(generate_dataset_convergence(
+        plot_df, results_struct, out_dir, opt_order, args, estimator_filter
+    ))
 
     pivot = plot_df.groupby(["PlotGroup", "Dataset"])["F1_test"].mean().unstack()
     mat = pivot.reindex(index=opts, columns=datasets).values
@@ -4785,9 +4894,9 @@ def generate_global_accuracy_boxplot(df, out_dir, opt_order):
         "08_global_accuracy_distribution.png"
     )
 
-def generate_global_features_runtime(df, out_dir, opt_order):
+def generate_global_features_runtime(df, out_dir, opt_order, filename="09_global_features_runtime_tradeoff.png", transfer_variants=False):
 
-    plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
+    plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order, transfer_variants)
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict() if not plot_df.empty else {}
 
     feat_med = (
@@ -4901,7 +5010,7 @@ def generate_global_features_runtime(df, out_dir, opt_order):
     _save_chart(
         fig,
         out_dir,
-        "09_global_features_runtime_tradeoff.png"
+        filename
     )
 
 def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: List[str], results_struct: Dict[str, Dict]):
@@ -4927,7 +5036,11 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
     summary_df = generate_summary_dataframe(results_struct, args)
     summary_csv = os.path.join(paths.res_dir, f"{output_prefix}RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
     summary_df.to_csv(summary_csv, index=False)
-    if args.experiment_mode == "sensitivity":
+    if args.experiment_mode == "transfer_functions":
+        generated_charts = generate_transfer_function_charts(
+            summary_df, results_struct, paths.fig_dir, list(args.optimizers), args
+        )
+    elif args.experiment_mode == "sensitivity":
         generated_charts = []
         sensitivity_chart = generate_sensitivity_main_figure(summary_df, paths.fig_dir, args)
         if sensitivity_chart:
