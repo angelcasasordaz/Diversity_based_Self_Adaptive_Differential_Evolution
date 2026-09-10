@@ -253,7 +253,7 @@ RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = True
-FIGURES_ONLY = False
+FIGURES_ONLY = True
 COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
@@ -2031,7 +2031,7 @@ def load_cache_with_legacy_fallback(paths: Paths, filename: str, label: str):
         print(f"[cache] Reused legacy {label}: {legacy_path}")
     return payload
 
-def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str) -> Dict[str, Dict]:
+def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str, *, preserve_classifier_labels: bool = False) -> Dict[str, Dict]:
     results_struct = {}
     missing = []
     for dataset_name in dataset_names:
@@ -2043,7 +2043,15 @@ def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_name
             if payload is None:
                 missing.append(f"{dataset_name}/{estimator}")
                 continue
-            results_struct[dataset_name].update(payload)
+            if preserve_classifier_labels:
+                # Legacy classifier-specific caches can use identical variant labels.
+                for label, row in payload.items():
+                    classifier = str(row.get("Estimator") or estimator).lower()
+                    suffix = f"_{classifier.upper()}"
+                    qualified_label = label if label.upper().endswith(suffix) else f"{label}{suffix}"
+                    results_struct[dataset_name][qualified_label] = row
+            else:
+                results_struct[dataset_name].update(payload)
 
     if args.experiment_mode == "transfer_functions":
         missing = [dataset for dataset, payload in results_struct.items() if not payload]
@@ -2467,6 +2475,11 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str], transfer_variant
 
     return plot_df, opts, color_map, label_map
 
+def prepare_blue_transfer_plot_groups(df, opt_order):
+    """Use 9fc6150's exact ordering, labels, and color-generation logic."""
+    from historical_transfer_plots import prepare_plot_groups as historical_groups
+    return historical_groups(df, opt_order)
+
 def plot_bar(values: np.ndarray, labels: List[str], ylabel: str, title: str, out_path: str):
     colors = muted_color_palette(len(labels))
     plt.figure(figsize=(10, 5), facecolor="white")
@@ -2605,21 +2618,54 @@ def export_statistical_excel(
         "Time": ("TimeRuns", "min"),
     }
     stats = ["Best", "Worst", "Mean", "Std"]
-    if args.experiment_mode == "sensitivity":
+    if args.experiment_mode == "transfer_functions":
+        # Keep optimizer, classifier and transfer function distinct before collecting runs.
+        transfer_groups = {}
+        for dataset_name in dataset_names:
+            for label, row in results_struct.get(dataset_name, {}).items():
+                parsed = parse_result_label(label, args)
+                classifier = str(row.get("Estimator") or parsed["estimator"] or "unknown").lower()
+                transfer_groups[dataset_name, label] = (
+                    optimizer_acronym(parsed["method"]),
+                    classifier,
+                    parsed["transfer_function"].lower(),
+                )
+
+        present = list(dict.fromkeys(transfer_groups.values()))
+        methods = optimizer_order_from_config(optimizer_order)
+        methods.extend(method for method, _, _ in present if method not in methods)
+        classifiers = list(dict.fromkeys(str(est).lower() for est in args.estimators))
+        classifiers = [est for est in classifiers if any(group[1] == est for group in present)]
+        classifiers.extend(est for _, est, _ in present if est not in classifiers)
+        transfers = list(dict.fromkeys(str(tf).lower() for tf in args.transfer_functions))
+        transfers.extend(tf for _, _, tf in present if tf not in transfers)
+        transfer_columns = {}
+        for method in methods:
+            for classifier in classifiers:
+                if not any(group[:2] == (method, classifier) for group in present):
+                    continue
+                for tf in transfers:
+                    parts = []
+                    if len(methods) > 1:
+                        parts.append(method)
+                    if len(classifiers) > 1:
+                        parts.append(classifier.upper())
+                    parts.append(tf.upper() or "UNKNOWN_TF")
+                    transfer_columns[method, classifier, tf] = " | ".join(parts)
+        optimizers = list(transfer_columns.values())
+    elif args.experiment_mode == "sensitivity":
         sensitivity_methods = optimizer_order_from_config(optimizer_order)
         if len(sensitivity_methods) == 1:
             optimizers = [
                 f"{args.sensitivity_parameter}={float(value):g}"
                 for value in args.sensitivity_values
             ]
-            index_name = "SensitivityValue"
         else:
             optimizers = [
                 f"{method} | {args.sensitivity_parameter}={float(value):g}"
                 for method in sensitivity_methods
                 for value in args.sensitivity_values
             ]
-            index_name = "OptimizerSensitivityValue"
     elif args.experiment_mode == "sensitivity_weights":
         weight_methods = optimizer_order_from_config(optimizer_order)
         if len(weight_methods) == 1:
@@ -2627,20 +2673,17 @@ def export_statistical_excel(
                 sensitivity_weight_display_label(pair)
                 for pair in args.sensitivity_weight_pairs
             ]
-            index_name = "AlphaBeta"
         else:
             optimizers = [
                 f"{method} | {sensitivity_weight_display_label(pair)}"
                 for method in weight_methods
                 for pair in args.sensitivity_weight_pairs
             ]
-            index_name = "OptimizerAlphaBeta"
     else:
         optimizers = optimizer_order_from_config(optimizer_order)
-        index_name = "Optimizer"
-    index = pd.MultiIndex.from_product([optimizers, stats], names=[index_name, "Statistic"])
+    index = pd.MultiIndex.from_product([dataset_names, stats], names=["Dataset", "Statistic"])
     sheets = {
-        sheet_name: pd.DataFrame(np.nan, index=index, columns=dataset_names)
+        sheet_name: pd.DataFrame(np.nan, index=index, columns=optimizers)
         for sheet_name in metrics
     }
 
@@ -2652,7 +2695,9 @@ def export_statistical_excel(
         }
         for label, row in alg_data.items():
             parsed = parse_result_label(label, args)
-            if args.experiment_mode == "sensitivity":
+            if args.experiment_mode == "transfer_functions":
+                optimizer = transfer_columns[transfer_groups[dataset_name, label]]
+            elif args.experiment_mode == "sensitivity":
                 parsed_value = parsed.get("sensitivity_value", np.nan)
                 if not np.isfinite(parsed_value):
                     continue
@@ -2688,11 +2733,11 @@ def export_statistical_excel(
                 values = np.concatenate(chunks) if chunks else np.array([], dtype=float)
                 stat_values = _run_stats(values, best_mode)
                 for stat in stats:
-                    sheets[sheet_name].loc[(optimizer, stat), dataset_name] = stat_values[stat]
+                    sheets[sheet_name].loc[(dataset_name, stat), optimizer] = stat_values[stat]
 
     with pd.ExcelWriter(out_path) as writer:
         for sheet_name, df in sheets.items():
-            df.to_excel(writer, sheet_name=sheet_name)
+            df.to_excel(writer, sheet_name=sheet_name, merge_cells=True)
     return out_path
 
 def _holm_adjusted_pvalues(p_values: List[float]) -> np.ndarray:
@@ -2946,27 +2991,27 @@ def _force_white_background(fig):
         ax.set_facecolor("white")
 
 
-def _save_figure(fig, path, **kwargs):
-    """Export at the global resolution and add a vector PDF alongside each PNG."""
+def _save_figure(fig, path, *, save_pdf=True, **kwargs):
+    """Export at the global resolution, optionally adding a companion PDF."""
     _force_white_background(fig)
     fig.savefig(path, dpi=SAVEFIG_DPI, facecolor="white", **kwargs)
-    if Path(path).suffix.lower() == ".png":
+    if save_pdf and Path(path).suffix.lower() == ".png":
         fig.savefig(Path(path).with_suffix(".pdf"), dpi=SAVEFIG_DPI,
                     facecolor="white", **kwargs)
 
 
-def _rename_chart_exports(out_dir: str, old_name: str, new_name: str):
+def _rename_chart_exports(out_dir: str, old_name: str, new_name: str, *, save_pdf=True):
     """Keep companion filenames aligned with the numbered PNG convention."""
     old_path = Path(out_dir, old_name)
     new_path = Path(out_dir, new_name)
     os.replace(old_path, new_path)
-    if old_path.with_suffix(".pdf").exists():
+    if save_pdf and old_path.with_suffix(".pdf").exists():
         os.replace(old_path.with_suffix(".pdf"), new_path.with_suffix(".pdf"))
 
 
-def _save_chart(fig, out_dir: str, filename: str):
+def _save_chart(fig, out_dir: str, filename: str, *, save_pdf=True):
     path = os.path.join(out_dir, filename)
-    _save_figure(fig, path, bbox_inches="tight")
+    _save_figure(fig, path, save_pdf=save_pdf, bbox_inches="tight")
     plt.close(fig)
 
 def generate_ablation_main_figure(df: pd.DataFrame, out_dir: str, opt_order: List[str]) -> Optional[str]:
@@ -4082,7 +4127,12 @@ def generate_weight_sensitivity_separated_panels_figure(
     return filename
 
 
-def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str], transfer_variants: bool = False):
+def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str], transfer_variants: bool = False, *, blue_transfer: bool = False, filename="09_resultados_clasificador_metrica_todos_datasets.png"):
+    if blue_transfer:
+        from historical_transfer_plots import METRICS_FILENAME, render_classifier_metric_grid
+        if filename == "09_resultados_clasificador_metrica_todos_datasets.png":
+            filename = METRICS_FILENAME
+        return render_classifier_metric_grid(df, out_dir, opt_order, filename)
     if df.empty:
         return None
 
@@ -4186,8 +4236,7 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
     legend = _plot_legend_patches(opts, color_map, label_map)
     fig.legend(handles=legend, loc="lower center", ncol=min(len(legend), 6), fontsize=9, framealpha=0.95)
     fig.tight_layout(rect=[0.0, 0.04, 1.0, 1.0])
-    filename = "09_resultados_clasificador_metrica_todos_datasets.png"
-    _save_chart(fig, out_dir, filename)
+    _save_chart(fig, out_dir, filename, save_pdf=not transfer_variants)
     return filename
 
 
@@ -4544,7 +4593,7 @@ def generate_dataset_radar(df, out_dir, opt_order, filename="02_radar_por_datase
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.legend(handles=result_line_legend(opts, color_map, label_map, transfer_variants), loc="lower center", ncol=min(len(opts), 6), fontsize=9)
     fig.tight_layout(rect=[0.0, 0.05, 1.0, 1.0])
-    _save_chart(fig, out_dir, filename)
+    _save_chart(fig, out_dir, filename, save_pdf=not transfer_variants)
     return filename
 
 
@@ -4604,11 +4653,11 @@ def generate_dataset_convergence(df, results_struct, out_dir, opt_order, args, e
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.legend(handles=result_line_legend(curve_opts, curve_color_map, curve_label_map, transfer_variants), loc="lower center", ncol=min(len(curve_opts), 6), fontsize=9)
     fig.tight_layout(rect=[0.0, 0.05, 1.0, 1.0])
-    _save_chart(fig, out_dir, filename)
+    _save_chart(fig, out_dir, filename, save_pdf=not transfer_variants)
     return filename
 
 
-def generate_transfer_function_charts(df, results_struct, out_dir, opt_order, args):
+def generate_transfer_function_charts(df, results_struct, out_dir, opt_order, args, *, blue_estimator="svm"):
     """Render the applicable FULL panels using only classifiers with saved results."""
     if df.empty:
         return []
@@ -4621,7 +4670,7 @@ def generate_transfer_function_charts(df, results_struct, out_dir, opt_order, ar
     chart = generate_classifier_metric_grid_chart(plot_df, out_dir, opt_order, transfer_variants=True)
     if chart:
         filename = "01_resultados_clasificador_todos_datasets.png"
-        _rename_chart_exports(out_dir, chart, filename)
+        _rename_chart_exports(out_dir, chart, filename, save_pdf=False)
         saved.append(filename)
     for estimator in sorted(plot_df["Estimator"].str.lower().unique()):
         sub = plot_df[plot_df["Estimator"].str.lower() == estimator]
@@ -4637,6 +4686,21 @@ def generate_transfer_function_charts(df, results_struct, out_dir, opt_order, ar
         filename = f"09_global_features_runtime_tradeoff_{estimator}.png"
         generate_global_features_runtime(sub, out_dir, opt_order, filename=filename, transfer_variants=True)
         saved.append(filename)
+    filename = "TransferFunctions_ClassificationMetrics_Blue.png"
+    generate_classifier_metric_grid_chart(
+        plot_df, out_dir, opt_order, blue_transfer=True, filename=filename,
+    )
+    saved.append(filename)
+    # The historical global tradeoff used SVM; allow the only saved classifier
+    # as a fallback without pooling classifier measurements.
+    estimators = plot_df["Estimator"].str.lower()
+    selected_estimator = blue_estimator.lower() if blue_estimator.lower() in set(estimators) else sorted(set(estimators))[0]
+    filename = "TransferFunctions_FeaturesRuntimeTradeoff_Blue.png"
+    generate_global_features_runtime(
+        plot_df[estimators == selected_estimator], out_dir, opt_order,
+        filename=filename, blue_transfer=True,
+    )
+    saved.append(filename)
     return saved
 
 
@@ -4894,8 +4958,13 @@ def generate_global_accuracy_boxplot(df, out_dir, opt_order):
         "08_global_accuracy_distribution.png"
     )
 
-def generate_global_features_runtime(df, out_dir, opt_order, filename="09_global_features_runtime_tradeoff.png", transfer_variants=False):
+def generate_global_features_runtime(df, out_dir, opt_order, filename="09_global_features_runtime_tradeoff.png", transfer_variants=False, *, blue_transfer=False):
 
+    if blue_transfer:
+        from historical_transfer_plots import TRADEOFF_FILENAME, render_features_runtime
+        if filename == "09_global_features_runtime_tradeoff.png":
+            filename = TRADEOFF_FILENAME
+        return render_features_runtime(df, out_dir, opt_order, filename)
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order, transfer_variants)
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict() if not plot_df.empty else {}
 
@@ -5010,15 +5079,19 @@ def generate_global_features_runtime(df, out_dir, opt_order, filename="09_global
     _save_chart(
         fig,
         out_dir,
-        filename
+        filename,
+        save_pdf=not transfer_variants,
     )
 
-def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: List[str], results_struct: Dict[str, Dict]):
+def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: List[str], results_struct: Dict[str, Dict], *, statistical_results: Optional[Dict[str, Dict]] = None):
     output_prefix = experiment_output_prefix(args)
     excel_path = os.path.join(paths.res_dir, f"{output_prefix}Global_Results_{paths.exp_tag}.xlsx")
     exported = export_global_excel(results_struct, dataset_names, excel_path)
     statistical_excel = os.path.join(paths.res_dir, f"{output_prefix}Statistical_Results_{paths.exp_tag}.xlsx")
-    export_statistical_excel(results_struct, dataset_names, list(args.optimizers), args, statistical_excel)
+    export_statistical_excel(
+        results_struct if statistical_results is None else statistical_results,
+        dataset_names, list(args.optimizers), args, statistical_excel,
+    )
     friedman_excel = None
     if args.experiment_mode in {"full", "ablation"}:
         mode_label = args.experiment_mode.capitalize()
@@ -5129,6 +5202,14 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
 
 def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str):
     results_struct = load_results_from_cache(paths, args, dataset_names, cache_sig)
+    if args.experiment_mode == "transfer_functions":
+        statistical_results = load_results_from_cache(
+            paths, args, dataset_names, cache_sig, preserve_classifier_labels=True,
+        )
+        return export_mode_outputs(
+            paths, args, dataset_names, results_struct,
+            statistical_results=statistical_results,
+        )
     return export_mode_outputs(paths, args, dataset_names, results_struct)
 
 def clone_args_for_mode(base_args: argparse.Namespace, mode: str) -> argparse.Namespace:

@@ -318,12 +318,15 @@ class SensitivityOptimizerTests(unittest.TestCase):
                 str(workbook),
             )
             accuracy = pd.read_excel(workbook, sheet_name="Accuracy", index_col=[0, 1])
-            expected_groups = {
+            expected_groups = [
                 f"{optimizer} | {args.sensitivity_parameter}={value:g}"
                 for optimizer in args.optimizers
                 for value in args.sensitivity_values
-            }
-            self.assertEqual(set(accuracy.index.get_level_values(0)), expected_groups)
+            ]
+            self.assertEqual(list(accuracy.columns), expected_groups)
+            self.assertEqual(list(accuracy.index), [
+                ("Synthetic", stat) for stat in ("Best", "Worst", "Mean", "Std")
+            ])
 
 
 if __name__ == "__main__":
