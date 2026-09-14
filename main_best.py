@@ -51,7 +51,7 @@ from optimizer_interceptor import Workload
 # EXPERIMENT CONFIGURATION
 # ============================================================
 
-DATASET_SOURCE = "mafese"
+DATASET_SOURCE = "codesmell"
 # Options:
 # "codesmell"
 # "mafese"
@@ -59,9 +59,9 @@ DATASET_SOURCE = "mafese"
 EXPERIMENT_MODES = [
     # "full",
     # "ablation",
-    # "sensitivity",
-    # "sensitivity_weights",
-    "transfer_functions",
+    "sensitivity",
+    "sensitivity_weights",
+    # "transfer_functions",
 ]
 # Options:
 # "full"
@@ -83,69 +83,61 @@ CODE_SMELL_DATASETS = None
 # ]
 
 ABLATION_DATASETS = [
-    "BreastCancer",
-    "Ionosphere",
-    "Tic-tac-toe",
-    "Wine",
-    "Zoo",
+    "FeatureEnvy",
+    "LongMethod",
+    "GodClass",
 ]
 
 SENSITIVITY_DATASETS = [
-    "BreastCancer",
-    "Ionosphere",
-    "Tic-tac-toe",
-    "Wine",
-    "Zoo",
+    "FeatureEnvy",
+    "LongMethod",
+    "GodClass",
 ]
 
 SENSITIVITY_WEIGHTS_DATASETS = [
-    "BreastCancer",
-    "Ionosphere",
-    "Tic-tac-toe",
-    "Wine",
-    "Zoo",
+    "FeatureEnvy",
+    "LongMethod",
+    "GodClass",
 ]
 
 TRANSFER_FUNCTION_DATASETS = [
-    "BreastCancer",
-    "Ionosphere",
-    "Tic-tac-toe",
-    "Wine",
-    "Zoo",
+    "FeatureEnvy",
+    "LongMethod",
+    "GodClass",
 ]
 
 MAFESE_DATASET_SUITE = "test14"
 
 OPTIMIZERS = [
     # "MaCRO-DE",
-    # "DSADE",
-    # "DE",
-    # "JADE",
-    # "SHADE",
-    # "PSO",
-    # "WOA",
-    # "HHO",
-    # "GOA",
-    # "SA",
-    # "BRO",
-    # "RUN",
-    # "FOX",
+    "DSADE",
+    "DE",
+    "JADE",
+    "SHADE",
+    "PSO",
+    "WOA",
+    "HHO",
+    "GOA",
+    "SA",
+    "BRO",
+    "RUN",
+    "FOX",
     # "DSADE",
     # MaCRO-DE Corrections
-    "MaCRO-DE",
-    "BRO",
-    "DBO",
-    "DE",
-    "DMOA",
-    "GWO",
-    "HHO",
-    "MFO",
-    "MGO",
-    "PSO",
-    "SHADE",
-    "WOA",
-    "JADE",
-    "FLA",
+    # "MaCRO-DE",
+    # "BRO",
+    # "DBO",
+    # "DE",
+    # "DMOA",
+    # "GWO",
+    # "HHO",
+    # "MFO",
+    # "MGO",
+    # "PSO",
+    # "SHADE",
+    # "WOA",
+    # "JADE",
+    # "FLA",
 ]
 
 ABLATION_OPTIMIZERS = [
@@ -241,8 +233,8 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 626
-REUSE_CACHE_FROM_EXP_ID = 626
+EXP_ID = 628
+REUSE_CACHE_FROM_EXP_ID = 628
 # None -> do not search another experiment.
 #
 # Example:
@@ -253,7 +245,7 @@ RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = True
-FIGURES_ONLY = True
+FIGURES_ONLY = False
 COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
@@ -272,8 +264,8 @@ DSADE_PCR = 0.10
 DSADE_MAHAL_Q = 0.50
 
 SENSITIVITY_OPTIMIZERS = [
-    # "DSA-DE",
-    "MaCRO-DE",
+    "DSA-DE",
+    # "MaCRO-DE",
 ]
 
 SENSITIVITY_CONFIGS = [
@@ -296,8 +288,8 @@ DEFAULT_FITNESS_ALPHA = 0.90
 DEFAULT_FITNESS_BETA = 0.10
 
 SENSITIVITY_WEIGHTS_OPTIMIZERS = [
-    # "DSA-DE",
-    "MaCRO-DE",
+    "DSA-DE",
+    # "MaCRO-DE",
 ]
 
 SENSITIVITY_WEIGHT_PAIRS = [
@@ -309,7 +301,8 @@ SENSITIVITY_WEIGHT_PAIRS = [
 ]
 
 TRANSFER_FUNCTION_OPTIMIZERS = [
-    "MaCRO-DE",
+    "DSA-DE",
+    # "MaCRO-DE",
 ]
 
 TRANSFER_FUNCTION_ESTIMATORS = [
@@ -3014,39 +3007,33 @@ def _save_chart(fig, out_dir: str, filename: str, *, save_pdf=True):
     _save_figure(fig, path, save_pdf=save_pdf, bbox_inches="tight")
     plt.close(fig)
 
-def generate_ablation_main_figure(df: pd.DataFrame, out_dir: str, opt_order: List[str]) -> Optional[str]:
+def generate_ablation_main_figure(df: pd.DataFrame, out_dir: str, opt_order: List[str]) -> List[str]:
     if df.empty:
-        return None
+        return []
 
     plot_df = df.copy()
     plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
     plot_df, opts, color_map, label_map = prepare_plot_groups(plot_df, opt_order)
     if not opts:
-        return None
+        return []
 
     estimators = [est for est in ESTIMATORS if est in set(plot_df["Estimator"])]
     estimators += sorted(est for est in plot_df["Estimator"].dropna().unique() if est not in set(estimators))
     if not estimators:
-        return None
+        return []
 
     display_labels = dict(label_map)
     if "DSADE" in display_labels:
         display_labels["DSADE"] = "DSA-DE"
     grouped = plot_df.groupby(["Estimator", "PlotGroup"])[["F1_test", "N_Features_Selected"]].mean()
-    n_cols = min(3, len(estimators))
-    n_rows = int(np.ceil(len(estimators) / n_cols))
-    fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(max(13, 4.8 * n_cols), max(5, 4.3 * n_rows)),
-        squeeze=False,
-        facecolor="white",
-    )
+    saved = []
     x = np.arange(len(opts))
     colors = [color_map.get(opt, "#888888") for opt in opts]
 
-    for idx, estimator in enumerate(estimators):
-        ax1 = axes[idx // n_cols, idx % n_cols]
+    for estimator in estimators:
+        if not np.isfinite(grouped.loc[estimator].to_numpy(dtype=float)).any():
+            continue
+        fig, ax1 = plt.subplots(figsize=(6, 5), facecolor="white")
         f1_vals = [
             float(grouped.loc[(estimator, opt), "F1_test"])
             if (estimator, opt) in grouped.index
@@ -3094,14 +3081,13 @@ def generate_ablation_main_figure(df: pd.DataFrame, out_dir: str, opt_order: Lis
         ax1.set_ylim(0.0, 1.05)
         ax1.grid(axis="y", alpha=0.25)
 
-    for idx in range(len(estimators), n_rows * n_cols):
-        axes[idx // n_cols, idx % n_cols].axis("off")
+        fig.suptitle("Ablation Study: F1-score and Selected Features", fontsize=14, fontweight="bold")
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        filename = f"ablation_main_f1_features_{estimator.upper()}.png"
+        _save_chart(fig, out_dir, filename, save_pdf=False)
+        saved.append(filename)
+    return saved
 
-    fig.suptitle("Ablation Study: F1-score and Selected Features", fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
-    filename = "ablation_main_f1_features.png"
-    _save_chart(fig, out_dir, filename)
-    return filename
 
 def _ablation_figure_metadata():
     optimizer_order = optimizer_order_from_config(ABLATION_OPTIMIZERS)
@@ -3124,52 +3110,45 @@ def generate_ablation_classification_metrics_figure(
     results_struct: Dict[str, Dict],
     out_dir: str,
     args: argparse.Namespace,
-) -> Optional[str]:
+) -> List[str]:
     alg_data = results_struct.get(dataset_name, {})
     if not alg_data:
-        return None
+        return []
 
     optimizer_order, display_labels, _ = _ablation_figure_metadata()
-    estimator_order = ["knn", "svm", "rf"]
     metric_fields = ["AccRuns", "PSRuns", "RSRuns", "F1Runs"]
     metric_labels = ["Accuracy", "Precision", "Recall", "F1"]
-    values = {
-        (estimator, optimizer, field): []
-        for estimator in estimator_order
-        for optimizer in optimizer_order
-        for field in metric_fields
-    }
+    values = {}
     for label, row in alg_data.items():
         parsed = parse_result_label(label, args)
         estimator = str(parsed["estimator"] or row.get("Estimator", "")).lower()
         optimizer = optimizer_acronym(parsed["method"])
-        if estimator not in estimator_order or optimizer not in optimizer_order:
+        if not estimator or optimizer not in optimizer_order:
             continue
         for field in metric_fields:
             run_values = np.asarray(row.get(field, []), dtype=float).ravel()
             run_values = run_values[np.isfinite(run_values)]
             if field == "AccRuns":
                 run_values = run_values / 100.0
-            values[(estimator, optimizer, field)].extend(run_values.tolist())
+            values.setdefault((estimator, optimizer, field), []).extend(run_values.tolist())
 
     if not any(values.values()):
-        return None
+        return []
 
     metric_colors = muted_color_palette(len(metric_fields))
     x = np.arange(len(optimizer_order), dtype=float)
     width = 0.19
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.8), sharey=True, facecolor="white")
-    panel_labels = ["(a) KNN", "(b) SVM", "(c) RF"]
-    for panel_idx, (ax, estimator) in enumerate(zip(axes, estimator_order)):
-        has_data = False
+    saved = []
+    estimator_order = sorted({est for (est, _, _), runs in values.items() if runs})
+    for estimator in estimator_order:
+        fig, ax = plt.subplots(figsize=(6, 5.8), facecolor="white")
         for metric_idx, (field, metric_label) in enumerate(zip(metric_fields, metric_labels)):
             means = []
             errors = []
             for optimizer in optimizer_order:
-                run_values = np.asarray(values[(estimator, optimizer, field)], dtype=float)
+                run_values = np.asarray(values.get((estimator, optimizer, field), []), dtype=float)
                 means.append(float(np.mean(run_values)) if run_values.size else np.nan)
                 errors.append(float(np.std(run_values, ddof=1)) if run_values.size > 1 else 0.0)
-                has_data = has_data or bool(run_values.size)
             offsets = x + (metric_idx - 1.5) * width
             bars = ax.bar(
                 offsets,
@@ -3188,9 +3167,7 @@ def generate_ablation_classification_metrics_figure(
             if dsade_idx >= 0:
                 bars[dsade_idx].set_edgecolor("black")
                 bars[dsade_idx].set_linewidth(1.3)
-        if not has_data:
-            ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center", color="#777777")
-        ax.set_title(panel_labels[panel_idx], fontsize=12, fontweight="bold")
+        ax.set_title(estimator.upper(), fontsize=12, fontweight="bold")
         ax.set_xticks(x)
         ax.set_xticklabels(
             [display_labels.get(opt, opt) for opt in optimizer_order],
@@ -3201,15 +3178,17 @@ def generate_ablation_classification_metrics_figure(
         ax.set_ylim(0.0, 1.08)
         ax.grid(axis="y", alpha=0.25)
         ax.set_axisbelow(True)
-    axes[0].set_ylabel("Mean classification metric")
-    axes[1].set_xlabel("Ablation variant")
-    handles, legend_labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels, loc="lower center", ncol=4, frameon=False)
-    fig.suptitle(f"Ablation Classification Metrics — {dataset_name}", fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=(0, 0.09, 1, 0.94))
-    filename = f"Ablation_Classification_Metrics_{dataset_name}.png"
-    _save_chart(fig, out_dir, filename)
-    return filename
+        ax.set_ylabel("Mean classification metric")
+        ax.set_xlabel("Ablation variant")
+        handles, legend_labels = ax.get_legend_handles_labels()
+        fig.legend(handles, legend_labels, loc="lower center", ncol=4, frameon=False)
+        fig.suptitle(f"Ablation Classification Metrics — {dataset_name}", fontsize=14, fontweight="bold")
+        fig.tight_layout(rect=(0, 0.09, 1, 0.94))
+        filename = f"Ablation_Classification_Metrics_{dataset_name}_{estimator.upper()}.png"
+        _save_chart(fig, out_dir, filename, save_pdf=False)
+        saved.append(filename)
+    return saved
+
 
 def _bbox_overlap_area(first, second) -> float:
     overlap_width = max(0.0, min(first.x1, second.x1) - max(first.x0, second.x0))
@@ -3326,21 +3305,19 @@ def generate_ablation_accuracy_features_tradeoff(
     dataset_name: str,
     summary_df: pd.DataFrame,
     out_dir: str,
-) -> Optional[str]:
+) -> List[str]:
     plot_df = summary_df[summary_df["Dataset"] == dataset_name].copy()
     if plot_df.empty:
-        return None
+        return []
 
     optimizer_order, display_labels, color_map = _ablation_figure_metadata()
-    estimator_order = ["knn", "svm", "rf"]
     plot_df["Estimator"] = plot_df["Estimator"].astype(str).str.lower()
     plot_df = plot_df[plot_df["Optimizer"].isin(optimizer_order)]
     grouped = plot_df.groupby(["Estimator", "Optimizer"])[["N_Features_Selected", "AS_test"]].mean()
     if grouped.empty:
-        return None
+        return []
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.8), sharex=True, sharey=True, facecolor="white")
-    panel_labels = ["(a) KNN", "(b) SVM", "(c) RF"]
+    saved = []
     all_features = grouped["N_Features_Selected"].to_numpy(dtype=float)
     finite_features = all_features[np.isfinite(all_features)]
     all_accuracy = grouped["AS_test"].to_numpy(dtype=float)
@@ -3357,8 +3334,11 @@ def generate_ablation_accuracy_features_tradeoff(
         y_max = min(1.05, float(np.max(finite_accuracy)) + 0.06)
     else:
         y_min, y_max = 0.0, 1.05
-    for panel_idx, (ax, estimator) in enumerate(zip(axes, estimator_order)):
-        has_data = False
+    estimator_order = sorted(set(grouped.index.get_level_values("Estimator")))
+    for estimator in estimator_order:
+        if not np.isfinite(grouped.loc[estimator].to_numpy(dtype=float)).all(axis=1).any():
+            continue
+        fig, ax = plt.subplots(figsize=(6, 5.8), facecolor="white")
         point_labels = []
         for optimizer in optimizer_order:
             key = (estimator, optimizer)
@@ -3382,9 +3362,6 @@ def generate_ablation_accuracy_features_tradeoff(
             point_labels.append(
                 (x_value, y_value, display_labels.get(optimizer, optimizer))
             )
-            has_data = True
-        if not has_data:
-            ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center", color="#777777")
         ax.text(
             0.03,
             0.96,
@@ -3395,19 +3372,21 @@ def generate_ablation_accuracy_features_tradeoff(
             fontsize=9,
             color="#315f45",
         )
-        ax.set_title(panel_labels[panel_idx], fontsize=12, fontweight="bold")
+        ax.set_title(estimator.upper(), fontsize=12, fontweight="bold")
         ax.set_xlim(x_min, x_max)
         ax.set_ylim(y_min, y_max)
         ax.grid(alpha=0.25)
         ax.set_axisbelow(True)
         _place_ablation_optimizer_labels(ax, point_labels)
-    axes[0].set_ylabel("Mean Accuracy")
-    axes[1].set_xlabel("Mean number of selected features")
-    fig.suptitle(f"Ablation Accuracy–Features Trade-off — {dataset_name}", fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-    filename = f"Ablation_Accuracy_Features_Tradeoff_{dataset_name}.png"
-    _save_chart(fig, out_dir, filename)
-    return filename
+        ax.set_ylabel("Mean Accuracy")
+        ax.set_xlabel("Mean number of selected features")
+        fig.suptitle(f"Ablation Accuracy–Features Trade-off — {dataset_name}", fontsize=14, fontweight="bold")
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        filename = f"Ablation_Accuracy_Features_Tradeoff_{dataset_name}_{estimator.upper()}.png"
+        _save_chart(fig, out_dir, filename, save_pdf=False)
+        saved.append(filename)
+    return saved
+
 
 def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argparse.Namespace) -> Optional[str]:
     if df.empty:
@@ -3500,29 +3479,30 @@ def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argpa
             for bar, value in zip(f1_bars, f1_vals):
                 if not np.isfinite(value):
                     continue
-                near_top = value >= 0.98
-                ax1.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    value - 0.018 if near_top else value + 0.006,
+                ax1.annotate(
                     f"{value:.3f}",
+                    xy=(bar.get_x() + bar.get_width() / 2, value),
+                    xytext=(0, 4),
+                    textcoords="offset points",
                     ha="center",
-                    va="top" if near_top else "bottom",
+                    va="bottom",
                     fontsize=7 if len(optimizer_order) > 1 else 8,
-                    rotation=90,
+                    rotation=0,
                     clip_on=True,
                     zorder=5,
                 )
             if feature_annotations_are_readable:
                 for bar, value in zip(feature_bars, feat_vals):
                     if np.isfinite(value):
-                        ax2.text(
-                            bar.get_x() + bar.get_width() / 2,
-                            value,
+                        ax2.annotate(
                             f"{value:.1f}",
+                            xy=(bar.get_x() + bar.get_width() / 2, value),
+                            xytext=(0, 4),
+                            textcoords="offset points",
                             ha="center",
                             va="bottom",
                             fontsize=7,
-                            rotation=90,
+                            rotation=0,
                             clip_on=True,
                             zorder=5,
                         )
@@ -3589,7 +3569,7 @@ def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argpa
     )
     fig.tight_layout(rect=(0, 0.08, 1, 0.95))
     filename = f"sensitivity_{args.sensitivity_parameter}_f1_features.png"
-    _save_chart(fig, out_dir, filename)
+    _save_chart(fig, out_dir, filename, save_pdf=False)
     return filename
 
 
@@ -3655,14 +3635,16 @@ def generate_sensitivity_dataset_figures(
     )[[metric_column]].mean()
     x = np.arange(len(value_order), dtype=float)
     width = 0.78 / len(dataset_order)
-    colors = muted_color_palette(len(dataset_order))
+    # Anchor colors to the complete dataset list, even when a chart has missing data.
+    dataset_colors = dict(zip(
+        SENSITIVITY_DATASETS, muted_color_palette(len(SENSITIVITY_DATASETS))
+    ))
     filenames = []
 
     for optimizer in optimizer_order:
         fig, ax1 = plt.subplots(figsize=(10.5, 6.2), facecolor="white")
-        for dataset_idx, (dataset, color) in enumerate(
-            zip(dataset_order, colors)
-        ):
+        for dataset_idx, dataset in enumerate(dataset_order):
+            color = dataset_colors[dataset]
             keys = [(optimizer, dataset, value) for value in value_order]
             metric_values = [
                 float(grouped.loc[key, metric_column])
@@ -3670,7 +3652,7 @@ def generate_sensitivity_dataset_figures(
                 for key in keys
             ]
             positions = x + (dataset_idx - (len(dataset_order) - 1) / 2.0) * width
-            ax1.bar(
+            bars = ax1.bar(
                 positions,
                 metric_values,
                 width=width * 0.92,
@@ -3680,6 +3662,22 @@ def generate_sensitivity_dataset_figures(
                 label=dataset,
                 zorder=3,
             )
+            if metric_key == "accuracy":
+                for bar, value in zip(bars, metric_values):
+                    if not np.isfinite(value):
+                        continue
+                    ax1.annotate(
+                        f"{value:.3f}",
+                        xy=(bar.get_x() + bar.get_width() / 2, value),
+                        xytext=(0, 4),
+                        textcoords="offset points",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        rotation=0,
+                        clip_on=True,
+                        zorder=5,
+                    )
 
         ax1.set_xticks(x)
         ax1.set_xticklabels([f"{value:g}" for value in value_order])
@@ -3713,7 +3711,7 @@ def generate_sensitivity_dataset_figures(
             f"Sensitivity_dataset_{optimizer_token}_"
             f"{args.sensitivity_parameter}_{metric_key}.png"
         )
-        _save_chart(fig, out_dir, filename)
+        _save_chart(fig, out_dir, filename, save_pdf=False)
         filenames.append(filename)
 
     return filenames
@@ -3831,7 +3829,7 @@ def generate_weight_sensitivity_main_figure(
         filename = (
             f"SensitivityWeights_AlphaBeta_{dataset_name}_{selected_optimizer}.png"
         )
-    _save_chart(fig, out_dir, filename)
+    _save_chart(fig, out_dir, filename, save_pdf=False)
     return filename
 
 
@@ -4040,7 +4038,7 @@ def generate_weight_sensitivity_dual_bars_figure(
     filename = _weight_sensitivity_companion_filename(
         dataset_name, "DualBars", selected_optimizer, optimizer_name
     )
-    _save_chart(fig, out_dir, filename)
+    _save_chart(fig, out_dir, filename, save_pdf=False)
     return filename
 
 
@@ -4123,11 +4121,11 @@ def generate_weight_sensitivity_separated_panels_figure(
     filename = _weight_sensitivity_companion_filename(
         dataset_name, "SeparatedPanels", selected_optimizer, optimizer_name
     )
-    _save_chart(fig, out_dir, filename)
+    _save_chart(fig, out_dir, filename, save_pdf=False)
     return filename
 
 
-def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str], transfer_variants: bool = False, *, blue_transfer: bool = False, filename="09_resultados_clasificador_metrica_todos_datasets.png"):
+def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str], transfer_variants: bool = False, *, blue_transfer: bool = False, filename="09_resultados_clasificador_metrica_todos_datasets.png", save_pdf=True, available_estimators_only=False):
     if blue_transfer:
         from historical_transfer_plots import METRICS_FILENAME, render_classifier_metric_grid
         if filename == "09_resultados_clasificador_metrica_todos_datasets.png":
@@ -4153,7 +4151,7 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
     ]
 
     present_estimators = [str(e).lower() for e in plot_df["Estimator"].dropna().unique()]
-    required_estimators = [] if transfer_variants else [e for e in ESTIMATORS if e in SUPPORTED_ESTIMATORS]
+    required_estimators = [] if transfer_variants or available_estimators_only else [e for e in ESTIMATORS if e in SUPPORTED_ESTIMATORS]
     estimators = [e for e in SUPPORTED_ESTIMATORS if e in set(required_estimators + present_estimators)]
     estimators += sorted(e for e in present_estimators if e not in set(estimators))
     if not estimators:
@@ -4236,7 +4234,7 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
     legend = _plot_legend_patches(opts, color_map, label_map)
     fig.legend(handles=legend, loc="lower center", ncol=min(len(legend), 6), fontsize=9, framealpha=0.95)
     fig.tight_layout(rect=[0.0, 0.04, 1.0, 1.0])
-    _save_chart(fig, out_dir, filename, save_pdf=not transfer_variants)
+    _save_chart(fig, out_dir, filename, save_pdf=save_pdf and not transfer_variants)
     return filename
 
 
@@ -4536,7 +4534,7 @@ def result_line_legend(opts, color_map, label_map, transfer_variants=False):
     return _plot_legend_patches(opts, color_map, label_map)
 
 
-def generate_dataset_radar(df, out_dir, opt_order, filename="02_radar_por_dataset_knn.png", transfer_variants=False):
+def generate_dataset_radar(df, out_dir, opt_order, filename="02_radar_por_dataset_knn.png", transfer_variants=False, save_pdf=True):
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order, transfer_variants)
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
     datasets = sorted(plot_df["Dataset"].dropna().unique())
@@ -4593,12 +4591,12 @@ def generate_dataset_radar(df, out_dir, opt_order, filename="02_radar_por_datase
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.legend(handles=result_line_legend(opts, color_map, label_map, transfer_variants), loc="lower center", ncol=min(len(opts), 6), fontsize=9)
     fig.tight_layout(rect=[0.0, 0.05, 1.0, 1.0])
-    _save_chart(fig, out_dir, filename, save_pdf=not transfer_variants)
+    _save_chart(fig, out_dir, filename, save_pdf=save_pdf and not transfer_variants)
     return filename
 
 
 def generate_dataset_convergence(df, results_struct, out_dir, opt_order, args, estimator_filter,
-                                 filename="05_convergence_por_dataset_knn.png", transfer_variants=False):
+                                 filename="05_convergence_por_dataset_knn.png", transfer_variants=False, save_pdf=True):
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order, transfer_variants)
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
     datasets = sorted(plot_df["Dataset"].dropna().unique())
@@ -4653,7 +4651,7 @@ def generate_dataset_convergence(df, results_struct, out_dir, opt_order, args, e
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.legend(handles=result_line_legend(curve_opts, curve_color_map, curve_label_map, transfer_variants), loc="lower center", ncol=min(len(curve_opts), 6), fontsize=9)
     fig.tight_layout(rect=[0.0, 0.05, 1.0, 1.0])
-    _save_chart(fig, out_dir, filename, save_pdf=not transfer_variants)
+    _save_chart(fig, out_dir, filename, save_pdf=save_pdf and not transfer_variants)
     return filename
 
 
@@ -4704,6 +4702,30 @@ def generate_transfer_function_charts(df, results_struct, out_dir, opt_order, ar
     return saved
 
 
+def generate_ablation_global_charts(df, results_struct, out_dir, opt_order, args):
+    saved = []
+    if df.empty:
+        return saved
+    estimators = df["Estimator"].astype("string").str.lower()
+    for estimator in sorted(estimators.dropna().unique()):
+        estimator_df = df[estimators == estimator].copy()
+        metrics = estimator_df[["AS_test", "PS_test", "RS_test", "F1_test"]]
+        if not np.isfinite(metrics.to_numpy(dtype=float)).any():
+            continue
+        charts = generate_seven_global_charts(
+            estimator_df, results_struct, out_dir, opt_order, args,
+            estimator_filter=estimator, save_pdf=False,
+        )
+        for chart in charts:
+            if not chart:
+                continue
+            stem = Path(chart).stem.removesuffix("_knn")
+            filename = f"{stem}_{estimator.upper()}.png"
+            _rename_chart_exports(out_dir, chart, filename, save_pdf=False)
+            saved.append(filename)
+    return saved
+
+
 def generate_seven_global_charts(
     df: pd.DataFrame,
     results_struct: Dict[str, Dict],
@@ -4711,16 +4733,20 @@ def generate_seven_global_charts(
     opt_order: List[str],
     args: argparse.Namespace,
     estimator_filter: str = "svm", # Change here for knn
+    save_pdf=True,
 ):
     if df.empty:
         return []
     os.makedirs(out_dir, exist_ok=True)
     saved = []
 
-    chart1 = generate_classifier_metric_grid_chart(df, out_dir, opt_order)
+    chart1 = generate_classifier_metric_grid_chart(
+        df, out_dir, opt_order, save_pdf=save_pdf,
+        available_estimators_only=args.experiment_mode == "ablation",
+    )
     if chart1:
         new_chart1 = "01_resultados_clasificador_todos_datasets.png"
-        _rename_chart_exports(out_dir, chart1, new_chart1)
+        _rename_chart_exports(out_dir, chart1, new_chart1, save_pdf=save_pdf)
         saved.append(new_chart1)
 
     knn_df = df[df["Estimator"].astype(str).str.lower() == estimator_filter.lower()].copy()
@@ -4733,7 +4759,7 @@ def generate_seven_global_charts(
     datasets = sorted(plot_df["Dataset"].dropna().unique())
     n_rows, n_cols = _grid_shape(len(datasets))
 
-    saved.append(generate_dataset_radar(plot_df, out_dir, opt_order))
+    saved.append(generate_dataset_radar(plot_df, out_dir, opt_order, save_pdf=save_pdf))
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.6 * n_rows), squeeze=False)
     for idx, dataset in enumerate(datasets):
@@ -4759,7 +4785,7 @@ def generate_seven_global_charts(
     for idx in range(len(datasets), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.tight_layout(rect=[0.0, 0.02, 1.0, 1.0])
-    _save_chart(fig, out_dir, "03_features_runtime_por_dataset_knn.png")
+    _save_chart(fig, out_dir, "03_features_runtime_por_dataset_knn.png", save_pdf=save_pdf)
     saved.append("03_features_runtime_por_dataset_knn.png")
 
     run_df = build_run_level_dataframe(results_struct, args, estimator_filter)
@@ -4785,11 +4811,11 @@ def generate_seven_global_charts(
     for idx in range(len(datasets), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.tight_layout(rect=[0.0, 0.02, 1.0, 1.0])
-    _save_chart(fig, out_dir, "04_boxplot_accuracy_por_dataset_knn.png")
+    _save_chart(fig, out_dir, "04_boxplot_accuracy_por_dataset_knn.png", save_pdf=save_pdf)
     saved.append("04_boxplot_accuracy_por_dataset_knn.png")
 
     saved.append(generate_dataset_convergence(
-        plot_df, results_struct, out_dir, opt_order, args, estimator_filter
+        plot_df, results_struct, out_dir, opt_order, args, estimator_filter, save_pdf=save_pdf
     ))
 
     pivot = plot_df.groupby(["PlotGroup", "Dataset"])["F1_test"].mean().unstack()
@@ -4827,7 +4853,7 @@ def generate_seven_global_charts(
             if np.isfinite(value):
                 ax.text(j, i, f"{value:.4f}", ha="center", va="center", color="white" if value > 0.80 else "#222", fontsize=8)
     fig.tight_layout()
-    _save_chart(fig, out_dir, "06_heatmap_f1_knn.png")
+    _save_chart(fig, out_dir, "06_heatmap_f1_knn.png", save_pdf=save_pdf)
     saved.append("06_heatmap_f1_knn.png")
 
     data_violin = [run_plot_df[run_plot_df["PlotGroup"] == opt]["RS_test"].dropna().values for opt in run_opts]
@@ -4872,25 +4898,27 @@ def generate_seven_global_charts(
         framealpha=0.9,
     )
     fig.tight_layout()
-    _save_chart(fig, out_dir, "07_violin_recall_knn.png")
+    _save_chart(fig, out_dir, "07_violin_recall_knn.png", save_pdf=save_pdf)
     saved.append("07_violin_recall_knn.png")
 
     generate_global_accuracy_boxplot(
         run_plot_df,
         out_dir,
-        opt_order
+        opt_order,
+        save_pdf=save_pdf,
     )
     saved.append("08_global_accuracy_distribution.png")
 
     generate_global_features_runtime(
         plot_df,
         out_dir,
-        opt_order
+        opt_order,
+        save_pdf=save_pdf,
     )
     saved.append("09_global_features_runtime_tradeoff.png")
     return saved
 
-def generate_global_accuracy_boxplot(df, out_dir, opt_order):
+def generate_global_accuracy_boxplot(df, out_dir, opt_order, save_pdf=True):
 
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict() if not plot_df.empty else {}
@@ -4955,10 +4983,11 @@ def generate_global_accuracy_boxplot(df, out_dir, opt_order):
     _save_chart(
         fig,
         out_dir,
-        "08_global_accuracy_distribution.png"
+        "08_global_accuracy_distribution.png",
+        save_pdf=save_pdf,
     )
 
-def generate_global_features_runtime(df, out_dir, opt_order, filename="09_global_features_runtime_tradeoff.png", transfer_variants=False, *, blue_transfer=False):
+def generate_global_features_runtime(df, out_dir, opt_order, filename="09_global_features_runtime_tradeoff.png", transfer_variants=False, *, blue_transfer=False, save_pdf=True):
 
     if blue_transfer:
         from historical_transfer_plots import TRADEOFF_FILENAME, render_features_runtime
@@ -5080,7 +5109,7 @@ def generate_global_features_runtime(df, out_dir, opt_order, filename="09_global
         fig,
         out_dir,
         filename,
-        save_pdf=not transfer_variants,
+        save_pdf=save_pdf and not transfer_variants,
     )
 
 def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: List[str], results_struct: Dict[str, Dict], *, statistical_results: Optional[Dict[str, Dict]] = None):
@@ -5171,7 +5200,9 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
                         if companion_chart:
                             generated_charts.append(companion_chart)
     else:
-        generated_charts = generate_seven_global_charts(
+        global_generator = (generate_ablation_global_charts
+                            if args.experiment_mode == "ablation" else generate_seven_global_charts)
+        generated_charts = global_generator(
             summary_df,
             results_struct,
             paths.fig_dir,
@@ -5181,7 +5212,7 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
         if args.experiment_mode == "ablation":
             ablation_chart = generate_ablation_main_figure(summary_df, paths.fig_dir, list(args.optimizers))
             if ablation_chart:
-                generated_charts.append(ablation_chart)
+                generated_charts.extend(ablation_chart)
             for dataset_name in dataset_names:
                 metrics_chart = generate_ablation_classification_metrics_figure(
                     dataset_name,
@@ -5190,14 +5221,14 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
                     args,
                 )
                 if metrics_chart:
-                    generated_charts.append(metrics_chart)
+                    generated_charts.extend(metrics_chart)
                 tradeoff_chart = generate_ablation_accuracy_features_tradeoff(
                     dataset_name,
                     summary_df,
                     paths.fig_dir,
                 )
                 if tradeoff_chart:
-                    generated_charts.append(tradeoff_chart)
+                    generated_charts.extend(tradeoff_chart)
     return exported, summary_csv, generated_charts, statistical_excel, friedman_excel
 
 def regenerate_figures_from_cache(paths: Paths, args: argparse.Namespace, dataset_names: List[str], cache_sig: str):

@@ -15,7 +15,7 @@ class VisualizationTests(unittest.TestCase):
     def _capture_chart(function, *args):
         captured = {}
 
-        def capture(fig, out_dir, filename):
+        def capture(fig, out_dir, filename, **kwargs):
             captured["fig"] = fig
             captured["filename"] = filename
 
@@ -47,7 +47,9 @@ class VisualizationTests(unittest.TestCase):
                 summary,
                 tmp,
             )
-        self.assertEqual(filename, captured_filename)
+        self.assertEqual(len(filename), 3)
+        self.assertEqual(filename[-1], captured_filename)
+        self.assertEqual(len(fig.axes), 1)
         pd.testing.assert_frame_equal(summary, original)
 
         fig.canvas.draw()
