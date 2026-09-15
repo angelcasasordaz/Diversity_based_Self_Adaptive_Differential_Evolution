@@ -247,7 +247,7 @@ RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = True
-FIGURES_ONLY = True
+FIGURES_ONLY = False
 COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
