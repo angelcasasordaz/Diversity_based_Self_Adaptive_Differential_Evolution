@@ -250,6 +250,13 @@ class DiversityMathBatcher:
     def effective_device(self) -> str:
         return "gpu" if self.remote is not None else self.backend.device
 
+    def macro_de_t_covariance(self, operation, *args):
+        """Dispatch the independent CEC kernels without changing existing kernels."""
+        if self.remote is not None:
+            return self.remote.call("macro_de_t_covariance", operation, *args)
+        from macro_de_t_backend import CECCovarianceKernels
+        return getattr(CECCovarianceKernels(self.backend), operation)(*args)
+
     def awad(self, population, lb=None, ub=None) -> float:
         """Match the existing AWAD definition; bounds are intentionally unused."""
         global _LOCAL_FIRST_KERNEL

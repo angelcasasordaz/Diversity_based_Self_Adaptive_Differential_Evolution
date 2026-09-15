@@ -103,7 +103,10 @@ class SensitivityWeightsTests(unittest.TestCase):
                 study.apply_experiment_mode(args)
                 self.assertEqual(args.optimizers, optimizers)
                 self.assertEqual((args.fitness_alpha, args.fitness_beta), (0.90, 0.10))
-                self.assertEqual(study.build_cache_signature(args), legacy_cache_signature(args))
+                if any(study.resolve_optimizer_name(name) == "DSADE" for name in args.optimizers):
+                    self.assertNotEqual(study.build_cache_signature(args), legacy_cache_signature(args))
+                else:
+                    self.assertEqual(study.build_cache_signature(args), legacy_cache_signature(args))
 
     def test_weight_mode_uses_only_proposed_optimizer_and_exact_pairs(self):
         args = make_args("sensitivity_weights")

@@ -44,7 +44,7 @@ def optimizer_display_label(name: str) -> str:
     return optimizer_acronym(str(name))
 
 def is_exact_dsade_method(name: str) -> bool:
-    return str(name).upper() in {"DSA-DE", "DSADE"}
+    return str(name).strip().upper() in {"DSA-DE", "DSADE", "DSA_DE"}
 
 def is_dsade_plot_group(opt: str, method_by_group: Optional[Dict[str, str]] = None) -> bool:
     method = method_by_group.get(opt, opt) if method_by_group else opt

@@ -156,3 +156,22 @@ def list_available_optimizers() -> str:
     lines = [f"{display:<{width}} -> {name}" for display, name in rows]
     lines.extend(("", "Custom:", *CUSTOM_ADAPTERS.keys()))
     return "\n".join(lines)
+
+
+def optimizer_scientific_identity(name: str, settings: Any) -> dict[str, Any]:
+    """Revisioned scientific identity for explicitly versioned project optimizers."""
+    resolved = resolve_optimizer(name)
+    revision = getattr(resolved.optimizer_class, "IMPLEMENTATION_REVISION", None)
+    if revision is None:
+        return {}
+    parameters = _constructor_kwargs(resolved, settings)
+    signature = inspect.signature(resolved.optimizer_class.__init__)
+    return {
+        "canonical_name": resolved.canonical_name,
+        "implementation_revision": revision,
+        "parameters": {
+            key: parameters.get(key, signature.parameters[key].default)
+            for key in getattr(resolved.optimizer_class, "SCIENTIFIC_PARAMETERS",
+                               ("epoch", "pop_size", "wf", "cr", "mahalanobis_q"))
+        },
+    }

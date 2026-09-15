@@ -51,7 +51,7 @@ class DE_DiversitySelection(Optimizer):
     def local_awad_contribution(self, candidate_pos, base_pop_pos):
         """
         Estimate one candidate's local AWAD contribution in the same population
-        context used by DSADE_AWAD. The caller removes the compared parent from
+        context used by canonical DSA-DE. The caller removes the compared parent from
         base_pop_pos so the parent and offspring are scored under one context.
         """
         candidate_pos = np.asarray(candidate_pos, dtype=float)

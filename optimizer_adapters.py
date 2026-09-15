@@ -26,9 +26,9 @@ from dbo_optimizer import DBOOptimizer
 from de_awad_optimizer import DE_AWAD
 from de_diversity_selection_optimizer import DE_DiversitySelection
 from de_mahalanobis_optimizer import DE_Mahalanobis
-from dsade_optimizer import DSADE
-from dsade_awad_optimizer import DSADE_AWAD
+from dsade_awad_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
+from macro_de_t_optimizer import MaCRO_DE_t
 from diversity_gpu_batching import DiversityMathBatcher
 
 
@@ -227,9 +227,17 @@ _CUSTOM = (
     OptimizerAdapter("BRO", GPUOriginalBRO, ("OriginalBRO",), "GENERIC_GPU", _GPU_REASON, MEALPY_GPU_PARAMETERS),
     OptimizerAdapter("RUN", GPUOriginalRUN, ("OriginalRUN",), "GENERIC_GPU", _GPU_REASON, MEALPY_GPU_PARAMETERS),
     OptimizerAdapter("FOX", GPUOriginalFOX, ("OriginalFOX",), "GENERIC_GPU", _GPU_REASON, MEALPY_GPU_PARAMETERS),
+    OptimizerAdapter(
+        "MaCRO-DE-t", MaCRO_DE_t, ("MACRO_DE_T", "MACRODET", "MaCRODEt"),
+        "GENERIC_GPU", "CEC inverse-based covariance kernels use the common GPU owner service",
+        (("epochs", "epoch"), ("pop_size", "pop_size"),
+         ("dsade_mahal_q", "mahalanobis_q"),
+         ("optimizer_compute_device", "compute_device"),
+         ("gpu_device_id", "gpu_device_id"), ("gpu_memory_fraction", "gpu_memory_fraction")),
+        _diversity_work, _diversity_memory,
+    ),
     OptimizerAdapter("MaCRO-DE", MaCRO_DE, ("MACRO-DE", "MACRO_DE"), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
     OptimizerAdapter("DSADE", DSADE, ("DSA-DE", "DSA_DE"), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
-    OptimizerAdapter("DSADE_AWAD", DSADE_AWAD, ("DSADE-AWAD",), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
     OptimizerAdapter("DE-AWAD", DE_AWAD, ("DE_AWAD",), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
     OptimizerAdapter("DE-DiversitySelection", DE_DiversitySelection, ("DE_DIVERSITYSELECTION",), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
     OptimizerAdapter("DE-Mahalanobis", DE_Mahalanobis, ("DE_MAHALANOBIS",), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),

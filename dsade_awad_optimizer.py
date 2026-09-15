@@ -5,7 +5,7 @@ from scipy.stats import chi2
 
 from diversity_gpu_batching import DiversityMathBatcher
 
-class DSADE_AWAD(Optimizer):
+class DSADE(Optimizer):
     """
     Diversity-based Self-Adaptive Control in Differential Evolution (DSADE)
     with:
@@ -13,6 +13,9 @@ class DSADE_AWAD(Optimizer):
     - Mahalanobis grouping for mutation pool sampling
     - AWAD-aware survivor selection
     """
+
+    IMPLEMENTATION_REVISION = "manuscript-awad-survivor-v1"
+    SCIENTIFIC_PARAMETERS = ("epoch", "pop_size", "beta_min", "beta_max", "pcr", "mahalanobis_q")
 
     def __init__(
         self,
@@ -176,7 +179,3 @@ class DSADE_AWAD(Optimizer):
         div_norm_now = float(np.clip(div_awad / (self.div_max_seen + self.EPSILON), 0.0, 1.0))
         self.div_norm_hist[epoch_idx] = div_norm_now
         self.div_norm_for_update = div_norm_now
-
-
-# Backward compatibility aliases
-DSADE_AWAD = DSADE_AWAD

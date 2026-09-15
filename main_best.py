@@ -42,6 +42,7 @@ from optimizer_factory import (
     list_available_optimizers,
     optimizer_acronym,
     optimizer_constructor_kwargs,
+    optimizer_scientific_identity,
     resolve_optimizer,
     select_execution_strategy as select_backend_strategy,
 )
@@ -58,7 +59,7 @@ DATASET_SOURCE = "codesmell"
 
 EXPERIMENT_MODES = [
     # "full",
-    # "ablation",
+    "ablation",
     "sensitivity",
     "sensitivity_weights",
     # "transfer_functions",
@@ -109,6 +110,7 @@ TRANSFER_FUNCTION_DATASETS = [
 MAFESE_DATASET_SUITE = "test14"
 
 OPTIMIZERS = [
+    # "MaCRO-DE-t",
     # "MaCRO-DE",
     "DSADE",
     "DE",
@@ -233,8 +235,8 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 628
-REUSE_CACHE_FROM_EXP_ID = 628
+EXP_ID = 627
+REUSE_CACHE_FROM_EXP_ID = 627
 # None -> do not search another experiment.
 #
 # Example:
@@ -245,7 +247,7 @@ RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = True
-FIGURES_ONLY = False
+FIGURES_ONLY = True
 COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
@@ -1188,6 +1190,13 @@ def build_cache_signature(args: argparse.Namespace) -> str:
                 for alpha, beta in validate_sensitivity_weight_pairs(args.sensitivity_weight_pairs)
             ],
         })
+    versioned = {
+        resolve_optimizer_name(name): optimizer_scientific_identity(name, args)
+        for name in args.optimizers
+        if optimizer_scientific_identity(name, args)
+    }
+    if versioned:
+        payload["optimizer_scientific_identity"] = versioned
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:10]
     if str(args.experiment_mode) == "sensitivity":
         return f"{args.sensitivity_parameter}_{digest}"
@@ -1884,6 +1893,8 @@ def weight_checkpoint_metadata(
     }
     if optimizer_name is not None:
         metadata["Optimizer"] = resolve_optimizer_name(optimizer_name)
+        if metadata["Optimizer"] == "DSADE":
+            metadata["OptimizerScientificIdentity"] = optimizer_scientific_identity(optimizer_name, args)
     return metadata
 
 
@@ -1914,6 +1925,8 @@ def sensitivity_checkpoint_metadata(
         "SensitivityParameter": str(args.sensitivity_parameter),
         "SensitivityValue": float(sensitivity_value),
         "OptimizerScientificParameters": scientific_parameters,
+        **({"OptimizerScientificIdentity": optimizer_scientific_identity(optimizer_name, args)}
+           if resolve_optimizer_name(optimizer_name) == "DSADE" else {}),
     }
 
 
@@ -1922,13 +1935,16 @@ def weight_checkpoint_metadata_matches(row: dict, expected_metadata: Optional[di
         return True
     if not isinstance(row, dict):
         return False
+    if ("OptimizerScientificIdentity" in expected_metadata
+            and row.get("OptimizerScientificIdentity") != expected_metadata["OptimizerScientificIdentity"]):
+        return False
     if row.get("ExperimentMode") != expected_metadata["ExperimentMode"]:
         return False
     expected_optimizer = expected_metadata.get("Optimizer")
     if expected_optimizer is not None:
         actual_optimizer = row.get("Optimizer")
-        # Historical sensitivity_weights checkpoints were necessarily DSA-DE,
-        # so a missing optimizer field is unambiguous and remains reusable.
+        # Revisioned DSA-DE metadata was checked above. Unversioned greedy
+        # checkpoints cannot satisfy the manuscript implementation identity.
         if actual_optimizer is None:
             if expected_optimizer != "DSADE":
                 return False
@@ -1955,6 +1971,9 @@ def sensitivity_checkpoint_metadata_matches(
     if expected_metadata is None:
         return True
     if not isinstance(row, dict):
+        return False
+    if ("OptimizerScientificIdentity" in expected_metadata
+            and row.get("OptimizerScientificIdentity") != expected_metadata["OptimizerScientificIdentity"]):
         return False
     for key in ("ExperimentMode", "Optimizer", "SensitivityParameter"):
         if row.get(key) != expected_metadata.get(key):
@@ -2370,10 +2389,10 @@ def optimizer_display_label(name: str) -> str:
     return optimizer_acronym(str(name))
 
 def is_dsade_method(name: str) -> bool:
-    return str(name).upper() in {"MACRO-DE", "DSA-DE", "DSADE", "DSADE_AWAD", "DSADE-AWAD"}
+    return str(name).upper() in {"MACRO-DE", "DSA-DE", "DSADE", "DSA_DE"}
 
 def is_exact_dsade_method(name: str) -> bool:
-    return str(name).upper() in {"DSA-DE", "DSADE"}
+    return str(name).strip().upper() in {"DSA-DE", "DSADE", "DSA_DE"}
 
 def is_dsade_plot_group(opt: str, method_by_group: Optional[Dict[str, str]] = None) -> bool:
     method = method_by_group.get(opt, opt) if method_by_group else opt
@@ -4534,10 +4553,13 @@ def result_line_legend(opts, color_map, label_map, transfer_variants=False):
     return _plot_legend_patches(opts, color_map, label_map)
 
 
-def generate_dataset_radar(df, out_dir, opt_order, filename="02_radar_por_dataset_knn.png", transfer_variants=False, save_pdf=True):
+def generate_dataset_radar(df, out_dir, opt_order, filename="02_radar_por_dataset_knn.png", transfer_variants=False, save_pdf=True, *, dataset=None):
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order, transfer_variants)
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
     datasets = sorted(plot_df["Dataset"].dropna().unique())
+    single_panel = dataset is not None
+    if single_panel:
+        datasets = [dataset]
     n_rows, n_cols = _grid_shape(len(datasets))
     categories = ["Accuracy", "Precision", "Recall", "F1-Score", "Feat.\nEfficiency"]
     angles = [n / 5.0 * 2 * np.pi for n in range(5)]
@@ -4589,17 +4611,20 @@ def generate_dataset_radar(df, out_dir, opt_order, filename="02_radar_por_datase
         ax.set_title(dataset, fontsize=11, fontweight="bold", pad=14)
     for idx in range(len(datasets), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].set_visible(False)
-    fig.legend(handles=result_line_legend(opts, color_map, label_map, transfer_variants), loc="lower center", ncol=min(len(opts), 6), fontsize=9)
-    fig.tight_layout(rect=[0.0, 0.05, 1.0, 1.0])
+    fig.legend(handles=result_line_legend(opts, color_map, label_map, transfer_variants), loc="lower center", ncol=min(len(opts), 3 if single_panel else 6), fontsize=9)
+    fig.tight_layout(rect=[0.0, 0.16 if single_panel else 0.05, 1.0, 1.0])
     _save_chart(fig, out_dir, filename, save_pdf=save_pdf and not transfer_variants)
     return filename
 
 
 def generate_dataset_convergence(df, results_struct, out_dir, opt_order, args, estimator_filter,
-                                 filename="05_convergence_por_dataset_knn.png", transfer_variants=False, save_pdf=True):
+                                 filename="05_convergence_por_dataset_knn.png", transfer_variants=False, save_pdf=True, *, dataset=None):
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order, transfer_variants)
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
     datasets = sorted(plot_df["Dataset"].dropna().unique())
+    single_panel = dataset is not None
+    if single_panel:
+        datasets = [dataset]
     n_rows, n_cols = _grid_shape(len(datasets))
     curve_df = build_curve_dataframe(results_struct, args, estimator_filter)
     if curve_df.empty:
@@ -4649,8 +4674,8 @@ def generate_dataset_convergence(df, results_struct, out_dir, opt_order, args, e
         ax.grid(alpha=0.25)
     for idx in range(len(datasets), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].set_visible(False)
-    fig.legend(handles=result_line_legend(curve_opts, curve_color_map, curve_label_map, transfer_variants), loc="lower center", ncol=min(len(curve_opts), 6), fontsize=9)
-    fig.tight_layout(rect=[0.0, 0.05, 1.0, 1.0])
+    fig.legend(handles=result_line_legend(curve_opts, curve_color_map, curve_label_map, transfer_variants), loc="lower center", ncol=min(len(curve_opts), 3 if single_panel else 6), fontsize=9)
+    fig.tight_layout(rect=[0.0, 0.16 if single_panel else 0.05, 1.0, 1.0])
     _save_chart(fig, out_dir, filename, save_pdf=save_pdf and not transfer_variants)
     return filename
 
@@ -4702,6 +4727,56 @@ def generate_transfer_function_charts(df, results_struct, out_dir, opt_order, ar
     return saved
 
 
+def generate_ablation_dataset_charts(df, results_struct, out_dir, opt_order, args):
+    """Render only single-dataset PNGs from existing summary/run/curve data."""
+    saved = []
+    if df.empty:
+        return saved
+    destination = Path(out_dir) / "per_dataset"
+    estimators = df["Estimator"].astype("string").str.lower()
+    for estimator in sorted(estimators.dropna().unique()):
+        estimator_df = df[estimators == estimator].copy()
+        metrics = estimator_df[["AS_test", "PS_test", "RS_test", "F1_test"]]
+        if not np.isfinite(metrics.to_numpy(dtype=float)).any():
+            continue
+        plot_df, opts, colors, labels = prepare_plot_groups(estimator_df, opt_order)
+        if not opts:
+            continue
+        methods = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict()
+        run_df = build_run_level_dataframe(results_struct, args, estimator)
+        run_source = run_df if not run_df.empty else plot_df
+        run_plot, run_opts, run_colors, run_labels = prepare_plot_groups(run_source, opt_order)
+        for dataset in sorted(plot_df["Dataset"].dropna().unique()):
+            values = plot_df.loc[plot_df["Dataset"] == dataset, ["AS_test", "PS_test", "RS_test", "F1_test"]]
+            if not np.isfinite(values.to_numpy(dtype=float)).any():
+                continue
+            destination.mkdir(parents=True, exist_ok=True)
+            suffix = f"{dataset}_{estimator.upper()}.png"
+            radar = generate_dataset_radar(
+                estimator_df, str(destination), opt_order, "02_radar_" + suffix,
+                save_pdf=False, dataset=dataset,
+            )
+            saved.append(str(Path("per_dataset") / radar))
+            for prefix, draw, parameters in (
+                ("03_features_runtime_", _draw_ablation_features_runtime,
+                 (plot_df, opts, colors, labels, methods)),
+                ("04_boxplot_accuracy_", _draw_ablation_accuracy_boxplot,
+                 (run_plot, run_opts, run_colors, run_labels, methods)),
+            ):
+                fig, ax = plt.subplots(figsize=(5.8, 4.6))
+                draw(ax, dataset, *parameters)
+                fig.tight_layout(rect=[0.0, 0.02, 1.0, 1.0])
+                filename = prefix + suffix
+                _save_chart(fig, str(destination), filename, save_pdf=False)
+                saved.append(str(Path("per_dataset") / filename))
+            convergence = generate_dataset_convergence(
+                estimator_df, results_struct, str(destination), opt_order, args, estimator,
+                "05_convergence_" + suffix, save_pdf=False, dataset=dataset,
+            )
+            saved.append(str(Path("per_dataset") / convergence))
+    return saved
+
+
 def generate_ablation_global_charts(df, results_struct, out_dir, opt_order, args):
     saved = []
     if df.empty:
@@ -4723,7 +4798,45 @@ def generate_ablation_global_charts(df, results_struct, out_dir, opt_order, args
             filename = f"{stem}_{estimator.upper()}.png"
             _rename_chart_exports(out_dir, chart, filename, save_pdf=False)
             saved.append(filename)
+    saved.extend(generate_ablation_dataset_charts(df, results_struct, out_dir, opt_order, args))
     return saved
+
+
+def _draw_ablation_features_runtime(ax1, dataset, plot_df, opts, color_map, label_map, method_by_group):
+    ax2 = ax1.twinx()
+    sub = plot_df[plot_df["Dataset"] == dataset].groupby("PlotGroup")[["N_Features_Selected", "Runtime"]].mean()
+    x = np.arange(len(opts))
+    feat_vals = [sub.loc[o, "N_Features_Selected"] if o in sub.index else np.nan for o in opts]
+    rt_vals = [sub.loc[o, "Runtime"] if o in sub.index else np.nan for o in opts]
+    colors = [color_map.get(o, "#888") for o in opts]
+    bars1 = ax1.bar(x - 0.18, feat_vals, 0.36, color=colors, alpha=0.85)
+    bars2 = ax2.bar(x + 0.18, rt_vals, 0.36, color=colors, alpha=0.40, hatch="///")
+    for bar, opt in zip(bars1, opts):
+        apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.2)
+    for bar, opt in zip(bars2, opts):
+        apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.2)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([label_map.get(o, o) for o in opts], rotation=45, ha="right", fontsize=7)
+    ax1.set_ylabel("Features", fontsize=9)
+    ax2.set_ylabel("Runtime (s)", fontsize=9)
+    ax1.set_title(dataset, fontsize=11, fontweight="bold")
+    ax1.grid(axis="y", alpha=0.25)
+
+
+def _draw_ablation_accuracy_boxplot(ax, dataset, run_plot_df, run_opts, run_color_map, run_label_map, method_by_group):
+    sub = run_plot_df[run_plot_df["Dataset"] == dataset]
+    data_box = [sub[sub["PlotGroup"] == opt]["AS_test"].dropna().values for opt in run_opts]
+    bp = ax.boxplot(data_box, patch_artist=True, widths=0.55, showmeans=True)
+    for patch, opt in zip(bp["boxes"], run_opts):
+        patch.set_facecolor(run_color_map.get(opt, "#888"))
+        patch.set_alpha(0.60)
+        apply_dsade_patch_highlight(patch, opt, method_by_group, linewidth=2.5)
+    ax.set_xticks(range(1, len(run_opts) + 1))
+    ax.set_xticklabels([run_label_map.get(o, o) for o in run_opts], rotation=45, ha="right", fontsize=7)
+    ax.set_ylim(0.0, 1.08)
+    ax.set_ylabel("Accuracy (test)", fontsize=9)
+    ax.set_title(dataset, fontsize=11, fontweight="bold")
+    ax.grid(axis="y", alpha=0.25)
 
 
 def generate_seven_global_charts(
@@ -4764,24 +4877,7 @@ def generate_seven_global_charts(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.6 * n_rows), squeeze=False)
     for idx, dataset in enumerate(datasets):
         ax1 = axes[idx // n_cols, idx % n_cols]
-        ax2 = ax1.twinx()
-        sub = plot_df[plot_df["Dataset"] == dataset].groupby("PlotGroup")[["N_Features_Selected", "Runtime"]].mean()
-        x = np.arange(len(opts))
-        feat_vals = [sub.loc[o, "N_Features_Selected"] if o in sub.index else np.nan for o in opts]
-        rt_vals = [sub.loc[o, "Runtime"] if o in sub.index else np.nan for o in opts]
-        colors = [color_map.get(o, "#888") for o in opts]
-        bars1 = ax1.bar(x - 0.18, feat_vals, 0.36, color=colors, alpha=0.85)
-        bars2 = ax2.bar(x + 0.18, rt_vals, 0.36, color=colors, alpha=0.40, hatch="///")
-        for bar, opt in zip(bars1, opts):
-            apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.2)
-        for bar, opt in zip(bars2, opts):
-            apply_dsade_patch_highlight(bar, opt, method_by_group, linewidth=2.2)
-        ax1.set_xticks(x)
-        ax1.set_xticklabels([label_map.get(o, o) for o in opts], rotation=45, ha="right", fontsize=7)
-        ax1.set_ylabel("Features", fontsize=9)
-        ax2.set_ylabel("Runtime (s)", fontsize=9)
-        ax1.set_title(dataset, fontsize=11, fontweight="bold")
-        ax1.grid(axis="y", alpha=0.25)
+        _draw_ablation_features_runtime(ax1, dataset, plot_df, opts, color_map, label_map, method_by_group)
     for idx in range(len(datasets), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.tight_layout(rect=[0.0, 0.02, 1.0, 1.0])
@@ -4795,19 +4891,7 @@ def generate_seven_global_charts(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.6 * n_rows), squeeze=False)
     for idx, dataset in enumerate(datasets):
         ax = axes[idx // n_cols, idx % n_cols]
-        sub = run_plot_df[run_plot_df["Dataset"] == dataset]
-        data_box = [sub[sub["PlotGroup"] == opt]["AS_test"].dropna().values for opt in run_opts]
-        bp = ax.boxplot(data_box, patch_artist=True, widths=0.55, showmeans=True)
-        for patch, opt in zip(bp["boxes"], run_opts):
-            patch.set_facecolor(run_color_map.get(opt, "#888"))
-            patch.set_alpha(0.60)
-            apply_dsade_patch_highlight(patch, opt, method_by_group, linewidth=2.5)
-        ax.set_xticks(range(1, len(run_opts) + 1))
-        ax.set_xticklabels([run_label_map.get(o, o) for o in run_opts], rotation=45, ha="right", fontsize=7)
-        ax.set_ylim(0.0, 1.08)
-        ax.set_ylabel("Accuracy (test)", fontsize=9)
-        ax.set_title(dataset, fontsize=11, fontweight="bold")
-        ax.grid(axis="y", alpha=0.25)
+        _draw_ablation_accuracy_boxplot(ax, dataset, run_plot_df, run_opts, run_color_map, run_label_map, method_by_group)
     for idx in range(len(datasets), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.tight_layout(rect=[0.0, 0.02, 1.0, 1.0])
