@@ -58,10 +58,10 @@ DATASET_SOURCE = "codesmell"
 # "mafese"
 
 EXPERIMENT_MODES = [
-    # "full",
-    "ablation",
-    "sensitivity",
-    "sensitivity_weights",
+    "full",
+    # "ablation",
+    # "sensitivity",
+    # "sensitivity_weights",
     # "transfer_functions",
 ]
 # Options:
@@ -153,7 +153,7 @@ ABLATION_OPTIMIZERS = [
 ESTIMATORS = [
     "knn",
     "svm",
-    # "rf",
+    "rf",
 ]
 
 TRANSFER_FUNCTIONS = [
@@ -260,8 +260,14 @@ HYBRID_GPU_MIN_EPOCHS = 2
 
 GPU_OWNER_BACKEND = None
 
-DSADE_BETA_MIN = 0.10
-DSADE_BETA_MAX = 0.60
+# Estos fueron los de MaCRO-DE-t
+# DSADE_BETA_MIN = 0.10
+# DSADE_BETA_MAX = 0.60
+# DSADE_PCR = 0.10
+# DSADE_MAHAL_Q = 0.50
+
+DSADE_BETA_MIN = 0.40
+DSADE_BETA_MAX = 0.80
 DSADE_PCR = 0.10
 DSADE_MAHAL_Q = 0.50
 
@@ -286,6 +292,7 @@ SENSITIVITY_PLOT_METRIC = "accuracy"
 # ("pop_size", [30, 50, 70, 100])
 # ("epochs", [50, 100, 150, 200])
 
+# Decido conservar estos ya que las mejoras son minimas con 0.80/0.20 (MaCRO-DE-t NO ADAPTATIVO)
 DEFAULT_FITNESS_ALPHA = 0.90
 DEFAULT_FITNESS_BETA = 0.10
 
