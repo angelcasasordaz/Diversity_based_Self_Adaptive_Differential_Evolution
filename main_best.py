@@ -54,7 +54,7 @@ from optimizer_interceptor import Workload
 # ============================================================
 
 DATASET_SOURCE = "codesmell"
-FULL_REPLICA_REPORT_ONLY = True
+FULL_REPLICA_REPORT_ONLY = False
 
 # Reporting identity only; scientific optimizer configuration is unchanged.
 FULL_OPTIMIZER_COLORS = {
@@ -64,7 +64,6 @@ FULL_OPTIMIZER_COLORS = {
     "BRO": "#A65628", "RUN": "#4D4D4D", "FOX": "#999999",
 }
 _FULL_REPORT_STYLE = ContextVar("full_report_style", default=False)
-
 
 def full_optimizer_line_style(name):
     index = list(FULL_OPTIMIZER_COLORS).index(optimizer_acronym(name))
