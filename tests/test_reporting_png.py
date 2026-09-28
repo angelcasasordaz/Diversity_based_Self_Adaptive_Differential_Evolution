@@ -18,7 +18,8 @@ import main_best as m
 class SavePolicyTests(unittest.TestCase):
     def test_all_production_figure_writes_use_the_png_sink(self):
         writes = []
-        for source in Path(__file__).parent.glob("*.py"):
+        root = Path(__file__).resolve().parents[1]
+        for source in (*root.glob("*.py"), *(root / "reporting").glob("*.py")):
             if source.name.startswith("test_"):
                 continue
             tree = ast.parse(source.read_text())
@@ -69,9 +70,9 @@ class SavePolicyTests(unittest.TestCase):
 class ReportOrchestrationPolicyTests(unittest.TestCase):
     def test_report_only_orchestration_writes_pngs_without_full_size_rendering(self):
         """Use stored inputs and tiny test figures; never redraw the publication package."""
-        import full_rep1_report as report
-        import full_rep1_statistics as statistics
-        source = Path(__file__).parent
+        import reporting.exp627_figures as report
+        import reporting.exp627_statistics as statistics
+        source = Path(__file__).resolve().parents[1]
         cache = source / "Results/EXP627/full/cache"
         reference = source / "Results/EXP627/full/RESUMEN_GRAFICAS_EXP627.csv"
         if not cache.is_dir() or not reference.is_file():
@@ -112,7 +113,7 @@ class ReportOrchestrationPolicyTests(unittest.TestCase):
                 path = Path(folder) / "statistics.png"
                 with self.assertRaises(ValueError):
                     m._save_statistical_figure(fig, path, statistical_figure="standard")
-                from full_rep1_statistics import STEMS, IDS
+                from reporting.exp627_statistics import STEMS, IDS
                 for stem, figure_id in zip(STEMS, IDS):
                     for save_pdf in (True, False):
                         m._save_statistical_figure(

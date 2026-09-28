@@ -24,7 +24,7 @@ from optimizer_factory import (build_optimizer, resolve_optimizer, optimizer_acr
 
 
 def load_reference():
-    directory = Path(os.environ.get('CEC_SOURCE_DIR', Path(__file__).resolve().parent.parent /
+    directory = Path(os.environ.get('CEC_SOURCE_DIR', Path(__file__).resolve().parents[2] /
                      'Adaptive_Mahalanobis-Cholesky_Differential_Evolution_MaCRO_DE'))
     modules = {}
     with patch.dict(sys.modules):
@@ -241,7 +241,7 @@ class EquivalenceTests(unittest.TestCase):
 
 class IntegrationTests(unittest.TestCase):
     def test_registry_fixed_parameters_cache_revision(self):
-        from test_sensitivity_optimizers import make_args
+        from tests.test_sensitivity_optimizers import make_args
         import main_best as study
         args = make_args()
         args.optimizers = ['MaCRO-DE-t']
@@ -267,7 +267,7 @@ class IntegrationTests(unittest.TestCase):
 
     def test_both_dataset_sources_use_main_best_run_path(self):
         import main_best as study
-        from test_sensitivity_optimizers import make_args
+        from tests.test_sensitivity_optimizers import make_args
         from mafese import Data
         rng = np.random.default_rng(55)
         x = rng.normal(size=(48, 6))

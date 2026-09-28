@@ -16,7 +16,7 @@ import main_best as study
 class SavedTransferStatisticsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.directory = Path(__file__).parent / 'Results/EXP626/transfer_functions'
+        cls.directory = Path(__file__).resolve().parents[1] / 'Results/EXP626/transfer_functions'
         cls.datasets = list(study.TRANSFER_FUNCTION_DATASETS)
         cls.signature = '0fbda34b93'
         cls.paths = study.Paths('EXP626', 'transfer_functions', '', str(cls.directory),

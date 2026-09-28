@@ -18,7 +18,7 @@ from optimizer_factory import (build_optimizer, resolve_optimizer, optimizer_acr
 from optimizer_adapters import CUSTOM_ADAPTERS
 import main_best as study
 import historical_transfer_plots as historical
-from test_sensitivity_optimizers import make_args
+from tests.test_sensitivity_optimizers import make_args
 
 
 class CanonicalDSADETests(unittest.TestCase):

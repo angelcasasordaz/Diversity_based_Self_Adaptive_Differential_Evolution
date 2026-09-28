@@ -1,0 +1,1 @@
+"""Permanent project regression tests."""

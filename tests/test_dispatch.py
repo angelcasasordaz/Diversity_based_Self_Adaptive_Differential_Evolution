@@ -19,7 +19,7 @@ class DispatchTests(unittest.TestCase):
         self.stack.enter_context(redirect_stdout(StringIO()))
         for name in ("_run_single", "execute_pending_runs", "load_dataset", "save_cache"):
             self.stack.enter_context(patch.object(m, name, side_effect=AssertionError("Scientific execution forbidden")))
-        self.report = self.stack.enter_context(patch("full_replica_report.run_full_replica_report"))
+        self.report = self.stack.enter_context(patch("reporting.exp627_core.run_full_replica_report"))
         self.run_mode = self.stack.enter_context(patch.object(m, "run_experiment_mode"))
         self.listing = self.stack.enter_context(patch.object(m, "print_available_optimizers"))
         self.backend = self.stack.enter_context(patch.object(m, "configure_compute_backend"))
@@ -100,7 +100,7 @@ class DirectModeDispatchTests(unittest.TestCase):
                     patch.object(sys, "argv", ["main_best.py", "--experiment-mode", mode]):
                 args = m.parse_args()
                 with patch.object(m, "apply_experiment_mode", side_effect=StopBeforeExecution) as apply, \
-                        patch("full_replica_report.run_full_replica_report") as report:
+                        patch("reporting.exp627_core.run_full_replica_report") as report:
                     with self.assertRaises(StopBeforeExecution):
                         m.run_experiment_mode(args)
                     apply.assert_called_once_with(args)
@@ -110,7 +110,7 @@ class DirectModeDispatchTests(unittest.TestCase):
         with patch.object(sys, "argv", ["main_best.py", "--full-rep1-report-only"]):
             args = m.parse_args()
         with patch.object(m, "apply_experiment_mode") as apply, \
-                patch("full_replica_report.run_full_replica_report") as report:
+                patch("reporting.exp627_core.run_full_replica_report") as report:
             m.run_experiment_mode(args)
         report.assert_called_once_with(args)
         apply.assert_not_called()

@@ -1,4 +1,4 @@
-"""Cache-only EXP627 publication figures. Run with python -B full_rep1_report.py."""
+"""Cache-only EXP627 publication figures. Run with python -B -m reporting.exp627_figures."""
 import inspect
 import json
 from pathlib import Path
@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import t
 
-from full_replica_report import DATASETS, framework, load_completed_full, report_guard, sha256
-from full_replica_report import validate_replica_destination, REPLICA_DIRECTORIES
+from reporting.exp627_core import DATASETS, framework, load_completed_full, report_guard, sha256
+from reporting.exp627_core import validate_replica_destination, REPLICA_DIRECTORIES
 import shutil
 from PIL import Image
 
@@ -284,7 +284,7 @@ def validate_output_destination(root, destination):
     """Accept only the named reporting tree; never follow links or accept caches."""
     root = Path(root).resolve()
     destination = Path(destination).absolute()
-    from full_rep1_statistics import STEMS as statistical_stems, EXPECTED_RES
+    from reporting.exp627_statistics import STEMS as statistical_stems, EXPECTED_RES
     layouts = {
         root / "Figures/EXP627/full_rep1": {
             "": {f"{stem}.png" for stem in STEMS},
@@ -397,7 +397,7 @@ def run(args, *, resume=False):
                 plt.close(fig)
             print(f"Created {target.name} (600 dpi PNG)", flush=True)
         assert {p.name for p in destination.iterdir() if p.is_file()} == expected
-        from full_rep1_statistics import run as run_statistics
+        from reporting.exp627_statistics import run as run_statistics
         run_statistics(args)
         validate_output_destination(root, destination)
         validate_output_destination(root, reports)

@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from matplotlib.patches import Patch
 from PIL import Image
-from full_replica_report import framework, load_completed_full, report_guard, sha256, DATASETS, CLASSIFIERS, CONFIG_ORDER
+from reporting.exp627_core import framework, load_completed_full, report_guard, sha256, DATASETS, CLASSIFIERS, CONFIG_ORDER
 
 ORDER = ('DSA-DE', 'DE', 'JADE', 'SHADE', 'PSO', 'WOA', 'HHO', 'GOA', 'SA', 'BRO', 'RUN', 'FOX')
 STEMS = ('stat_fig1_average_rank', 'stat_fig2_dsade_vs_others', 'stat_fig3_holm_heatmap', 'stat_fig4_f1_boxplot')
@@ -152,7 +152,7 @@ def run(args):
     ROOT = Path(args.output_root).resolve()
     FIG = ROOT / 'Figures/EXP627/full_rep1/statistics'
     RES = ROOT / 'Results/EXP627/full_rep1/statistics'
-    from full_rep1_report import validate_output_destination
+    from reporting.exp627_figures import validate_output_destination
     validate_output_destination(ROOT, FIG.parent)
     validate_output_destination(ROOT, RES.parent)
     m = framework()  # Import plotting dependencies before the strict write guard.

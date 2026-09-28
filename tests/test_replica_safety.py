@@ -4,11 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from full_replica_report import (
+from reporting.exp627_core import (
     REPLICA_DIRECTORIES, recreate_replica_directories, report_guard,
     validate_replica_destination,
 )
-from full_rep1_report import cleanup_duplicates
+from reporting.exp627_figures import cleanup_duplicates
 
 
 class ReplicaCleanupSafetyTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class ReplicaCleanupSafetyTests(unittest.TestCase):
         paths = [self.root, self.root / "Results/EXP627",
                  self.root / "Results/EXP627/full", self.root / "Figures/EXP627/full",
                  self.targets[0] / "nested", self.targets[0].with_name("full_replica_other")]
-        with patch("full_replica_report.shutil.rmtree") as delete:
+        with patch("reporting.exp627_core.shutil.rmtree") as delete:
             for path in paths:
                 with self.subTest(path=path), self.assertRaises(ValueError):
                     recreate_replica_directories(self.root, path)
@@ -48,7 +48,7 @@ class ReplicaCleanupSafetyTests(unittest.TestCase):
 
     def test_checkpoint_aborts_whole_batch(self):
         (self.targets[1] / "saved.pkl").write_bytes(b"protected")
-        with patch("full_replica_report.shutil.rmtree") as delete:
+        with patch("reporting.exp627_core.shutil.rmtree") as delete:
             with self.assertRaises(ValueError):
                 cleanup_duplicates(self.root)
             delete.assert_not_called()

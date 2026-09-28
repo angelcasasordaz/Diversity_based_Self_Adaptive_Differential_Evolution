@@ -5279,6 +5279,9 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
             args,
             friedman_excel,
         )
+    if args.experiment_mode == "full" and not getattr(args, "full_replica_report_only", False):
+        from reporting.paper_tables import export_paper_tables
+        exported.append(export_paper_tables(results_struct, dataset_names, list(args.optimizers), args, paths))
     summary_df = generate_summary_dataframe(results_struct, args)
     summary_csv = os.path.join(paths.res_dir, f"{output_prefix}RESUMEN_GRAFICAS_{paths.exp_tag}.csv")
     summary_df.to_csv(summary_csv, index=False)
@@ -5415,7 +5418,7 @@ def clone_args_for_mode(base_args: argparse.Namespace, mode: str) -> argparse.Na
 
 def run_experiment_mode(args: argparse.Namespace) -> None:
     if getattr(args, "full_replica_report_only", False):
-        from full_replica_report import run_full_replica_report
+        from reporting.exp627_core import run_full_replica_report
         return run_full_replica_report(args)
     apply_experiment_mode(args)
 
@@ -5758,7 +5761,7 @@ def main():
         print_available_optimizers()
         return
     if args.full_replica_report_only:
-        from full_replica_report import run_full_replica_report
+        from reporting.exp627_core import run_full_replica_report
         return run_full_replica_report(args)
     logging.disable(logging.INFO)
     logging.getLogger("mealpy").setLevel(logging.WARNING)

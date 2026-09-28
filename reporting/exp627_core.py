@@ -281,5 +281,5 @@ def report_guard(destinations):
 
 def run_full_replica_report(args):
     """Compatibility entry point for the consolidated eight-figure report."""
-    from full_rep1_report import run
+    from reporting.exp627_figures import run
     return run(args)

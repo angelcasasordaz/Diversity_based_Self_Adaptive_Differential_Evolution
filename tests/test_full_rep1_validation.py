@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from full_rep1_report import validate_output_destination, STEMS
-from full_rep1_statistics import STEMS as STAT_STEMS, EXPECTED_RES
+from reporting.exp627_figures import validate_output_destination, STEMS
+from reporting.exp627_statistics import STEMS as STAT_STEMS, EXPECTED_RES
 
 
 class FullRep1ValidationTests(unittest.TestCase):
