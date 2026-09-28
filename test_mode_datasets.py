@@ -2,6 +2,7 @@ import argparse
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import main_best as study
 
@@ -55,13 +56,24 @@ class ModeDatasetSelectionTests(unittest.TestCase):
             "sensitivity_weights": study.SENSITIVITY_WEIGHTS_DATASETS,
         }
         with tempfile.TemporaryDirectory() as tmp:
-            for name in set().union(*map(set, expected.values())):
+            available = set().union(*(set(names) for names in expected.values() if names is not None))
+            available.add("ExtraDataset")
+            for name in available:
                 Path(tmp, f"{name}.csv").touch()
             for mode, names in expected.items():
                 with self.subTest(mode=mode):
                     args = make_args("codesmell", mode, dataset_dir=tmp)
                     specs = study.resolve_dataset_specs(args)
-                    self.assertEqual([spec.name for spec in specs], names)
+                    self.assertEqual([spec.name for spec in specs],
+                                     sorted(available, key=str.lower) if names is None else names)
+
+    def test_full_explicit_dataset_configuration_preserves_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("First", "Second", "Unselected"):
+                Path(tmp, f"{name}.csv").touch()
+            with patch.object(study, "CODE_SMELL_DATASETS", ["Second", "First"]):
+                specs = study.resolve_dataset_specs(make_args("codesmell", "full", dataset_dir=tmp))
+            self.assertEqual([spec.name for spec in specs], ["Second", "First"])
 
     def test_source_and_dataset_validation_are_preserved(self):
         with self.assertRaisesRegex(ValueError, "Unsupported dataset source"):

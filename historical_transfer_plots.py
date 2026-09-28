@@ -131,7 +131,8 @@ def _force_white_background(fig):
 def _save_chart(fig, out_dir: str, filename: str):
     path = os.path.join(out_dir, filename)
     _force_white_background(fig)
-    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
+    from main_best import _save_figure
+    _save_figure(fig, path, bbox_inches="tight")
     plt.close(fig)
 
 def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str]):

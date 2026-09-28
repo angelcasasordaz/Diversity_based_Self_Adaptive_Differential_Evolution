@@ -1,4 +1,5 @@
 import argparse
+from contextvars import ContextVar
 import ctypes
 import hashlib
 import json
@@ -53,6 +54,22 @@ from optimizer_interceptor import Workload
 # ============================================================
 
 DATASET_SOURCE = "codesmell"
+FULL_REPLICA_REPORT_ONLY = True
+
+# Reporting identity only; scientific optimizer configuration is unchanged.
+FULL_OPTIMIZER_COLORS = {
+    "DSADE": "#0072B2", "DE": "#009E73", "JADE": "#E69F00",
+    "SHADE": "#CC79A7", "PSO": "#56B4E9", "WOA": "#D55E00",
+    "HHO": "#6A3D9A", "GOA": "#8DAA00", "SA": "#F0C808",
+    "BRO": "#A65628", "RUN": "#4D4D4D", "FOX": "#999999",
+}
+_FULL_REPORT_STYLE = ContextVar("full_report_style", default=False)
+
+
+def full_optimizer_line_style(name):
+    index = list(FULL_OPTIMIZER_COLORS).index(optimizer_acronym(name))
+    return {"linestyle": ["-", "--", ":", "-."][index % 4],
+            "marker": ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">", "h", "p"][index]}
 # Options:
 # "codesmell"
 # "mafese"
@@ -443,8 +460,10 @@ def validate_sensitivity_weight_pairs(weight_pairs) -> List[Tuple[float, float]]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Feature-selection comparison framework with cache and multi-run support")
+    parser.add_argument("--full-replica-report-only", "--full-rep1-report-only", action="store_true",
+                        help="Strict EXP627 FULL cache-only reporting into full_rep1 folders")
     supported_modes = ["full", "ablation", "sensitivity", "sensitivity_weights", "transfer_functions"]
-    parser.add_argument("--experiment-modes", nargs="+", default=list(EXPERIMENT_MODES), choices=supported_modes)
+    parser.add_argument("--experiment-modes", nargs="+", default=None, choices=supported_modes)
     parser.add_argument("--experiment-mode", default=None, choices=supported_modes, help=argparse.SUPPRESS)
     parser.add_argument("--exp-id", type=int, default=EXP_ID, help="Numeric experiment ID")
     parser.add_argument(
@@ -519,6 +538,15 @@ def parse_args() -> argparse.Namespace:
         fitness_beta=DEFAULT_FITNESS_BETA,
     )
     args = parser.parse_args()
+    explicit_mode = args.experiment_modes is not None or args.experiment_mode is not None
+    if explicit_mode and args.full_replica_report_only:
+        parser.error("Choose either an experiment mode or --full-replica-report-only")
+    # The IDE default is safe; an explicit mode opts into the normal framework.
+    args.full_replica_report_only = args.full_replica_report_only or (
+        FULL_REPLICA_REPORT_ONLY and not explicit_mode
+    )
+    if args.experiment_modes is None:
+        args.experiment_modes = list(EXPERIMENT_MODES)
     args.sensitivity_configs = (
         [(parameter, list(values)) for parameter, values in SENSITIVITY_CONFIGS]
         if SENSITIVITY_CONFIGS
@@ -2480,6 +2508,8 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str], transfer_variant
         method = meta["Optimizer"]
         tf = meta["TransferFunction"]
         color_map[group] = MACRO_DE_COLOR if str(method).upper() == "MACRO-DE" else colors[i]
+        if _FULL_REPORT_STYLE.get() and not transfer_variants:
+            color_map[group] = FULL_OPTIMIZER_COLORS[optimizer_acronym(method)]
         base_label = optimizer_display_label(method)
         label_map[group] = f"{base_label} {tf.upper()}" if tf and (transfer_variants or method in variant_methods) else base_label
 
@@ -3011,21 +3041,28 @@ def _force_white_background(fig):
 
 
 def _save_figure(fig, path, *, save_pdf=True, **kwargs):
-    """Export at the global resolution, optionally adding a companion PDF."""
+    """All reporting figures are PNG at 600 dpi, including legacy PDF requests."""
     _force_white_background(fig)
-    fig.savefig(path, dpi=SAVEFIG_DPI, facecolor="white", **kwargs)
-    if save_pdf and Path(path).suffix.lower() == ".png":
-        fig.savefig(Path(path).with_suffix(".pdf"), dpi=SAVEFIG_DPI,
-                    facecolor="white", **kwargs)
+    kwargs.pop("dpi", None)
+    kwargs.pop("format", None)
+    kwargs.pop("facecolor", None)
+    fig.savefig(Path(path).with_suffix(".png"), dpi=600, format="png",
+                facecolor="white", **kwargs)
+
+
+def _save_statistical_figure(fig, path, *, statistical_figure, **kwargs):
+    """Use the same PNG-only policy for all four statistical figures."""
+    allowed = {"average_rank", "dsade_pairwise_holm", "adjusted_pvalue_heatmap",
+               "f1_distribution_by_algorithm"}
+    if statistical_figure not in allowed:
+        raise ValueError("Unknown statistical figure")
+    _save_figure(fig, path, **kwargs)
 
 
 def _rename_chart_exports(out_dir: str, old_name: str, new_name: str, *, save_pdf=True):
-    """Keep companion filenames aligned with the numbered PNG convention."""
-    old_path = Path(out_dir, old_name)
-    new_path = Path(out_dir, new_name)
-    os.replace(old_path, new_path)
-    if save_pdf and old_path.with_suffix(".pdf").exists():
-        os.replace(old_path.with_suffix(".pdf"), new_path.with_suffix(".pdf"))
+    """Rename only the new PNG; historical companion PDFs remain untouched."""
+    os.replace(Path(out_dir, old_name).with_suffix(".png"),
+               Path(out_dir, new_name).with_suffix(".png"))
 
 
 def _save_chart(fig, out_dir: str, filename: str, *, save_pdf=True):
@@ -4554,6 +4591,10 @@ def transfer_line_style(group: str) -> dict:
 
 
 def result_line_legend(opts, color_map, label_map, transfer_variants=False):
+    if _FULL_REPORT_STYLE.get() and not transfer_variants:
+        return [plt.Line2D([], [], color=color_map[opt], label=label_map[opt],
+                           linewidth=2.4 if is_exact_dsade_method(opt) else 1.4,
+                           **full_optimizer_line_style(opt)) for opt in opts]
     if transfer_variants:
         return [plt.Line2D([], [], color=color_map[opt], label=label_map[opt],
                            **transfer_line_style(opt)) for opt in opts]
@@ -4599,8 +4640,9 @@ def generate_dataset_radar(df, out_dir, opt_order, filename="02_radar_por_datase
                 color_map.get(opt, "#888"),
                 is_dsade,
                 linewidth=4.0 if is_macro else (2.4 if is_dsade else 1.1),
-                linestyle=transfer_line_style(opt)["linestyle"] if transfer_variants else ("-" if is_macro else ("-" if is_dsade else "--")),
-                **({"marker": transfer_line_style(opt)["marker"], "markersize": 4} if transfer_variants else {}),
+                **(dict(full_optimizer_line_style(opt), markersize=4) if _FULL_REPORT_STYLE.get() and not transfer_variants
+                   else dict(transfer_line_style(opt), markersize=4) if transfer_variants
+                   else {"linestyle": "-" if is_macro or is_dsade else "--"}),
                 zorder=10 if is_macro else 2
             )
 
@@ -4669,7 +4711,9 @@ def generate_dataset_convergence(df, results_struct, out_dir, opt_order, args, e
                 is_dsade,
                 linewidth=3.8 if is_macro else (2.4 if is_dsade else 1.4),
                 zorder=10 if is_macro else 2,
-                **(dict(transfer_line_style(opt), markevery=max(1, curve.size // 12), markersize=4) if transfer_variants else {"linestyle": "-"}),
+                **(dict(full_optimizer_line_style(opt), markevery=max(1, curve.size // 12), markersize=4)
+                   if _FULL_REPORT_STYLE.get() and not transfer_variants else
+                   dict(transfer_line_style(opt), markevery=max(1, curve.size // 12), markersize=4) if transfer_variants else {"linestyle": "-"}),
             )
             #ax.plot(curve, color=curve_color_map.get(opt, "#888"), linewidth=2.4 if is_dsade else 1.4, linestyle="-" if is_dsade else "--")
             plotted = True
@@ -4846,7 +4890,16 @@ def _draw_ablation_accuracy_boxplot(ax, dataset, run_plot_df, run_opts, run_colo
     ax.grid(axis="y", alpha=0.25)
 
 
-def generate_seven_global_charts(
+def generate_seven_global_charts(*args, **kwargs):
+    report_args = args[4] if len(args) > 4 else kwargs["args"]
+    token = _FULL_REPORT_STYLE.set(report_args.experiment_mode == "full")
+    try:
+        return _generate_seven_global_charts(*args, **kwargs)
+    finally:
+        _FULL_REPORT_STYLE.reset(token)
+
+
+def _generate_seven_global_charts(
     df: pd.DataFrame,
     results_struct: Dict[str, Dict],
     out_dir: str,
@@ -5361,6 +5414,9 @@ def clone_args_for_mode(base_args: argparse.Namespace, mode: str) -> argparse.Na
     return mode_args
 
 def run_experiment_mode(args: argparse.Namespace) -> None:
+    if getattr(args, "full_replica_report_only", False):
+        from full_replica_report import run_full_replica_report
+        return run_full_replica_report(args)
     apply_experiment_mode(args)
 
     validate_selection_options(args)
@@ -5698,11 +5754,14 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
 
 def main():
     args = parse_args()
-    logging.disable(logging.INFO)
-    logging.getLogger("mealpy").setLevel(logging.WARNING)
     if args.list_optimizers:
         print_available_optimizers()
         return
+    if args.full_replica_report_only:
+        from full_replica_report import run_full_replica_report
+        return run_full_replica_report(args)
+    logging.disable(logging.INFO)
+    logging.getLogger("mealpy").setLevel(logging.WARNING)
 
     modes = [str(mode).lower() for mode in args.experiment_modes]
     if not modes:

@@ -162,14 +162,17 @@ class VisualizationTests(unittest.TestCase):
                         )
                     self.assertGreaterEqual(len(left_ax.texts), len(sensitivity_values))
                     self.assertGreaterEqual(len(right_ax.texts), len(sensitivity_values))
-                    self.assertTrue(
-                        all(left_ax.get_ylim()[0] <= text.get_position()[1] <= left_ax.get_ylim()[1]
-                            for text in left_ax.texts)
-                    )
-                    self.assertTrue(
-                        all(right_ax.get_ylim()[0] <= text.get_position()[1] <= right_ax.get_ylim()[1]
-                            for text in right_ax.texts)
-                    )
+                    # Annotations use point offsets, not data coordinates.
+                    # Check the complete rendered label against its axes bounds.
+                    renderer = fig.canvas.get_renderer()
+                    for axis in (left_ax, right_ax):
+                        bounds = axis.get_window_extent(renderer)
+                        for text in axis.texts:
+                            label = text.get_window_extent(renderer)
+                            self.assertGreaterEqual(label.x0, bounds.x0)
+                            self.assertLessEqual(label.x1, bounds.x1)
+                            self.assertGreaterEqual(label.y0, bounds.y0)
+                            self.assertLessEqual(label.y1, bounds.y1)
 
                 legend_labels = {
                     text.get_text()

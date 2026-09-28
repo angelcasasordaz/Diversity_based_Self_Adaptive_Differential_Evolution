@@ -441,7 +441,14 @@ class SensitivityWeightsTests(unittest.TestCase):
                 results,
             )
             self.assertIsNone(friedman)
-            self.assertEqual(len(set(filenames)), len(args.optimizers))
+            expected_filenames = {
+                f"SensitivityWeights_AlphaBeta_Synthetic_{optimizer}{suffix}.png"
+                for optimizer in args.optimizers
+                for suffix in ("", "_DualBars", "_SeparatedPanels")
+            }
+            self.assertEqual(set(filenames), expected_filenames)
+            self.assertEqual(len(filenames), len(expected_filenames))
+            self.assertTrue(all((Path(paths.fig_dir) / name).is_file() for name in expected_filenames))
             for optimizer_name in args.optimizers:
                 matching = [
                     name
@@ -452,12 +459,20 @@ class SensitivityWeightsTests(unittest.TestCase):
                 self.assertTrue((Path(paths.fig_dir) / matching[0]).exists())
 
             accuracy = pd.read_excel(workbook, sheet_name="Accuracy", index_col=[0, 1])
-            expected_groups = {
+            expected_groups = [
                 f"{optimizer} | {study.sensitivity_weight_display_label(pair)}"
                 for optimizer in args.optimizers
                 for pair in args.sensitivity_weight_pairs
-            }
-            self.assertEqual(set(accuracy.index.get_level_values(0)), expected_groups)
+            ]
+            # Dataset/statistic pairs are rows; optimizer/weight groups are columns.
+            self.assertEqual(list(accuracy.columns), expected_groups)
+            self.assertEqual(list(accuracy.index),
+                             [("Synthetic", stat) for stat in ("Best", "Worst", "Mean", "Std")])
+            for optimizer_idx, optimizer in enumerate(args.optimizers):
+                for pair_idx, pair in enumerate(args.sensitivity_weight_pairs):
+                    group = f"{optimizer} | {study.sensitivity_weight_display_label(pair)}"
+                    value = 70.0 + optimizer_idx + pair_idx
+                    np.testing.assert_array_equal(accuracy[group].to_numpy(), [value, value, value, 0.0])
 
     def test_gpu_reporting_counts_every_optimizer_pair(self):
         selected = ["DSA-DE", "MaCRO-DE", "DE", "PSO"]
