@@ -10,7 +10,7 @@ from matplotlib.patches import Patch
 import numpy as np
 from scipy.stats import t
 
-from reporting.core import framework
+from reporting.core import framework, report_stage
 
 
 STYLE = {'font.family': 'DejaVu Sans', 'font.size': 10, 'axes.labelsize': 11,
@@ -48,7 +48,8 @@ def metric_values(df, metric, classifier, datasets, algorithms):
 def save_png(fig, path):
     try:
         target = Path(path).with_suffix('.png')
-        framework()._save_figure(fig, target, save_pdf=False, bbox_inches='tight')
+        with report_stage(f'Save {target.name} (600 dpi PNG)'):
+            framework()._save_figure(fig, target, save_pdf=False, bbox_inches='tight')
         if not target.is_file():
             raise ValueError(f'Missing generated figure: {target}')
     finally:

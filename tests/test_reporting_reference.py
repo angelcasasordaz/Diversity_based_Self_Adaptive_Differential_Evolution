@@ -1,6 +1,7 @@
 """Read-only regression against saved scientific values; never render historical figures."""
 from contextlib import ExitStack
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -127,3 +128,26 @@ class HistoricalScientificValuesTests(unittest.TestCase):
                                 self.assertEqual(av, bv)
             finally:
                 actual.close(); reference.close()
+
+    def test_exp627_report_only_completes_in_temporary_root(self):
+        from tests.test_generic_reporting import tiny_figures
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            shutil.copytree(self.source / 'cache', root / 'Results/EXP627/full/cache')
+            args = self.report.args
+            argv = ['main_best.py', '--report-only', '--exp-id', '627',
+                    '--experiment-mode', 'full', '--output-root', folder,
+                    '--datasets', *self.report.datasets, '--optimizers', *args.optimizers,
+                    '--estimators', *args.estimators, '--runs', str(args.runs),
+                    '--epochs', str(args.epochs), '--transfer-functions', *args.transfer_functions]
+            # Exercise the actual CLI, Excel exporters, statistics and validation;
+            # only figure construction is replaced to avoid publication rendering.
+            with patch.object(sys, 'argv', argv), \
+                    patch.object(figures, 'publication_figures', tiny_figures), \
+                    patch.object(figures, 'statistical_figures', tiny_figures):
+                manifest = m.main()
+            self.assertEqual(manifest['experiment_id'], 627)
+            self.assertEqual(manifest['optimization_calls'], 0)
+            self.assertTrue(manifest['protected_files_unchanged'])
+            self.assertTrue((root / 'Results/EXP627/full_rep1/Paper_Tables_EXP627.xlsx').is_file())
+            self.assertFalse(list(root.rglob('*.pdf')))

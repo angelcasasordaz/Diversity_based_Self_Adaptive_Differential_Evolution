@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 
 import numpy as np
 
@@ -32,25 +33,52 @@ def sha256(path):
 
 
 @contextmanager
+def report_stage(label):
+    """Make long cache-only operations visible even in a buffered IDE console."""
+    started = time.perf_counter()
+    print(f'[report] {label} ...', flush=True)
+    try:
+        yield
+    except BaseException:
+        print(f'[report] {label} failed after {time.perf_counter() - started:.1f}s', flush=True)
+        raise
+    else:
+        print(f'[report] {label} complete ({time.perf_counter() - started:.1f}s)', flush=True)
+
+
+@contextmanager
 def report_guard(destinations):
     """Reject scientific execution and filesystem mutations outside replica folders."""
     state = {"active": True, "optimization_calls": 0}
     forbidden = {"_run_single", "execute_pending_runs", "build_optimizer",
                  "configure_compute_backend", "save_cache", "start_gpu_request_service",
                  "load_dataset", "load_codesmell_dataset", "load_mafese_dataset"}
+    blocked_codes = {}
     def profile(frame, event, arg):
-        if event == "call" and (frame.f_code.co_name in forbidden or
-                                (frame.f_code.co_name == "solve" and "mealpy" in frame.f_code.co_filename) or
-                                (frame.f_code.co_name == "fit" and "mafese" in frame.f_code.co_filename)):
+        if event != 'call':
+            return
+        # Code metadata is immutable. Inspect it once instead of re-triggering
+        # object.__getattr__ audit events on every library function call.
+        code = frame.f_code
+        blocked = blocked_codes.get(code)
+        if blocked is None:
+            name = code.co_name
+            blocked = (name in forbidden or (name == 'solve' and 'mealpy' in code.co_filename)
+                       or (name == 'fit' and 'mafese' in code.co_filename))
+            blocked_codes[code] = blocked
+        if blocked:
             state["optimization_calls"] += 1
-            raise RuntimeError(f"REPORT-ONLY blocked scientific execution: {frame.f_code.co_name}")
+            raise RuntimeError(f"REPORT-ONLY blocked scientific execution: {code.co_name}")
     def allowed(path):
         if isinstance(path, int):
             return False
         resolved = Path(os.fsdecode(path)).resolve()
         return any(resolved == base or base in resolved.parents for base in destinations) and resolved.suffix.lower() not in {'.pkl', '.pickle', '.ckpt', '.pdf'}
+    mutation_events = frozenset({'open', 'os.remove', 'os.rmdir', 'os.mkdir', 'os.chmod',
+                                'os.utime', 'os.truncate', 'shutil.rmtree', 'os.rename',
+                                'os.link', 'os.symlink', 'subprocess.Popen', 'os.system', 'os.fork'})
     def audit(event, args):
-        if not state["active"]:
+        if not state["active"] or event not in mutation_events:
             return
         targets = []
         def at(path, dir_fd):
@@ -365,26 +393,34 @@ def generate_outputs(report, figures, results):
     required = [f'Global_Results_{tag}.xlsx', f'Statistical_Results_{tag}.xlsx', f'Paper_Tables_{tag}.xlsx',
                 'statistics/statistical_summary.csv', 'statistics/pairwise_wilcoxon_holm.csv',
                 'statistics/statistical_report.txt']
-    m.export_global_excel(report.results, report.datasets, str(results / required[0]))
-    m.export_statistical_excel(report.results, report.datasets, args.optimizers, args, str(results / required[1]))
-    paper_tables.export_indexed_tables(report.indexed, report.datasets, report.algorithms, report.classifiers,
-                                      report.metrics, results / required[2], title=f'{tag} {args.experiment_mode.upper()}')
+    with report_stage(f'{tag}: Global Results Excel'):
+        m.export_global_excel(report.results, report.datasets, str(results / required[0]))
+    with report_stage(f'{tag}: Statistical Results Excel'):
+        m.export_statistical_excel(report.results, report.datasets, args.optimizers, args, str(results / required[1]))
+    with report_stage(f'{tag}: paper tables (format, serialize, validate)'):
+        paper_tables.export_indexed_tables(report.indexed, report.datasets, report.algorithms, report.classifiers,
+                                          report.metrics, results / required[2], title=f'{tag} {args.experiment_mode.upper()}')
     skipped = [{'output': f'{metric.name} tables/figures', 'reason': f'{metric.run_key} unavailable in every cache row'}
                for metric in paper_tables.METRICS if metric not in report.metrics]
     if args.experiment_mode in {'full', 'ablation'} and any(metric.run_key == 'FitRuns' for metric in report.metrics):
         name = f'{args.experiment_mode.capitalize()}_Friedman_Analysis_{tag}.xlsx'
-        m.export_friedman_analysis(report.results, report.datasets, args.optimizers, args, str(results / name))
+        with report_stage(f'{tag}: Friedman Excel'):
+            m.export_friedman_analysis(report.results, report.datasets, args.optimizers, args, str(results / name))
         required.append(name)
     else:
         skipped.append({'output': 'Framework fitness Friedman Excel', 'reason': 'Requires full/ablation mode and available FitRuns'})
-    skipped.extend(plotting.generate(report, figures))
-    skipped.extend(statistics.export(report, figures / 'statistics', results / 'statistics'))
+    with report_stage(f'{tag}: publication figures at 600 dpi'):
+        skipped.extend(plotting.generate(report, figures))
+    with report_stage(f'{tag}: statistical analysis and figures'):
+        skipped.extend(statistics.export(report, figures / 'statistics', results / 'statistics'))
     return required, skipped
 
 
 def run_report(args):
     """Create one complete report version for the user-selected EXP and modes."""
     # Import exporters/dependencies before the strict mutation guard is active.
+    started = time.perf_counter()
+    print(f'[report] Starting cache-only EXP{args.exp_id:03d}: {", ".join(args.experiment_modes)}', flush=True)
     from reporting import figures, statistics, paper_tables
     m = framework()
     root = safe_path(args.output_root)
@@ -392,14 +428,17 @@ def run_report(args):
     if not modes or any(mode not in {'full', 'ablation', 'sensitivity', 'sensitivity_weights', 'transfer_functions'} for mode in modes):
         raise ValueError('Select at least one supported experiment mode')
     reports = []
-    with report_guard(()) as preflight:
+    with report_stage('Validate original completed caches'), report_guard(()) as preflight:
         for mode in modes:
             local = m.clone_args_for_mode(args, mode)
             studies = m.sensitivity_study_args(local) if mode == 'sensitivity' else [local]
             reports.extend(load_completed_cache(study) for study in studies)
-    previous = {str(p.relative_to(root)): sha256(p) for kind in ('Figures', 'Results')
-                for p in (root / kind / f'EXP{args.exp_id:03d}').rglob('*') if p.is_file()}
-    with staged_version(root, args.exp_id) as (version, fig, res, finals):
+    with report_stage('Hash protected historical outputs'):
+        previous = {str(p.relative_to(root)): sha256(p) for kind in ('Figures', 'Results')
+                    for p in (root / kind / f'EXP{args.exp_id:03d}').rglob('*') if p.is_file()}
+    destination_root = safe_path(getattr(args, 'report_output_root', None) or root)
+    print(f'[report] Source: {root}; destination: {destination_root}', flush=True)
+    with staged_version(destination_root, args.exp_id) as (version, fig, res, finals):
         old_tempdir = tempfile.tempdir
         tempfile.tempdir = str(res)
         try:
@@ -418,9 +457,11 @@ def run_report(args):
                                     'completed_runs': sorted({r['CompletedRuns'] for r in report.indexed.values()}),
                                     'cache_identity': report.signature, 'source_cache_sha256': report.sources,
                                     'skipped_outputs': skipped})
-                hashes = _validate_artifacts(fig, res, required)
-                if any(sha256(root / path) != digest for path, digest in previous.items()):
-                    raise ValueError('Protected source/report changed during reporting')
+                with report_stage('Validate every generated artifact'):
+                    hashes = _validate_artifacts(fig, res, required)
+                with report_stage('Verify protected historical hashes'):
+                    if any(sha256(root / path) != digest for path, digest in previous.items()):
+                        raise ValueError('Protected source/report changed during reporting')
                 manifest = {'experiment_id': args.exp_id, 'report_version': version,
                             'report_version_is_scientific_repetition': False, 'reports': entries,
                             'figures_destination': str(finals[0]), 'results_destination': str(finals[1]),
@@ -430,5 +471,6 @@ def run_report(args):
                 (res / 'validation.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
         finally:
             tempfile.tempdir = old_tempdir
-    print(f'Published EXP{args.exp_id:03d} full_rep{version}: {finals[0]} and {finals[1]}')
+    print(f'[report] Published EXP{args.exp_id:03d} full_rep{version} in {time.perf_counter() - started:.1f}s: '
+          f'{finals[0]} and {finals[1]}', flush=True)
     return manifest

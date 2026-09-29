@@ -11,6 +11,13 @@ executes optimization or changes the experiment ID. For an explicit selection:
 python -B main_best.py --report-only --exp-id 627 --experiment-mode full
 ```
 
+The console prints flushed startup, stage, and per-PNG progress with elapsed
+times. Full 600-dpi reporting can take several minutes; publication occurs only
+after every artifact is validated. To run the complete workload in a temporary
+destination while reading the original caches directly, add
+`--report-output-root /tmp/exp627-report-check`. This changes only where the next
+report version is created; `--output-root` still selects the source tree.
+
 `--full-replica-report-only` and `--full-rep1-report-only` remain aliases of
 `--report-only`; neither fixes the destination at `full_rep1`. The plural
 `--experiment-modes` option supports multiple modes. All selected caches must

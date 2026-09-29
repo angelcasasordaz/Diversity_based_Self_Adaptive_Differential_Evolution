@@ -216,11 +216,27 @@ def _display_text(cell):
     return str(cell.value)
 
 
-def _cell_extent(ws, cell):
+def _merged_cell_extents(ws):
+    """Index numeric coordinates once per pass; never retain stale worksheet state.
+
+    Construction is linear in the number of merged coordinates (already allocated
+    by openpyxl). Lookups are O(1), without parsing range strings for every cell.
+    First-range precedence also matches the previous scan for overlapping ranges.
+    """
+    extents = {}
     for merged in ws.merged_cells.ranges:
-        if cell.coordinate in merged:
-            return merged.min_col, merged.max_col, merged.min_row, merged.max_row
-    return cell.column, cell.column, cell.row, cell.row
+        extent = merged.min_col, merged.max_col, merged.min_row, merged.max_row
+        for row in range(merged.min_row, merged.max_row + 1):
+            for column in range(merged.min_col, merged.max_col + 1):
+                extents.setdefault((row, column), extent)
+    return extents
+
+
+def _cell_extent(ws, cell, merged_extents=None):
+    if merged_extents is None:
+        merged_extents = _merged_cell_extents(ws)
+    return merged_extents.get((cell.row, cell.column),
+                              (cell.column, cell.column, cell.row, cell.row))
 
 
 def _needed_height(text, width):
@@ -231,6 +247,7 @@ def _needed_height(text, width):
 
 def apply_plain_presentation(ws):
     """White editable cells, visible gridlines, content-sized columns and rows."""
+    merged_extents = _merged_cell_extents(ws)
     for row in ws:
         for cell in row:
             cell.fill = PatternFill(fill_type=None)
@@ -243,7 +260,7 @@ def apply_plain_presentation(ws):
             cell = row[column - 1]
             if cell.value is None:
                 continue
-            first, last, _, _ = _cell_extent(ws, cell)
+            first, last, _, _ = _cell_extent(ws, cell, merged_extents)
             text = _display_text(cell)
             needed = max(map(len, text.split('\n'))) * 1.25 + 4
             if isinstance(cell.value, (int, float)):
@@ -259,7 +276,7 @@ def apply_plain_presentation(ws):
         for cell in row:
             if cell.value is None:
                 continue
-            first, last, top, bottom = _cell_extent(ws, cell)
+            first, last, top, bottom = _cell_extent(ws, cell, merged_extents)
             width = sum(ws.column_dimensions[get_column_letter(c)].width for c in range(first, last + 1))
             height = _needed_height(_display_text(cell), width)
             for r in range(top, bottom + 1):
@@ -276,6 +293,7 @@ def apply_plain_presentation(ws):
 def validate_plain_workbook(wb):
     """Check actual serialized presentation and conservative text extents."""
     for ws in wb:
+        merged_extents = _merged_cell_extents(ws)
         if ws.sheet_view.showGridLines is not True or ws.sheet_properties.pageSetUpPr.fitToPage:
             raise ValueError(f"Gridlines/print scaling invalid: {ws.title}")
         if ws.page_setup.fitToWidth or ws.page_setup.fitToHeight or ws.page_setup.paperSize == ws.PAPERSIZE_A3:
@@ -294,7 +312,7 @@ def validate_plain_workbook(wb):
                     continue
                 if cell.font.color is None or cell.font.color.type != 'rgb' or cell.font.color.rgb[-6:] != '000000':
                     raise ValueError(f"Nonblack text: {ws.title}/{cell.coordinate}")
-                first, last, top, bottom = _cell_extent(ws, cell)
+                first, last, top, bottom = _cell_extent(ws, cell, merged_extents)
                 width = sum(ws.column_dimensions[get_column_letter(c)].width for c in range(first, last + 1))
                 height = sum(ws.row_dimensions[r].height or 15 for r in range(top, bottom + 1))
                 if height + .01 < _needed_height(_display_text(cell), width) or not cell.alignment.wrap_text:

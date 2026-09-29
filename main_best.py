@@ -1,3 +1,6 @@
+if __name__ == "__main__":
+    print("[startup] Loading framework dependencies ...", flush=True)
+
 import argparse
 from contextvars import ContextVar
 import ctypes
@@ -491,6 +494,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-state", type=int, default=RANDOM_STATE, help="Train/test split seed")
     parser.add_argument("--seed-base", type=int, default=SEED_BASE, help="Base seed for runs")
     parser.add_argument("--output-root", default=OUTPUT_ROOT, help="Root directory for Figures and Results")
+    parser.add_argument("--report-output-root", default=None,
+                        help="Optional report-only destination; source caches remain under --output-root")
     parser.add_argument("--reuse-cache", action="store_true", default=REUSE_CACHE, help="Reuse cache when available")
     parser.add_argument("--figures-only", action="store_true", default=FIGURES_ONLY, help="Regenerate only charts from existing cache")
     parser.add_argument(

@@ -77,6 +77,20 @@ class GenericReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Incomplete'): core.run_report(args)
         self.assertFalse((self.root / 'Figures').exists())
 
+    def test_separate_report_destination_reads_original_caches(self):
+        args = arguments(self.root)
+        caches(args)
+        args.report_output_root = str(self.root / 'generated')
+        before = {p: core.sha256(p) for p in self.root.rglob('*.pkl')}
+        with patch.object(figures, 'publication_figures', tiny_figures), patch.object(figures, 'statistical_figures', tiny_figures):
+            manifest = core.run_report(args)
+        self.assertEqual(manifest['optimization_calls'], 0)
+        self.assertFalse((self.root / 'Figures').exists())
+        destination = self.root / 'generated'
+        self.assertTrue((destination / 'Results/EXP913/full_rep1/Paper_Tables_EXP913.xlsx').is_file())
+        self.assertFalse(list(destination.rglob('*.pkl')))
+        self.assertTrue(all(core.sha256(path) == digest for path, digest in before.items()))
+
     def test_g_complete_outputs_versions_and_unchanged_sources(self):
         args = arguments(self.root); caches(args)
         before_args = deepcopy(vars(args))
