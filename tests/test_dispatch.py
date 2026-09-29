@@ -19,7 +19,7 @@ class DispatchTests(unittest.TestCase):
         self.stack.enter_context(redirect_stdout(StringIO()))
         for name in ("_run_single", "execute_pending_runs", "load_dataset", "save_cache"):
             self.stack.enter_context(patch.object(m, name, side_effect=AssertionError("Scientific execution forbidden")))
-        self.report = self.stack.enter_context(patch("reporting.exp627_core.run_full_replica_report"))
+        self.report = self.stack.enter_context(patch("reporting.core.run_report"))
         self.run_mode = self.stack.enter_context(patch.object(m, "run_experiment_mode"))
         self.listing = self.stack.enter_context(patch.object(m, "print_available_optimizers"))
         self.backend = self.stack.enter_context(patch.object(m, "configure_compute_backend"))
@@ -74,11 +74,11 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(self.run_mode.call_args.args[0].experiment_mode, "ablation")
         self.report.assert_not_called()
 
-    def test_conflicting_report_and_mode_are_rejected_without_execution(self):
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as error:
-            self.invoke("--full-rep1-report-only", "--experiment-modes", "full")
-        self.assertEqual(error.exception.code, 2)
-        self.report.assert_not_called()
+    def test_report_mode_and_selected_exp_are_explicit(self):
+        self.invoke("--report-only", "--experiment-modes", "ablation", "--exp-id", "913")
+        self.report.assert_called_once()
+        self.assertEqual(self.report.call_args.args[0].exp_id, 913)
+        self.assertEqual(self.report.call_args.args[0].experiment_modes, ["ablation"])
         self.run_mode.assert_not_called()
         self.backend.assert_not_called()
 
@@ -87,6 +87,12 @@ class DispatchTests(unittest.TestCase):
             self.invoke("--help")
         self.assertEqual(error.exception.code, 0)
         self.report.assert_not_called()
+        self.run_mode.assert_not_called()
+        self.backend.assert_not_called()
+
+    def test_removed_experiment_specific_option_is_rejected(self):
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            self.invoke('--report-preset', 'exp627', '--experiment-mode', 'full')
         self.run_mode.assert_not_called()
         self.backend.assert_not_called()
 
@@ -100,7 +106,7 @@ class DirectModeDispatchTests(unittest.TestCase):
                     patch.object(sys, "argv", ["main_best.py", "--experiment-mode", mode]):
                 args = m.parse_args()
                 with patch.object(m, "apply_experiment_mode", side_effect=StopBeforeExecution) as apply, \
-                        patch("reporting.exp627_core.run_full_replica_report") as report:
+                        patch("reporting.core.run_report") as report:
                     with self.assertRaises(StopBeforeExecution):
                         m.run_experiment_mode(args)
                     apply.assert_called_once_with(args)
@@ -110,7 +116,7 @@ class DirectModeDispatchTests(unittest.TestCase):
         with patch.object(sys, "argv", ["main_best.py", "--full-rep1-report-only"]):
             args = m.parse_args()
         with patch.object(m, "apply_experiment_mode") as apply, \
-                patch("reporting.exp627_core.run_full_replica_report") as report:
+                patch("reporting.core.run_report") as report:
             m.run_experiment_mode(args)
         report.assert_called_once_with(args)
         apply.assert_not_called()

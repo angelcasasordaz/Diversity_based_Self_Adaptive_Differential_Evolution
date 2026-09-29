@@ -19,7 +19,7 @@ class SavePolicyTests(unittest.TestCase):
     def test_all_production_figure_writes_use_the_png_sink(self):
         writes = []
         root = Path(__file__).resolve().parents[1]
-        for source in (*root.glob("*.py"), *(root / "reporting").glob("*.py")):
+        for source in (*root.glob("*.py"), *(root / "reporting").rglob("*.py")):
             if source.name.startswith("test_"):
                 continue
             tree = ast.parse(source.read_text())
@@ -68,44 +68,6 @@ class SavePolicyTests(unittest.TestCase):
 
 
 class ReportOrchestrationPolicyTests(unittest.TestCase):
-    def test_report_only_orchestration_writes_pngs_without_full_size_rendering(self):
-        """Use stored inputs and tiny test figures; never redraw the publication package."""
-        import reporting.exp627_figures as report
-        import reporting.exp627_statistics as statistics
-        source = Path(__file__).resolve().parents[1]
-        cache = source / "Results/EXP627/full/cache"
-        reference = source / "Results/EXP627/full/RESUMEN_GRAFICAS_EXP627.csv"
-        if not cache.is_dir() or not reference.is_file():
-            self.skipTest("Saved EXP627 FULL inputs are required for orchestration validation")
-
-        def tiny_figure(*args, **kwargs):
-            fig, ax = plt.subplots(figsize=(1, 1))
-            ax.plot([0, 1])
-            return fig
-
-        with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
-            root = Path(folder)
-            (root / "Figures/EXP627").mkdir(parents=True)
-            (root / "Results/EXP627/full").mkdir(parents=True)
-            shutil.copytree(cache, root / "Results/EXP627/full/cache")
-            shutil.copy2(reference, root / "Results/EXP627/full" / reference.name)
-            for generator in ("general_figure", "radar_figure", "heatmap_figure", "precision_figure",
-                              "boxplot_figure", "violin_figure", "convergence_figure", "tradeoff_figure"):
-                stack.enter_context(patch.object(report, generator, tiny_figure))
-            stack.enter_context(patch.object(statistics, "figures", lambda *args: (tiny_figure() for _ in range(4))))
-            for name in ("_run_single", "execute_pending_runs", "build_optimizer", "save_cache", "configure_compute_backend"):
-                stack.enter_context(patch.object(m, name, side_effect=AssertionError("Scientific execution forbidden")))
-            stack.enter_context(patch.object(sys, "argv", ["main_best.py", "--full-rep1-report-only", "--output-root", folder]))
-            m.main()
-            fig = root / "Figures/EXP627/full_rep1"
-            self.assertEqual({p.name for p in fig.glob("*.png")}, {f"{s}.png" for s in report.STEMS})
-            self.assertEqual({p.name for p in (fig / "statistics").iterdir()}, {f"{s}.png" for s in statistics.STEMS})
-            self.assertFalse(list(root.rglob("*.pdf")))
-            import json
-            validation = json.loads((root / "Results/EXP627/full_rep1/validation.json").read_text())
-            self.assertEqual(validation["optimization_calls"], 0)
-            self.assertEqual(validation["statistical_pdfs"], 0)
-
     def test_all_statistical_figures_are_png_only_even_for_pdf_requests(self):
         with tempfile.TemporaryDirectory() as folder:
             fig = plt.figure(figsize=(1, 1), dpi=72)
@@ -113,7 +75,8 @@ class ReportOrchestrationPolicyTests(unittest.TestCase):
                 path = Path(folder) / "statistics.png"
                 with self.assertRaises(ValueError):
                     m._save_statistical_figure(fig, path, statistical_figure="standard")
-                from reporting.exp627_statistics import STEMS, IDS
+                IDS = ('average_rank', 'dsade_pairwise_holm', 'adjusted_pvalue_heatmap', 'f1_distribution_by_algorithm')
+                STEMS = tuple(f'statistical_{i}' for i in range(len(IDS)))
                 for stem, figure_id in zip(STEMS, IDS):
                     for save_pdf in (True, False):
                         m._save_statistical_figure(

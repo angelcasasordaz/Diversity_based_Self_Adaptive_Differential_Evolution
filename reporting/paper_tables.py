@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 import tempfile
+import math
 
 import numpy as np
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 
@@ -77,8 +78,6 @@ def make_workbook(tables, algorithms, layouts, *, title, description,
     wb = Workbook()
     wb.remove(wb.active)
     wb.properties.title, wb.properties.description = title, description
-    thin = Side(style="thin", color="DCE2E8")
-    group_border = Side(style="medium", color="8394A5")
     for sheet_index, (name, columns) in enumerate(layouts.items()):
         ws = wb.create_sheet(name)
         values, references = tables[name]
@@ -108,38 +107,14 @@ def make_workbook(tables, algorithms, layouts, *, title, description,
                 ws.cell(row, 2, stat)
                 for col, value in enumerate(values[i*4+stat_index], 3):
                     ws.cell(row, col, float(value) if np.isfinite(value) else None).number_format = "0.0000"
-                for cell in ws[row]:
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-                    cell.border = Border(left=thin, right=thin, top=group_border if stat_index == 0 else thin,
-                                         bottom=group_border if stat_index == 3 else thin)
-                    cell.fill = PatternFill("solid", fgColor="F3F6FA" if i % 2 == 0 else "FFFFFF")
-                    cell.font = Font(name="Calibri", size=11, bold=(opt == "DSADE"))
-                ws.row_dimensions[row].height = 20
-            ws.cell(first, 1).border = Border(left=thin, right=thin, top=group_border, bottom=group_border)
-        for row in ws.iter_rows(min_row=1, max_row=2):
-            for cell in row:
-                cell.font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
-                cell.fill = PatternFill("solid", fgColor="294866")
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                cell.border = Border(bottom=thin, right=thin)
-        ws.row_dimensions[1].height, ws.row_dimensions[2].height = 28, 25
-        ws.column_dimensions["A"].width, ws.column_dimensions["B"].width = 16, 12
-        for col in range(3, len(columns)+3):
-            ws.column_dimensions[get_column_letter(col)].width = 12
         ws.freeze_panes = "C3"
-        ws.sheet_view.showGridLines = False
-        ws.sheet_view.zoomScale = 85
         ws.print_title_rows = "1:2"
-        ws.print_area = f"A1:{get_column_letter(len(columns)+2)}{len(algorithms)*4+2}"
-        ws.page_setup.orientation = "landscape"
-        ws.page_setup.paperSize = ws.PAPERSIZE_A3
-        ws.sheet_properties.pageSetUpPr.fitToPage = True
-        ws.page_setup.fitToWidth = ws.page_setup.fitToHeight = 1
-        ws.print_options.horizontalCentered = True
+        apply_plain_presentation(ws)
         actual = [[ws.cell(5+i*4, col).value for col in range(3, len(columns)+3)]
                   for i in range(len(algorithms))]
         if not np.allclose(np.asarray(actual, dtype=float), references, rtol=1e-12, atol=1e-12, equal_nan=True):
             raise ValueError(f"Worksheet Mean validation failed: {name}")
+    validate_plain_workbook(wb)
     return wb
 
 
@@ -156,6 +131,7 @@ def workbook_bytes(wb, tables, *, temp_dir=None):
     buffer.seek(0)
     check = load_workbook(buffer, data_only=True)
     try:
+        validate_plain_workbook(check)
         if check.sheetnames != list(tables):
             raise ValueError("Serialized manuscript sheets changed")
         for name, (values, _) in tables.items():
@@ -202,24 +178,124 @@ Multiple transfer variants of one algorithm/classifier are likewise ambiguous.
     metrics = [metric for metric in METRICS if any(metric.run_key in row for row in indexed.values())]
     if not metrics:
         raise ValueError("No supported manuscript run metrics")
+    target = Path(paths.res_dir) / f"Paper_Tables_{paths.exp_tag}.xlsx"
+    return export_indexed_tables(indexed, datasets, algorithms, classifiers, metrics, target,
+                                 title=f"{paths.exp_tag} {args.experiment_mode.upper()}")
+
+
+def export_indexed_tables(indexed, datasets, algorithms, classifiers, metrics, target, *, title):
+    """Export validated optimizer/variant identities using the shared reducer."""
+    from reporting.core import framework
+    m = framework()
     layouts = {"Overall": [(metric.name, cls.upper(), datasets, cls, metric)
                            for metric in metrics for cls in classifiers]}
     for index, cls in enumerate(classifiers, 1):
-        # Numeric sheet names also support arbitrary classifier names and Excel's 31-character limit.
         layouts[f"Datasets_{index}"] = [(f"{ds} | {cls.upper()}", metric.name, [ds], cls, metric)
                                       for ds in datasets for metric in metrics]
     tables = calculate_tables(indexed, algorithms, layouts, m._run_stats)
     counts = sorted({np.asarray(row[metric.run_key]).size for row in indexed.values() for metric in metrics})
     description = (
-        f"{paths.exp_tag} FULL; run counts per dataset/algorithm/classifier/metric: {counts}. "
+        f"{title}; run counts per dataset/algorithm/classifier/metric: {counts}. "
         "Overall: matching run positions averaged equally across datasets before Best/Worst/Mean/Std. "
         "Std: sample ddof=1, zero for one finite run; non-finite observations excluded by _run_stats. "
         "Units: " + "; ".join(f"{metric.name}: {metric.unit}" for metric in metrics)
     )
-    wb = make_workbook(tables, algorithms, layouts, title=f"{paths.exp_tag} FULL — Paper Tables",
-                       description=description)
-    target = Path(paths.res_dir) / f"Paper_Tables_{paths.exp_tag}.xlsx"
+    wb = make_workbook(tables, algorithms, layouts, title=f"{title} — Paper Tables", description=description)
     payload = workbook_bytes(wb, tables)
+    target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(payload)
     return str(target)
+
+
+def _display_text(cell):
+    if cell.value is None:
+        return ""
+    if isinstance(cell.value, (int, float)) and cell.number_format == "0.0000":
+        return f"{cell.value:.4f}"
+    return str(cell.value)
+
+
+def _cell_extent(ws, cell):
+    for merged in ws.merged_cells.ranges:
+        if cell.coordinate in merged:
+            return merged.min_col, merged.max_col, merged.min_row, merged.max_row
+    return cell.column, cell.column, cell.row, cell.row
+
+
+def _needed_height(text, width):
+    # Conservative character budget for Calibri 11, including wide glyphs.
+    budget = max(1, int((width - 3) / 1.25))
+    return 17 * sum(max(1, math.ceil(len(line) / budget)) for line in text.split('\n')) + 6
+
+
+def apply_plain_presentation(ws):
+    """White editable cells, visible gridlines, content-sized columns and rows."""
+    for row in ws:
+        for cell in row:
+            cell.fill = PatternFill(fill_type=None)
+            cell.border = Border()
+            cell.font = Font(name="Calibri", size=11, color="000000")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for column in range(1, ws.max_column + 1):
+        width = 16.0
+        for row in ws:
+            cell = row[column - 1]
+            if cell.value is None:
+                continue
+            first, last, _, _ = _cell_extent(ws, cell)
+            text = _display_text(cell)
+            needed = max(map(len, text.split('\n'))) * 1.25 + 4
+            if isinstance(cell.value, (int, float)):
+                width = max(width, needed)
+            elif first == last:
+                width = max(width, min(72, needed))
+        if width > 255:
+            raise ValueError(f"Numeric value exceeds Excel's readable column width: {ws.title}/{column}")
+        ws.column_dimensions[get_column_letter(column)].width = width
+    for row in range(1, ws.max_row + 1):
+        ws.row_dimensions[row].height = 24
+    for row in ws:
+        for cell in row:
+            if cell.value is None:
+                continue
+            first, last, top, bottom = _cell_extent(ws, cell)
+            width = sum(ws.column_dimensions[get_column_letter(c)].width for c in range(first, last + 1))
+            height = _needed_height(_display_text(cell), width)
+            for r in range(top, bottom + 1):
+                ws.row_dimensions[r].height = max(ws.row_dimensions[r].height, height / (bottom - top + 1))
+    ws.sheet_view.showGridLines = True
+    ws.sheet_view.zoomScale = 100
+    ws.sheet_properties.pageSetUpPr.fitToPage = False
+    ws.page_setup.fitToWidth = ws.page_setup.fitToHeight = 0
+    ws.page_setup.scale = 100
+    ws.page_setup.paperSize = None
+    ws.print_area = ws.calculate_dimension()
+
+
+def validate_plain_workbook(wb):
+    """Check actual serialized presentation and conservative text extents."""
+    for ws in wb:
+        if ws.sheet_view.showGridLines is not True or ws.sheet_properties.pageSetUpPr.fitToPage:
+            raise ValueError(f"Gridlines/print scaling invalid: {ws.title}")
+        if ws.page_setup.fitToWidth or ws.page_setup.fitToHeight or ws.page_setup.paperSize == ws.PAPERSIZE_A3:
+            raise ValueError(f"Compressed manuscript print layout: {ws.title}")
+        # A full used-range print area is set by apply_plain_presentation.
+        from openpyxl.utils.cell import range_boundaries
+        if ws.print_area:
+            area = str(ws.print_area).split('!')[-1].replace('$', '')
+            if range_boundaries(area) != range_boundaries(ws.calculate_dimension()):
+                raise ValueError(f"Truncated print area: {ws.title}")
+        for row in ws:
+            for cell in row:
+                if cell.fill.fill_type or any(getattr(cell.border, side).style for side in ('left', 'right', 'top', 'bottom') if getattr(cell.border, side)):
+                    raise ValueError(f"Decorative styling: {ws.title}/{cell.coordinate}")
+                if cell.value is None:
+                    continue
+                if cell.font.color is None or cell.font.color.type != 'rgb' or cell.font.color.rgb[-6:] != '000000':
+                    raise ValueError(f"Nonblack text: {ws.title}/{cell.coordinate}")
+                first, last, top, bottom = _cell_extent(ws, cell)
+                width = sum(ws.column_dimensions[get_column_letter(c)].width for c in range(first, last + 1))
+                height = sum(ws.row_dimensions[r].height or 15 for r in range(top, bottom + 1))
+                if height + .01 < _needed_height(_display_text(cell), width) or not cell.alignment.wrap_text:
+                    raise ValueError(f"Potential clipped content: {ws.title}/{cell.coordinate}")

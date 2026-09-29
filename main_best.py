@@ -54,7 +54,7 @@ from optimizer_interceptor import Workload
 # ============================================================
 
 DATASET_SOURCE = "codesmell"
-FULL_REPLICA_REPORT_ONLY = False
+FULL_REPLICA_REPORT_ONLY = True
 
 # Reporting identity only; scientific optimizer configuration is unchanged.
 FULL_OPTIMIZER_COLORS = {
@@ -459,8 +459,9 @@ def validate_sensitivity_weight_pairs(weight_pairs) -> List[Tuple[float, float]]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Feature-selection comparison framework with cache and multi-run support")
-    parser.add_argument("--full-replica-report-only", "--full-rep1-report-only", action="store_true",
-                        help="Strict EXP627 FULL cache-only reporting into full_rep1 folders")
+    parser.add_argument("--report-only", "--full-replica-report-only", "--full-rep1-report-only",
+                        dest="full_replica_report_only", action="store_true",
+                        help="Cache-only reporting for the selected EXP/modes into the next full_repN")
     supported_modes = ["full", "ablation", "sensitivity", "sensitivity_weights", "transfer_functions"]
     parser.add_argument("--experiment-modes", nargs="+", default=None, choices=supported_modes)
     parser.add_argument("--experiment-mode", default=None, choices=supported_modes, help=argparse.SUPPRESS)
@@ -538,8 +539,6 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     explicit_mode = args.experiment_modes is not None or args.experiment_mode is not None
-    if explicit_mode and args.full_replica_report_only:
-        parser.error("Choose either an experiment mode or --full-replica-report-only")
     # The IDE default is safe; an explicit mode opts into the normal framework.
     args.full_replica_report_only = args.full_replica_report_only or (
         FULL_REPLICA_REPORT_ONLY and not explicit_mode
@@ -5417,8 +5416,8 @@ def clone_args_for_mode(base_args: argparse.Namespace, mode: str) -> argparse.Na
 
 def run_experiment_mode(args: argparse.Namespace) -> None:
     if getattr(args, "full_replica_report_only", False):
-        from reporting.exp627_core import run_full_replica_report
-        return run_full_replica_report(args)
+        from reporting.core import run_report
+        return run_report(args)
     apply_experiment_mode(args)
 
     validate_selection_options(args)
@@ -5760,8 +5759,8 @@ def main():
         print_available_optimizers()
         return
     if args.full_replica_report_only:
-        from reporting.exp627_core import run_full_replica_report
-        return run_full_replica_report(args)
+        from reporting.core import run_report
+        return run_report(args)
     logging.disable(logging.INFO)
     logging.getLogger("mealpy").setLevel(logging.WARNING)
 

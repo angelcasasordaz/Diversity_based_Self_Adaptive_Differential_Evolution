@@ -1,1 +1,1 @@
-"""Cache-only reporting for the exact EXP627 scientific configuration."""
+"""Generic cache-only publication reporting for user-selected experiments."""

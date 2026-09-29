@@ -1,91 +1,97 @@
-"""Safety regressions for the explicitly authorized FULL_REP1 reporting tree."""
+"""Append-only report allocation and publication in temporary trees."""
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from reporting.exp627_figures import validate_output_destination, STEMS
-from reporting.exp627_statistics import STEMS as STAT_STEMS, EXPECTED_RES
+from reporting.core import next_report_version, staged_version, sha256
 
 
-class FullRep1ValidationTests(unittest.TestCase):
+class ReportVersionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.fig = self.root / "Figures/EXP627/full_rep1"
-        self.res = self.root / "Results/EXP627/full_rep1"
-        for base in (self.fig, self.res):
-            (base / "statistics").mkdir(parents=True)
-        for stem in STEMS:
-            (self.fig / f"{stem}.png").write_bytes(b"report")
-        for stem in STAT_STEMS:
-            (self.fig / "statistics" / f"{stem}.png").write_bytes(b"report")
-        for name in EXPECTED_RES:
-            (self.res / "statistics" / name).write_text("report")
-        (self.res / "validation.json").write_text("{}")
-        (self.res / "latex_tables").mkdir()
-        for table in ("overall", "datasets_1", "datasets_2"):
-            for variant in ("mean_std", "full_stats"):
-                (self.res / "latex_tables" / f"table_{table}_{variant}.tex").write_text("table")
-        (self.res / "latex_tables/latex_table_validation.txt").write_text("validated")
 
-    def test_existing_complete_reporting_tree_is_repeatably_accepted(self):
-        before = {p: p.read_bytes() for base in (self.fig, self.res) for p in base.rglob("*") if p.is_file()}
-        for _ in range(2):
-            for base in (self.fig, self.res):
-                self.assertEqual(validate_output_destination(self.root, base), base)
-        self.assertTrue(all(p.read_bytes() == contents for p, contents in before.items()))
+    def pair(self, n, exp=913):
+        for kind in ('Figures', 'Results'):
+            base = self.root / kind / f'EXP{exp}' / f'full_rep{n}'
+            base.mkdir(parents=True)
+            (base / 'historical.txt').write_text(f'{kind} {n}')
 
-    def test_unknown_and_nested_directories_are_rejected(self):
-        for base in (self.fig, self.res):
-            for relative in ("cache", "other", "statistics/cache", "statistics/nested"):
-                path = base / relative
-                path.mkdir()
-                try:
-                    with self.subTest(path=path), self.assertRaises(ValueError):
-                        validate_output_destination(self.root, base)
-                finally:
-                    path.rmdir()
-        (self.fig / "latex_tables").mkdir()
-        with self.assertRaises(ValueError):
-            validate_output_destination(self.root, self.fig)
+    def test_a_b_c_d_e_versions_preserve_bytes_and_selected_exp(self):
+        self.assertEqual(next_report_version(self.root, 913), 1)
+        self.pair(1)
+        self.assertEqual(next_report_version(self.root, 913), 2)
+        self.pair(2)
+        self.assertEqual(next_report_version(self.root, 913), 3)
+        before = {p: sha256(p) for p in self.root.rglob('*.txt')}
+        with staged_version(self.root, 913) as (n, fig, res, finals):
+            self.assertEqual(n, 3)
+            (fig / 'new.txt').write_text('new')
+            (res / 'new.txt').write_text('new')
+            self.assertFalse(any(p.exists() for p in finals))
+        self.assertTrue(all(p.is_dir() for p in finals))
+        self.assertEqual(before, {p: sha256(p) for p in before})
+        self.assertFalse((self.root / 'Results/EXP914').exists())
 
-    def test_scientific_and_unexpected_files_are_rejected_at_every_depth(self):
-        for folder in (self.fig, self.res, self.fig / "statistics", self.res / "statistics", self.res / "latex_tables"):
-            base = self.fig if self.fig == folder or self.fig in folder.parents else self.res
-            for name in ("saved.pkl", "saved.PKL", "saved.pickle", "saved.ckpt", "checkpoint.json", "cache.csv", "unknown.txt", "stat_fig1_average_rank.pdf"):
-                path = folder / name
-                path.write_bytes(b"protected")
-                try:
-                    with self.subTest(path=path), self.assertRaises(ValueError):
-                        validate_output_destination(self.root, base)
-                finally:
-                    path.unlink()
+    def test_maximum_not_count_and_staging_ignored(self):
+        self.pair(1); self.pair(7)
+        (self.root / 'Results/EXP913/.report-staging-old').mkdir()
+        self.assertEqual(next_report_version(self.root, 913), 8)
 
-    def test_symlinks_are_rejected_even_with_authorized_names(self):
-        for path, base in ((self.res / "validation.json", self.res),
-                           (self.fig / "statistics" / f"{STAT_STEMS[0]}.png", self.fig)):
-            path.unlink()
-            path.symlink_to(self.root / "missing")
-            with self.subTest(path=path), self.assertRaises(ValueError):
-                validate_output_destination(self.root, base)
-            path.unlink()
-        empty = self.root / "empty"
-        empty.mkdir()
-        latex = self.res / "latex_tables"
-        for p in latex.iterdir():
-            p.unlink()
-        latex.rmdir()
-        latex.symlink_to(empty, target_is_directory=True)
-        with self.assertRaises(ValueError):
-            validate_output_destination(self.root, self.res)
+    def test_unpaired_versions_fail_before_writes(self):
+        (self.root / 'Figures/EXP913/full_rep8').mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'Incomplete'):
+            with staged_version(self.root, 913):
+                self.fail('must not allocate')
+        self.assertFalse((self.root / 'Results').exists())
 
-    def test_paths_outside_exact_reporting_roots_are_rejected(self):
-        for kind in ("Figures", "Results"):
-            for mode in ("full", "full/cache", "ablation", "sensitivity", "sensitivity_weights", "full_rep1/../full", "full_rep1/statistics"):
-                with self.subTest(kind=kind, mode=mode), self.assertRaises(ValueError):
-                    validate_output_destination(self.root, self.root / kind / "EXP627" / mode)
+    def test_conflicting_manifest_identity_is_preserved_and_rejected(self):
+        self.pair(1)
+        path = self.root / 'Results/EXP913/full_rep1/validation.json'
+        contents = '{"experiment_id": 914, "report_version": 1}'
+        path.write_text(contents)
+        with self.assertRaisesRegex(ValueError, 'Conflicting report manifest'):
+            next_report_version(self.root, 913)
+        self.assertEqual(path.read_text(), contents)
 
+    def test_conflicts_symlinks_and_unsafe_roots(self):
+        for kind in ('Figures', 'Results'):
+            (self.root / kind / 'EXP913').mkdir(parents=True)
+        p = self.root / 'Figures/EXP913/full_rep1'
+        p.write_text('file')
+        with self.assertRaises(ValueError): next_report_version(self.root, 913)
+        p.unlink(); p.symlink_to(self.root / 'missing')
+        with self.assertRaises(ValueError): next_report_version(self.root, 913)
+        p.unlink()
+        with self.assertRaises(ValueError): next_report_version(self.root / 'child/..', 913)
+        self.pair(1)
+        (p / 'link').symlink_to(self.root / 'missing')
+        with self.assertRaises(ValueError): next_report_version(self.root, 913)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_failed_generation_and_second_publication_leave_no_new_version(self):
+        self.pair(1)
+        with self.assertRaises(RuntimeError):
+            with staged_version(self.root, 913) as (_, fig, res, _):
+                (res / 'partial.txt').write_text('partial')
+                raise RuntimeError('export failed')
+        from reporting import core
+        real = core._rename_new
+        def fail_second(source, target):
+            if 'Results' in target.parts and target.name == 'full_rep2':
+                raise OSError('second publication failed')
+            real(source, target)
+        with patch.object(core, '_rename_new', side_effect=fail_second), self.assertRaises(OSError):
+            with staged_version(self.root, 913): pass
+        self.assertEqual(next_report_version(self.root, 913), 2)
+        self.assertFalse(list(self.root.rglob('.report-staging-*')))
+        self.assertFalse(list(self.root.rglob('.report-allocation.lock')))
+
+    def test_no_replace_even_if_destination_appears_during_generation(self):
+        with self.assertRaises(OSError):
+            with staged_version(self.root, 913) as (_, fig, res, finals):
+                finals[0].mkdir()
+                (finals[0] / 'concurrent.txt').write_text('preserve')
+        self.assertEqual((finals[0] / 'concurrent.txt').read_text(), 'preserve')
+        self.assertFalse(finals[1].exists())

@@ -13,7 +13,6 @@ from openpyxl import load_workbook
 
 import main_best as m
 from reporting import paper_tables as paper
-from reporting import exp627_excel_tables as preset
 
 
 def fixture(datasets=("First", "Second"), algorithms=("DE", "PSO"), classifiers=("knn", "rf"), runs=3):
@@ -150,47 +149,6 @@ class PaperTableTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.export(args, results)
 
-    def test_exp627_preset_layout_and_all_scientific_values(self):
-        args, results = fixture(preset.DATASETS, preset.TABLE_ORDER, preset.CLASSIFIERS, 30)
-        args.output_root = self.temp.name
-        indexed = {(ds, row["Estimator"], label.rsplit("_", 1)[0]): row
-                   for ds, records in results.items() for label, row in records.items()}
-        summary = pd.DataFrame([
-            dict(Dataset=ds, Estimator=cls, Optimizer=opt,
-                 **{csv_key: np.mean(row[run_key])/scale for _, run_key, csv_key, _, scale in preset.METRICS})
-            for (ds, cls, opt), row in indexed.items()])
-        existing = {sheet: pd.DataFrame({f"{opt}_{cls.upper()}":
-                    [np.mean(indexed[ds, cls, opt][key]) for ds in preset.DATASETS]
-                    for opt in preset.TABLE_ORDER for cls in preset.CLASSIFIERS}, index=preset.DATASETS)
-                    for _, key, _, sheet, _ in preset.METRICS}
-        with patch.object(preset, "load_completed_full", return_value=(args, results, indexed, [])), \
-                patch.object(preset.pd, "read_csv", return_value=summary), \
-                patch.object(preset.pd, "read_excel", return_value=existing):
-            tables, classifier = preset.prepare_tables(args)
-            (Path(self.temp.name)/"Results/EXP627").mkdir(parents=True)
-            preset.run_paper_tables(args)
-            self.assertTrue((Path(self.temp.name)/"Results/EXP627/full_rep1/Paper_Tables_EXP627.xlsx").is_file())
-        wb = load_workbook(BytesIO(paper.workbook_bytes(preset.make_workbook(tables, classifier), tables)), data_only=True)
-        self.addCleanup(wb.close)
-        self.assertEqual(wb.sheetnames, list(preset.SHEETS))
-        for sheet_index, name in enumerate(preset.SHEETS):
-            ws = wb[name]
-            self.assertEqual((ws.max_row, ws.max_column), (50, 14))
-            self.assertEqual(ws["A3"].value, "DSA-DE")
-            self.assertIn("A3:A6", ws.merged_cells)
-            for a, opt in enumerate(preset.TABLE_ORDER):
-                vectors = []
-                if sheet_index == 0:
-                    for _, key, _, _, scale in preset.METRICS:
-                        for cls in preset.CLASSIFIER_ORDER:
-                            vectors.append(np.mean([indexed[ds, cls, opt][key] for ds in preset.DATASETS], axis=0)/scale)
-                else:
-                    for ds in preset.DATASETS[(sheet_index-1)*3:sheet_index*3]:
-                        for _, key, _, _, scale in preset.METRICS:
-                            vectors.append(np.asarray(indexed[ds, "svm", opt][key])/scale)
-                for c, vector in enumerate(vectors, 3):
-                    expected = [max(vector), min(vector), np.mean(vector), np.std(vector, ddof=1)]
-                    np.testing.assert_allclose([ws.cell(3+a*4+s, c).value for s in range(4)], expected, rtol=1e-14)
 
 
 if __name__ == "__main__":
