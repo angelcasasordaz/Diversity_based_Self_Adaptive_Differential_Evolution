@@ -26,7 +26,10 @@ class CanonicalDSADETests(unittest.TestCase):
         # Captured from dsade_awad_optimizer.py before migration. Only class name
         # and class-level identity constants may change, never scientific methods.
         cls = ast.parse(inspect.getsource(DSADE)).body[0]
-        methods = [ast.dump(node, include_attributes=False) for node in cls.body
+        # Preserve the original Python 3.11 fingerprint across AST versions:
+        # 3.12 adds empty type_params and 3.13 omits empty fields by default.
+        dump_options = {"show_empty": True} if "show_empty" in inspect.signature(ast.dump).parameters else {}
+        methods = [ast.dump(node, include_attributes=False, **dump_options).replace(', type_params=[]', '') for node in cls.body
                    if isinstance(node, ast.FunctionDef)]
         digest = hashlib.sha256('\n'.join(methods).encode()).hexdigest()
         self.assertEqual(digest, '0d57b6324616eff3b1e0af21c451f3724a4f638677d53358f2fe5d6fc71d48ed')

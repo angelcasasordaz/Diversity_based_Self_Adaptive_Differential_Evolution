@@ -55,12 +55,18 @@ def tiny_figures(*args):
     yield 'tiny', fig
 
 
+def tiny_base_figures(report, skipped):
+    for name in figures.base_figure_names(report):
+        yield Path(name).stem, plt.figure(figsize=(.5, .5))
+
+
 class GenericReportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.stack = ExitStack(); self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(figures, 'base_publication_figures', tiny_base_figures))
         for name in ('_run_single', 'execute_pending_runs', 'build_optimizer', 'load_dataset', 'save_cache', 'configure_compute_backend'):
             mock = self.stack.enter_context(patch.object(m, name, side_effect=AssertionError('Optimization forbidden')))
             self.addCleanup(mock.assert_not_called)

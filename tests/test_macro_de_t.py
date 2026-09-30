@@ -25,7 +25,7 @@ from optimizer_factory import (build_optimizer, resolve_optimizer, optimizer_acr
 
 def load_reference():
     directory = Path(os.environ.get('CEC_SOURCE_DIR', Path(__file__).resolve().parents[2] /
-                     'Adaptive_Mahalanobis-Cholesky_Differential_Evolution_MaCRO_DE'))
+                     'Adaptive_Mahalanobis-Cholesky_DIfferential_Evolution'))
     modules = {}
     with patch.dict(sys.modules):
         for name in ('compute_backend', 'de_ablation_base', 'de_mc_optimizer', 'de_mc_cf_optimizer'):
@@ -263,7 +263,7 @@ class IntegrationTests(unittest.TestCase):
             args.optimizers = [old]
             self.assertNotEqual(sig, study.build_cache_signature(args))
         from optimizer_adapters import get_custom_adapter
-        self.assertIsNone(get_custom_adapter('DE-MC-CF'))
+        self.assertIs(get_custom_adapter('DE-MC-CF').optimizer_class, MaCRO_DE_t)
 
     def test_both_dataset_sources_use_main_best_run_path(self):
         import main_best as study

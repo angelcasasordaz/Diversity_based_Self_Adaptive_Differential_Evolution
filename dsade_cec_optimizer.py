@@ -1,17 +1,14 @@
-"""CEC MaCRO-DE port; only backend transport and revision metadata are adapted.
+"""Unmodified CEC DSADE science, exposed as DSADE-CEC to protect local DSADE.
 
-Source: Adaptive_Mahalanobis-Cholesky_DIfferential_Evolution/macro_de_optimizer.py.
-See CEC_OPTIMIZER_PORT.md for the audited source revision and scientific mapping.
+Source: Adaptive_Mahalanobis-Cholesky_DIfferential_Evolution/dsade_optimizer.py.
+Only this module docstring and scientific identity metadata were added.
 """
 import numpy as np
 from mealpy.optimizer import Optimizer
 from mealpy.utils.agent import Agent
 from scipy.stats import chi2
 
-from macro_de_t_backend import MaCRODETBackend
-
-
-class MaCRO_DE(Optimizer):
+class DSADE(Optimizer):
     """
     Diversity-based Self-Adaptive Control in Differential Evolution (DSADE)
     with:
@@ -19,7 +16,7 @@ class MaCRO_DE(Optimizer):
     - Mahalanobis grouping for mutation pool sampling
     """
 
-    IMPLEMENTATION_REVISION = "cec-frozen-generation-9fd6895"
+    IMPLEMENTATION_REVISION = "cec-dsade-9fd6895"
     SCIENTIFIC_PARAMETERS = ("epoch", "pop_size", "beta_min", "beta_max", "pcr", "mahalanobis_q")
 
     def __init__(
@@ -30,9 +27,6 @@ class MaCRO_DE(Optimizer):
         beta_max=0.8,
         pcr=0.2,
         mahalanobis_q=0.68,
-        compute_device="cpu",
-        gpu_device_id=0,
-        gpu_memory_fraction=0.85,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -42,12 +36,10 @@ class MaCRO_DE(Optimizer):
         self.beta_max = self.validator.check_float("beta_max", beta_max, (0.0, 2.0))
         self.pcr = self.validator.check_float("pcr", pcr, (0.0, 1.0))
         self.mahalanobis_q = self.validator.check_float("mahalanobis_q", mahalanobis_q, (0.0, 1.0))
-        self.compute_device = compute_device
-        self.backend = MaCRODETBackend(compute_device, gpu_device_id, gpu_memory_fraction)
         if self.beta_min > self.beta_max:
             raise ValueError("beta_min debe ser <= beta_max.")
         self.set_parameters(
-            ["epoch", "pop_size", "beta_min", "beta_max", "pcr", "mahalanobis_q", "compute_device"]
+            ["epoch", "pop_size", "beta_min", "beta_max", "pcr", "mahalanobis_q"]
         )
         self.sort_flag = False
         self.support_parallel_modes = True
@@ -58,8 +50,6 @@ class MaCRO_DE(Optimizer):
         self.fmean_hist = None
         self.div_max_seen = None
         self.div_norm_for_update = 1.0
-        self.mahalanobis_threshold = None
-        self._awad_pair_indices = None
 
     def initialize_variables(self):
         self.div_awad_hist = np.full(self.epoch, np.nan, dtype=float)
@@ -68,15 +58,11 @@ class MaCRO_DE(Optimizer):
         self.fmean_hist = np.full(self.epoch, np.nan, dtype=float)
         self.div_norm_for_update = 1.0
         self.div_max_seen = None
-        self.mahalanobis_threshold = None
 
     def before_main_loop(self):
         pop_pos = self._positions(self.pop)
         div0 = self._awad(pop_pos, self.problem.lb, self.problem.ub)
         self.div_max_seen = max(div0, self.EPSILON)
-        self.mahalanobis_threshold = float(
-            chi2.ppf(self.mahalanobis_q, max(self.problem.n_dims, 1))
-        )
 
     def _positions(self, pop):
         return np.array([agent.solution for agent in pop], dtype=float)
@@ -100,15 +86,14 @@ class MaCRO_DE(Optimizer):
         if npop <= 1:
             min_distance = 0.0
         else:
-            pair_count = npop * (npop - 1) // 2
-            if (
-                self._awad_pair_indices is None
-                or self._awad_pair_indices[0].size != pair_count
-            ):
-                self._awad_pair_indices = np.triu_indices(npop, k=1)
-            left, right = self._awad_pair_indices
-            diff = (pop_pos[right] - pop_pos[left]) / std_devs
-            min_distance = float(np.min(np.sqrt(np.sum(diff * diff, axis=1))))
+            min_distance = np.inf
+            for i in range(npop - 1):
+                diff = (pop_pos[i + 1 :] - pop_pos[i]) / std_devs
+                dists = np.sqrt(np.sum(diff * diff, axis=1))
+                if dists.size > 0:
+                    local_min = float(np.min(dists))
+                    if local_min < min_distance:
+                        min_distance = local_min
             if not np.isfinite(min_distance):
                 min_distance = 0.0
 
@@ -134,18 +119,14 @@ class MaCRO_DE(Optimizer):
 
     def _mutation_pool(self, pop_pos, div_norm_used):
         n_dims = self.problem.n_dims
-        thr = self.mahalanobis_threshold
-        if thr is None:
-            thr = float(chi2.ppf(self.mahalanobis_q, max(n_dims, 1)))
-        close, far = self.backend.close_far_indices(
-            pop_pos,
-            n_dims,
-            thr,
-            "cholesky",
-            include_distances=False,
-        )
-        close_particles = pop_pos[close]
-        far_particles = pop_pos[far]
+        mu = np.mean(pop_pos, axis=0)
+        sigma_inv = self._safe_cov_inv(pop_pos)
+        d = pop_pos - mu
+        dist2 = np.sum((d @ sigma_inv) * d, axis=1)
+        thr = chi2.ppf(self.mahalanobis_q, max(n_dims, 1))
+        close_mask = dist2 <= thr
+        close_particles = pop_pos[close_mask]
+        far_particles = pop_pos[~close_mask]
 
         if div_norm_used >= 0.5 and close_particles.shape[0] >= 3:
             return close_particles
@@ -162,12 +143,10 @@ class MaCRO_DE(Optimizer):
 
         f_used_sum = 0.0
         pop_new = []
-        pop_pos = self._positions(self.pop)
-        pool = self._mutation_pool(pop_pos, div_norm_used)
-        if pool.shape[0] < 3:
-            pool = pop_pos
 
         for idx in range(self.pop_size):
+            pop_pos = self._positions(self.pop)
+            pool = self._mutation_pool(pop_pos, div_norm_used)
             idxs = self.generator.choice(pool.shape[0], 3, replace=False)
             x1, x2, x3 = pool[idxs[0]], pool[idxs[1]], pool[idxs[2]]
 
@@ -207,7 +186,5 @@ class MaCRO_DE(Optimizer):
         self.div_norm_for_update = div_norm_now
 
 
-# Backward compatibility aliases
-MACRO_DE = MaCRO_DE
-DSADE = MaCRO_DE
-IMPDE = MaCRO_DE
+# Backward compatibility alias
+IMPDE = DSADE

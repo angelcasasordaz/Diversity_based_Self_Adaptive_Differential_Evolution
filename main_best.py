@@ -51,27 +51,22 @@ from optimizer_factory import (
     select_execution_strategy as select_backend_strategy,
 )
 from optimizer_interceptor import Workload
+import full_plot_style
 
 # ============================================================
 # EXPERIMENT CONFIGURATION
 # ============================================================
 
 DATASET_SOURCE = "codesmell"
-FULL_REPLICA_REPORT_ONLY = True
+# FULL_REPLICA_REPORT_ONLY = True
+FULL_REPLICA_REPORT_ONLY = False
 
 # Reporting identity only; scientific optimizer configuration is unchanged.
-FULL_OPTIMIZER_COLORS = {
-    "DSADE": "#0072B2", "DE": "#009E73", "JADE": "#E69F00",
-    "SHADE": "#CC79A7", "PSO": "#56B4E9", "WOA": "#D55E00",
-    "HHO": "#6A3D9A", "GOA": "#8DAA00", "SA": "#F0C808",
-    "BRO": "#A65628", "RUN": "#4D4D4D", "FOX": "#999999",
-}
+FULL_OPTIMIZER_COLORS = full_plot_style.OPTIMIZER_COLORS
 _FULL_REPORT_STYLE = ContextVar("full_report_style", default=False)
 
 def full_optimizer_line_style(name):
-    index = list(FULL_OPTIMIZER_COLORS).index(optimizer_acronym(name))
-    return {"linestyle": ["-", "--", ":", "-."][index % 4],
-            "marker": ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">", "h", "p"][index]}
+    return full_plot_style.line_style(optimizer_acronym(name))
 # Options:
 # "codesmell"
 # "mafese"
@@ -132,17 +127,21 @@ OPTIMIZERS = [
     # "MaCRO-DE-t",
     # "MaCRO-DE",
     "DSADE",
-    "DE",
-    "JADE",
-    "SHADE",
-    "PSO",
-    "WOA",
-    "HHO",
-    "GOA",
-    "SA",
-    "BRO",
-    "RUN",
-    "FOX",
+    "DSADE-CEC",
+    "MaCRO-DE",
+    "MaCRO-DE-t",
+    "MaCRO-DE-t-v2",
+    # "DE",
+    # "JADE",
+    # "SHADE",
+    # "PSO",
+    # "WOA",
+    # "HHO",
+    # "GOA",
+    # "SA",
+    # "BRO",
+    # "RUN",
+    # "FOX",
     # "DSADE",
     # MaCRO-DE Corrections
     # "MaCRO-DE",
@@ -172,7 +171,7 @@ ABLATION_OPTIMIZERS = [
 ESTIMATORS = [
     "knn",
     "svm",
-    "rf",
+    # "rf",
 ]
 
 TRANSFER_FUNCTIONS = [
@@ -254,8 +253,10 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 627
-REUSE_CACHE_FROM_EXP_ID = 627
+# EXP_ID = 627
+EXP_ID = 628
+# REUSE_CACHE_FROM_EXP_ID = 627
+REUSE_CACHE_FROM_EXP_ID = None
 # None -> do not search another experiment.
 #
 # Example:
@@ -265,7 +266,8 @@ TEST_SIZE = 0.2
 RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
-REUSE_CACHE = True
+# REUSE_CACHE = True
+REUSE_CACHE = False
 FIGURES_ONLY = False
 COMPUTE_DEVICE = "cpu"
 # Options:
@@ -2512,7 +2514,7 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str], transfer_variant
         tf = meta["TransferFunction"]
         color_map[group] = MACRO_DE_COLOR if str(method).upper() == "MACRO-DE" else colors[i]
         if _FULL_REPORT_STYLE.get() and not transfer_variants:
-            color_map[group] = FULL_OPTIMIZER_COLORS[optimizer_acronym(method)]
+            color_map[group] = full_plot_style.palette([optimizer_acronym(method)])[optimizer_acronym(method)]
         base_label = optimizer_display_label(method)
         label_map[group] = f"{base_label} {tf.upper()}" if tf and (transfer_variants or method in variant_methods) else base_label
 
@@ -4209,13 +4211,6 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
 
     metric_cols = ["AS_test", "PS_test", "RS_test", "F1_test"]
     metric_labels = ["Accuracy", "Precision", "Recall", "F1-Score"]
-    metric_header_styles = [
-        ("#d8e8f3", "#b8d3e6"),
-        ("#d2efee", "#abd9d7"),
-        ("#f7efd8", "#ead9ad"),
-        ("#f9d5d9", "#edaeb8"),
-    ]
-
     present_estimators = [str(e).lower() for e in plot_df["Estimator"].dropna().unique()]
     required_estimators = [] if transfer_variants or available_estimators_only else [e for e in ESTIMATORS if e in SUPPORTED_ESTIMATORS]
     estimators = [e for e in SUPPORTED_ESTIMATORS if e in set(required_estimators + present_estimators)]
@@ -4243,15 +4238,18 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
                 else np.nan
                 for opt in opts
             ]
-            edges = ["black" if is_dsade_plot_group(opt, method_by_group) else "none" for opt in opts]
-            widths = [2.2 if is_dsade_plot_group(opt, method_by_group) else 0.0 for opt in opts]
-            bars = ax.bar(x, vals, color=colors, edgecolor=edges, linewidth=widths, width=0.68)
+            if _FULL_REPORT_STYLE.get() and not transfer_variants:
+                full_plot_style.metric_bars(ax, vals, opts, color_map)
+            else:
+                edges = ["black" if is_dsade_plot_group(opt, method_by_group) else "none" for opt in opts]
+                widths = [2.2 if is_dsade_plot_group(opt, method_by_group) else 0.0 for opt in opts]
+                bars = ax.bar(x, vals, color=colors, edgecolor=edges, linewidth=widths, width=0.68)
 
             mean_val = float(np.nanmean(vals)) if np.isfinite(vals).any() else np.nan
-            if np.isfinite(mean_val):
+            if np.isfinite(mean_val) and not (_FULL_REPORT_STYLE.get() and not transfer_variants):
                 ax.axhline(mean_val, color="#d76c6c", linestyle="--", linewidth=0.9, alpha=0.8)
 
-            for bar, value in zip(bars, vals):
+            for bar, value in ([] if _FULL_REPORT_STYLE.get() and not transfer_variants else zip(bars, vals)):
                 if not np.isfinite(value):
                     continue
                 ax.text(
@@ -4285,17 +4283,9 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
             ax.set_axisbelow(True)
 
             if c == 0:
-                ax.set_ylabel(estimator.upper(), fontsize=12, fontweight="bold", color="#19365f")
+                ax.set_ylabel(estimator.upper(), fontsize=12, fontweight="bold", color="black")
             if r == 0:
-                face, edge = metric_header_styles[c]
-                ax.set_title(
-                    metric_label,
-                    fontsize=12,
-                    fontweight="bold",
-                    color="#19365f",
-                    pad=12,
-                    bbox=dict(boxstyle="round,pad=0.22", facecolor=face, edgecolor=edge),
-                )
+                full_plot_style.metric_header(ax, metric_label, c)
 
     legend = _plot_legend_patches(opts, color_map, label_map)
     fig.legend(handles=legend, loc="lower center", ncol=min(len(legend), 6), fontsize=9, framealpha=0.95)
@@ -4581,9 +4571,7 @@ def build_curve_dataframe(results_struct: Dict[str, Dict], args: argparse.Namesp
 
 
 def _grid_shape(n_items: int) -> tuple[int, int]:
-    n_cols = min(4, max(1, int(np.ceil(np.sqrt(max(1, n_items))))))
-    n_rows = int(np.ceil(max(1, n_items) / n_cols))
-    return n_rows, n_cols
+    return full_plot_style.grid_shape(n_items)
 
 
 def transfer_line_style(group: str) -> dict:
@@ -4897,7 +4885,8 @@ def generate_seven_global_charts(*args, **kwargs):
     report_args = args[4] if len(args) > 4 else kwargs["args"]
     token = _FULL_REPORT_STYLE.set(report_args.experiment_mode == "full")
     try:
-        return _generate_seven_global_charts(*args, **kwargs)
+        with plt.rc_context(full_plot_style.STYLE if report_args.experiment_mode == "full" else {}):
+            return _generate_seven_global_charts(*args, **kwargs)
     finally:
         _FULL_REPORT_STYLE.reset(token)
 
@@ -4967,7 +4956,7 @@ def _generate_seven_global_charts(
 
     pivot = plot_df.groupby(["PlotGroup", "Dataset"])["F1_test"].mean().unstack()
     mat = pivot.reindex(index=opts, columns=datasets).values
-    fig, ax = plt.subplots(figsize=(max(10, 0.9 * len(datasets) + 4), max(5, 0.45 * len(opts) + 2)))
+    fig, ax = plt.subplots(figsize=full_plot_style.figure_size('heatmap', len(opts), len(datasets)))
     im = ax.imshow(mat, cmap="Blues", vmin=0.0, vmax=1.0, aspect="auto")
     plt.colorbar(im, ax=ax, label="F1-Score (test)", shrink=0.8)
     ax.set_xticks(range(len(datasets)))
@@ -5004,7 +4993,7 @@ def _generate_seven_global_charts(
     saved.append("06_heatmap_f1_knn.png")
 
     data_violin = [run_plot_df[run_plot_df["PlotGroup"] == opt]["RS_test"].dropna().values for opt in run_opts]
-    fig, ax = plt.subplots(figsize=(max(12, 0.85 * len(run_opts) + 5), 6.5))
+    fig, ax = plt.subplots(figsize=full_plot_style.figure_size('violin', len(run_opts)))
     parts = ax.violinplot(data_violin, showmeans=False, showmedians=False, widths=0.78)
     for body, opt in zip(parts["bodies"], run_opts):
         body.set_facecolor(run_color_map.get(opt, "#888"))
@@ -5071,7 +5060,7 @@ def generate_global_accuracy_boxplot(df, out_dir, opt_order, save_pdf=True):
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict() if not plot_df.empty else {}
 
     fig, ax = plt.subplots(
-        figsize=(max(12, 0.8 * len(opts) + 5), 6)
+        figsize=full_plot_style.figure_size('boxplot', len(opts))
     )
 
     data_box = [
@@ -5162,7 +5151,7 @@ def generate_global_features_runtime(df, out_dir, opt_order, filename="09_global
     x = np.arange(len(opts))
     w = 0.38
 
-    fig, ax1 = plt.subplots(figsize=(12,6))
+    fig, ax1 = plt.subplots(figsize=full_plot_style.figure_size('features_runtime', len(opts)))
 
     ax2 = ax1.twinx()
 

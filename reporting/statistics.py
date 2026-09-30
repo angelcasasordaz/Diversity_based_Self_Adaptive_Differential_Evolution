@@ -88,7 +88,8 @@ def matched_block_matrix(indexed, datasets, classifiers, algorithms, metric):
 
 
 def export(report, figures, results):
-    from reporting.figures import statistical_figures, save_png
+    from reporting.figures import statistical_figures, save_png, STYLE
+    import matplotlib.pyplot as plt
     figures, results = Path(figures), Path(results)
     figures.mkdir(parents=True, exist_ok=True)
     results.mkdir(parents=True, exist_ok=True)
@@ -123,8 +124,9 @@ def export(report, figures, results):
     (results / 'statistical_report.txt').write_text('\n'.join(text) + '\n', encoding='utf-8')
     skipped = []
     if len(analysis['x']):
-        for stem, fig in statistical_figures(analysis, algorithms, metric.name):
-            save_png(fig, figures / f'{stem}.png')
+        with plt.rc_context(STYLE):
+            for stem, fig in statistical_figures(analysis, algorithms, metric.name):
+                save_png(fig, figures / f'{stem}.png')
     else:
         skipped.append({'output': 'Statistical PNGs', 'reason': 'No complete matched blocks'})
     if f['statistic'] is None:

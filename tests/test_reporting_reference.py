@@ -130,7 +130,7 @@ class HistoricalScientificValuesTests(unittest.TestCase):
                 actual.close(); reference.close()
 
     def test_exp627_report_only_completes_in_temporary_root(self):
-        from tests.test_generic_reporting import tiny_figures
+        from tests.test_generic_reporting import tiny_figures, tiny_base_figures
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             shutil.copytree(self.source / 'cache', root / 'Results/EXP627/full/cache')
@@ -143,6 +143,7 @@ class HistoricalScientificValuesTests(unittest.TestCase):
             # Exercise the actual CLI, Excel exporters, statistics and validation;
             # only figure construction is replaced to avoid publication rendering.
             with patch.object(sys, 'argv', argv), \
+                    patch.object(figures, 'base_publication_figures', tiny_base_figures), \
                     patch.object(figures, 'publication_figures', tiny_figures), \
                     patch.object(figures, 'statistical_figures', tiny_figures):
                 manifest = m.main()

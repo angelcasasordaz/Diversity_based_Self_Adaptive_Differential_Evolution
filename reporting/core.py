@@ -412,7 +412,13 @@ def generate_outputs(report, figures, results):
     with report_stage(f'{tag}: publication figures at 600 dpi'):
         skipped.extend(plotting.generate(report, figures))
     with report_stage(f'{tag}: statistical analysis and figures'):
-        skipped.extend(statistics.export(report, figures / 'statistics', results / 'statistics'))
+        skipped.extend(statistics.export(report, plotting.individual_destination(report, figures) / 'statistics', results / 'statistics'))
+    if args.experiment_mode == 'full':
+        actual = {p.name for p in figures.iterdir() if p.is_file()}
+        expected = set(plotting.base_figure_names(report))
+        omitted = {item['output'] for item in skipped} & expected
+        if actual != expected - omitted:
+            raise ValueError(f'Unexpected root figure layout: expected {sorted(expected - omitted)}, got {sorted(actual)}')
     return required, skipped
 
 
@@ -456,6 +462,12 @@ def run_report(args):
                                     'source_directory': str(root / 'Results' / report.exp_tag / report.args.experiment_mode / 'cache'),
                                     'completed_runs': sorted({r['CompletedRuns'] for r in report.indexed.values()}),
                                     'cache_identity': report.signature, 'source_cache_sha256': report.sources,
+                                    'figure_style': figures.base_style.STYLE_ID,
+                                    'base_classifier': figures.base_classifier(report) if report.args.experiment_mode == 'full' else None,
+                                    'root_figures': sorted(p.name for p in (fig / sub).glob('*.png')),
+                                    'individual_figures': sorted(str(p.relative_to(fig / sub)) for p in
+                                        figures.individual_destination(report, fig / sub).rglob('*.png'))
+                                        if report.args.experiment_mode == 'full' else [],
                                     'skipped_outputs': skipped})
                 with report_stage('Validate every generated artifact'):
                     hashes = _validate_artifacts(fig, res, required)

@@ -11,29 +11,19 @@ import numpy as np
 from scipy.stats import t
 
 from reporting.core import framework, report_stage
+import full_plot_style as base_style
 
 
-STYLE = {'font.family': 'DejaVu Sans', 'font.size': 10, 'axes.labelsize': 11,
-         'xtick.labelsize': 9, 'ytick.labelsize': 9, 'legend.fontsize': 9,
-         'figure.facecolor': 'white', 'axes.facecolor': 'white', 'savefig.facecolor': 'white',
-         'figure.dpi': 100, 'savefig.dpi': 600}
-# A reusable ordered palette, independent of experiment IDs and algorithm names.
-COLORS = ('#6E0D1B', '#009E73', '#E69F00', '#CC79A7', '#56B4E9', '#D55E00',
-          '#6A3D9A', '#8DAA00', '#F0C808', '#A65628', '#4D4D4D', '#999999')
+STYLE = base_style.STYLE
+palette = base_style.palette
+style_axes = base_style.style_axes
 
-
-def palette(algorithms):
-    extra = max(0, len(algorithms) - len(COLORS))
-    colors = list(COLORS) + [plt.get_cmap('hsv')((i + .5) / extra) for i in range(extra)]
-    return dict(zip(algorithms, colors))
-
-
-def style_axes(ax, horizontal=False):
-    ax.set_axisbelow(True)
-    ax.grid(axis='x' if horizontal else 'y', color='#D9D9D9', linestyle='--', linewidth=.65)
-    ax.spines[['top', 'right']].set_visible(False)
-    for spine in ax.spines.values():
-        spine.set_color('#777777')
+BASE_FIGURES = (
+    'grafica_resumen_general.png', 'radar_6smells_grid_svm.png',
+    'ranking_precision.png', 'boxplot_accuracy_general.png', 'heatmap_f1score.png',
+    'violin_recall.png', 'convergence_curve.png', 'features_runtime_per_optimizer.png',
+)
+INDIVIDUAL_DIRECTORY = 'individual'
 
 
 def metric_values(df, metric, classifier, datasets, algorithms):
@@ -48,6 +38,7 @@ def metric_values(df, metric, classifier, datasets, algorithms):
 def save_png(fig, path):
     try:
         target = Path(path).with_suffix('.png')
+        base_style.neutral_text(fig)
         with report_stage(f'Save {target.name} (600 dpi PNG)'):
             framework()._save_figure(fig, target, save_pdf=False, bbox_inches='tight')
         if not target.is_file():
@@ -75,10 +66,9 @@ def dataset_mean_ci(values):
 def panel_grid(count, *, width=5, height=4, polar=False):
     if count < 1:
         raise ValueError('A figure needs at least one observed panel')
-    columns = min(3, count)
-    rows = math.ceil(count / columns)
+    rows, columns = base_style.grid_shape(count)
     fig, axes = plt.subplots(rows, columns, figsize=(width * columns, height * rows),
-                             squeeze=False, layout='constrained',
+                             squeeze=False,
                              subplot_kw={'polar': True} if polar else None)
     for ax in axes.flat[count:]:
         ax.set_visible(False)
@@ -86,22 +76,45 @@ def panel_grid(count, *, width=5, height=4, polar=False):
 
 
 def algorithm_ticks(ax, algorithms, *, horizontal=False):
+    labels = [base_style.display_label(a) for a in algorithms]
     if horizontal:
-        ax.set_yticks(range(len(algorithms)), algorithms)
+        ax.set_yticks(range(len(algorithms)), labels)
     else:
-        ax.set_xticks(range(len(algorithms)), algorithms, rotation=45, ha='right')
+        ax.set_xticks(range(len(algorithms)), labels, rotation=45, ha='right')
 
 
-def summary_figure(report, classifier):
+def summary_figure(report, classifier=None):
     colors = palette(report.algorithms)
-    fig, axes = panel_grid(len(report.metrics), width=max(5, len(report.algorithms) * .55))
-    for ax, metric in zip(axes, report.metrics):
-        values = metric_matrix(report, classifier, metric)
-        ax.bar(range(len(report.algorithms)), values.mean(axis=1), color=list(colors.values()))
-        algorithm_ticks(ax, report.algorithms)
-        ax.set_ylabel(f'{metric.name} ({metric.unit})')
-        ax.set_title(f'{classifier.upper()} — mean across {len(report.datasets)} datasets')
-        style_axes(ax)
+    available = {m.run_key: m for m in report.metrics}
+    # Base overview keeps the numbered FULL classifier-by-classification-metric layout.
+    metrics = ([available[k] for k in ('AccRuns', 'PSRuns', 'RSRuns', 'F1Runs') if k in available]
+               if classifier is None else report.metrics)
+    classifiers = report.classifiers if classifier is None else [classifier]
+    columns = min(4, len(metrics))
+    rows_per_classifier = math.ceil(len(metrics) / columns)
+    rows = rows_per_classifier * len(classifiers)
+    fig, axes = plt.subplots(rows, columns, figsize=(max(5, 4.2*columns), 2.75*rows+2.2), squeeze=False)
+    for ci, cls in enumerate(classifiers):
+        for mi, metric in enumerate(metrics):
+            r, c = ci*rows_per_classifier + mi//columns, mi % columns
+            ax = axes[r, c]
+            values = metric_matrix(report, cls, metric).mean(axis=1)
+            base_style.metric_bars(ax, values, report.algorithms, colors)
+            algorithm_ticks(ax, report.algorithms)
+            ax.tick_params(labelsize=8)
+            ax.set_ylim(min(0., float(values.min())*1.2),
+                        1.10 if metric.unit == '0–1' else max(1., float(values.max())*1.2))
+            ax.set_ylabel(cls.upper() if classifier is None else f'{metric.name} ({metric.unit})',
+                          fontsize=12 if classifier is None else 10, fontweight='bold', color='black')
+            if ci == 0 or classifier is not None:
+                header_index = {'AccRuns': 0, 'PSRuns': 1, 'RSRuns': 2, 'F1Runs': 3}.get(metric.run_key, mi)
+                base_style.metric_header(ax, metric.name, header_index)
+            style_axes(ax)
+        for mi in range(len(metrics), rows_per_classifier*columns):
+            axes[ci*rows_per_classifier + mi//columns, mi % columns].set_visible(False)
+    fig.legend(handles=[Patch(color=colors[a], label=base_style.display_label(a)) for a in report.algorithms],
+               loc='lower center', ncol=min(6, len(report.algorithms)), fontsize=9, framealpha=.95)
+    fig.tight_layout(rect=(0, .06, 1, 1))
     return fig
 
 
@@ -128,27 +141,37 @@ def radar_figure(report, classifier, labels, values):
     for di, (ax, dataset) in enumerate(zip(axes, report.datasets)):
         for ai, algorithm in enumerate(report.algorithms):
             observed = values[ai, di]
-            ax.plot(angles, np.r_[observed, observed[0]], color=colors[algorithm], label=algorithm,
-                    linestyle=('-', '--', ':', '-.')[ai % 4], linewidth=1.5)
-        ax.set_xticks(angles[:-1], labels, fontsize=9)
+            highlighted = base_style.method_key(algorithm) == 'DSADE'
+            ax.plot(angles, np.r_[observed, observed[0]], color=colors[algorithm],
+                    label=base_style.display_label(algorithm), **base_style.line_style(algorithm),
+                    markersize=4, linewidth=2.4 if highlighted else 1.1,
+                    markeredgecolor='black' if highlighted else colors[algorithm])
+            ax.fill(angles, np.r_[observed, observed[0]], color=colors[algorithm], alpha=.12 if highlighted else .04)
+        ax.set_xticks(angles[:-1], labels, fontsize=8)
         ax.set_ylim(min(0., float(values.min())), max(1., float(values.max())))
-        ax.set_title(f'{dataset} / {classifier.upper()}', pad=24)
+        ax.set_title(f'{dataset} / {classifier.upper()}', fontsize=11, fontweight='bold', pad=14)
     handles, names = axes[0].get_legend_handles_labels()
-    fig.legend(handles, names, loc='outside lower center', ncol=min(6, len(names)), frameon=False)
+    fig.legend(handles, names, loc='lower center', ncol=min(6, len(names)), fontsize=9)
+    fig.tight_layout(rect=(0, .08, 1, 1))
     return fig
 
 
 def heatmap_figure(report, classifier, metric):
     values = metric_matrix(report, classifier, metric)
-    fig, ax = plt.subplots(figsize=(max(5, len(report.datasets) * 1.15), max(3, len(report.algorithms) * .45)), layout='constrained')
-    im = ax.imshow(values, aspect='auto', cmap='Blues')
+    fig, ax = plt.subplots(figsize=base_style.figure_size('heatmap', len(report.algorithms), len(report.datasets)))
+    normalized = metric.run_key in {'AccRuns', 'F1Runs', 'PSRuns', 'RSRuns'}
+    im = ax.imshow(values, aspect='auto', cmap='Blues', vmin=0 if normalized else None, vmax=1 if normalized else None)
     ax.set_xticks(range(len(report.datasets)), report.datasets, rotation=35, ha='right')
     algorithm_ticks(ax, report.algorithms, horizontal=True)
     ax.set_title(f'{classifier.upper()} — {metric.name} ({metric.unit})')
-    fig.colorbar(im, ax=ax, label='Cached run mean')
+    fig.colorbar(im, ax=ax, label=f'{metric.name} ({metric.unit}): cached run mean', shrink=.8)
+    for i, algorithm in enumerate(report.algorithms):
+        if base_style.method_key(algorithm) == 'DSADE':
+            framework().add_heatmap_row_outline(ax, i, len(report.datasets))
     for i, j in np.ndindex(values.shape):
-        ax.text(j, i, f'{values[i,j]:.4g}', ha='center', va='center', fontsize=8,
-                color='white' if im.norm(values[i,j]) > .6 else 'black')
+        ax.text(j, i, f'{values[i,j]:.4f}' if normalized else f'{values[i,j]:.4g}', ha='center', va='center', fontsize=8,
+                color='white' if im.norm(values[i,j]) > .8 else 'black')
+    fig.tight_layout()
     return fig
 
 
@@ -157,8 +180,10 @@ def precision_figure(values, algorithms, classifier):
     colors = palette(algorithms)
     fig, ax = plt.subplots(figsize=(max(7, max(map(len, algorithms)) * .12), max(3, len(algorithms)*.45)), layout='constrained')
     for i, algorithm in enumerate(algorithms):
+        highlighted = base_style.method_key(algorithm) == 'DSADE'
         ax.errorbar(means[i], i, xerr=None if intervals is None else intervals[i], fmt='o',
-                    color=colors[algorithm], markersize=6, capsize=4)
+                    color=colors[algorithm], markersize=8 if highlighted else 6, capsize=4,
+                    markeredgecolor='black' if highlighted else colors[algorithm])
         ax.annotate(f'{means[i]:.4f}', (means[i], i), xytext=(8, 7), textcoords='offset points', fontsize=9)
     algorithm_ticks(ax, algorithms, horizontal=True)
     ax.invert_yaxis()
@@ -171,74 +196,88 @@ def precision_figure(values, algorithms, classifier):
 def observations(ax, values, algorithms, *, means=False):
     colors = palette(algorithms)
     for i, algorithm in enumerate(algorithms):
-        ax.scatter(i + np.linspace(-.13, .13, values.shape[1]), values[i], s=28,
-                   color=colors[algorithm], edgecolor='white', linewidth=.5, zorder=4)
+        highlighted = base_style.method_key(algorithm) == 'DSADE'
+        ax.scatter(i + np.linspace(-.08, .08, values.shape[1]), values[i], s=45 if highlighted else 35,
+                   color=colors[algorithm], edgecolor='black' if highlighted else 'white',
+                   linewidth=1.2 if highlighted else .5, zorder=4)
         if means:
-            ax.scatter(i, values[i].mean(), marker='D', s=65, color=colors[algorithm], edgecolor='black', zorder=5)
+            ax.scatter(i, values[i].mean(), marker='D', s=140, color='black', edgecolor='white', zorder=5)
     algorithm_ticks(ax, algorithms)
     style_axes(ax)
 
 
 def boxplot_figure(values, algorithms, classifier):
-    fig, ax = plt.subplots(figsize=(max(6, len(algorithms)*.8), 5), layout='constrained')
-    boxes = ax.boxplot(values.T, positions=np.arange(len(algorithms)), patch_artist=True,
-                       showfliers=False, medianprops={'color': 'black', 'linewidth': 1.5})
-    for box, color in zip(boxes['boxes'], palette(algorithms).values()):
-        box.set_facecolor(color); box.set_alpha(.35)
+    fig, ax = plt.subplots(figsize=base_style.figure_size('boxplot', len(algorithms)))
+    boxes = ax.boxplot(values.T, positions=np.arange(len(algorithms)), patch_artist=True, widths=.55,
+                       showfliers=False, showmeans=True, medianprops={'color': 'black', 'linewidth': 1.5})
+    for box, algorithm, color in zip(boxes['boxes'], algorithms, palette(algorithms).values()):
+        box.set_facecolor(color); box.set_alpha(.70)
+        base_style.highlight_patch(box, algorithm, 2.8)
     observations(ax, values, algorithms)
     ax.set_ylabel('Accuracy (test): one cached run mean per dataset')
     ax.set_title(classifier.upper())
+    fig.tight_layout()
     return fig
 
 
 def violin_figure(values, algorithms, classifier):
     """Draw densities only for nonconstant samples, retaining every observation."""
-    fig, ax = plt.subplots(figsize=(max(6, len(algorithms)*.8), 5), layout='constrained')
-    for i, color in enumerate(palette(algorithms).values()):
+    fig, ax = plt.subplots(figsize=base_style.figure_size('violin', len(algorithms)))
+    for i, (algorithm, color) in enumerate(palette(algorithms).items()):
         if len(values[i]) > 1 and np.ptp(values[i]) > 0:
             parts = ax.violinplot([values[i]], positions=[i], widths=.78, showextrema=False)
             parts['bodies'][0].set_facecolor(color)
-            parts['bodies'][0].set_alpha(.28)
+            parts['bodies'][0].set_alpha(.22)
+            if base_style.method_key(algorithm) == 'DSADE':
+                parts['bodies'][0].set_edgecolor('black')
+                parts['bodies'][0].set_linewidth(2.4)
         ax.hlines(np.median(values[i]), i-.3, i+.3, colors='black', linestyles='--', linewidth=1.3)
     observations(ax, values, algorithms, means=True)
     ax.set_ylabel('Recall (test): one cached run mean per dataset')
     ax.set_title(classifier.upper())
     ax.legend(handles=[Line2D([], [], marker='D', color='none', markerfacecolor='#777777', label='Mean'),
                        Line2D([], [], color='black', linestyle='--', label='Median'),
-                       Line2D([], [], marker='o', color='none', markerfacecolor='#777777', label='Dataset mean')], frameon=False)
+                       Line2D([], [], marker='o', color='none', markerfacecolor='#777777', label='Dataset mean')],
+              loc='lower right', framealpha=.9)
+    fig.tight_layout()
     return fig
 
 
 def convergence_figure(report, classifier, datasets):
-    fig, axes = panel_grid(len(datasets))
+    fig, axes = panel_grid(len(datasets), width=5.8, height=4.4)
     colors = palette(report.algorithms)
     for ax, ds in zip(axes, datasets):
         for i, algorithm in enumerate(report.algorithms):
             curve = np.asarray(report.indexed[ds, classifier, algorithm]['Curve'])
-            ax.plot(np.arange(len(curve)), curve, label=algorithm, color=colors[algorithm],
-                    linestyle=('-', '--', ':', '-.')[i % 4])
-        ax.set_title(f'{ds} / {classifier.upper()}')
-        ax.set_xlabel('Iteration'); ax.set_ylabel('Fitness')
+            ax.plot(np.arange(len(curve)), curve, label=base_style.display_label(algorithm), color=colors[algorithm],
+                    **base_style.line_style(algorithm), markersize=4, markevery=max(1, len(curve)//12),
+                    linewidth=2.4 if base_style.method_key(algorithm) == 'DSADE' else 1.4)
+        ax.set_title(f'{ds} / {classifier.upper()}', fontsize=11, fontweight='bold')
+        ax.set_xlabel('Iteration', fontsize=9); ax.set_ylabel('Fitness', fontsize=9)
         style_axes(ax)
     handles, names = axes[0].get_legend_handles_labels()
-    fig.legend(handles, names, loc='outside lower center', ncol=min(6, len(names)), frameon=False)
+    fig.legend(handles, names, loc='lower center', ncol=min(6, len(names)), fontsize=9)
+    fig.tight_layout(rect=(0, .08, 1, 1))
     return fig
 
 
 def tradeoff_figure(features, runtime, algorithms, classifier):
-    fig, ax = plt.subplots(figsize=(max(7, len(algorithms)*.85), 5), layout='constrained')
+    fig, ax = plt.subplots(figsize=base_style.figure_size('features_runtime', len(algorithms)))
     twin = ax.twinx()
     colors = list(palette(algorithms).values())
-    for axis, values, shift, hatch, alpha in ((ax, features.mean(axis=1), -.2, None, 1),
-                                             (twin, runtime.mean(axis=1), .2, '///', .45)):
-        axis.bar(np.arange(len(algorithms))+shift, values, width=.36, color=colors, hatch=hatch, alpha=alpha)
+    for axis, values, shift, hatch, alpha in ((ax, features.mean(axis=1), -.19, None, .85),
+                                             (twin, runtime.mean(axis=1), .19, '///', .45)):
+        bars = axis.bar(np.arange(len(algorithms))+shift, values, width=.38, color=colors, hatch=hatch, alpha=alpha)
+        for bar, algorithm in zip(bars, algorithms):
+            base_style.highlight_patch(bar, algorithm, 2.8)
         axis.set_ylim(0, max(1., float(values.max())*1.2))
     algorithm_ticks(ax, algorithms)
     ax.set_ylabel('Average selected features'); twin.set_ylabel('Average runtime (s)')
     ax.set_title(classifier.upper())
-    style_axes(ax); twin.spines['top'].set_visible(False)
+    style_axes(ax)
     ax.legend(handles=[Patch(facecolor='#777777', label='Selected features'),
-                       Patch(facecolor='#777777', hatch='///', alpha=.45, label='Runtime')], frameon=False)
+                       Patch(facecolor='#777777', hatch='///', alpha=.45, label='Runtime')], framealpha=.95)
+    fig.tight_layout()
     return fig
 
 
@@ -287,11 +326,73 @@ def publication_figures(report, skipped):
             skipped.append({'output': f'Features/runtime/{classifier}', 'reason': 'Requires both FeatRuns and TimeRuns'})
 
 
+def base_classifier(report):
+    """Preserve the historical base views' SVM; use observed data on other suites."""
+    return 'svm' if 'svm' in report.classifiers else report.classifiers[0]
+
+
+def base_figure_names(report):
+    names = list(BASE_FIGURES)
+    classifier = base_classifier(report)
+    if len(report.datasets) != 6 or classifier != 'svm':
+        names[1] = f'radar_{len(report.datasets)}datasets_grid_{classifier}.png'
+    return tuple(names)
+
+
+def base_publication_figures(report, skipped):
+    """Eight existing base identities, sharing the individual figure builders."""
+    names = base_figure_names(report)
+    classifier = base_classifier(report)
+    available = {m.run_key: m for m in report.metrics}
+    if any(k in available for k in ('AccRuns', 'PSRuns', 'RSRuns', 'F1Runs')):
+        yield Path(names[0]).stem, summary_figure(report)
+    else:
+        skipped.append({'output': names[0], 'reason': 'No classification metrics'})
+    labels, values = radar_values(report, classifier)
+    if len(labels) >= 3:
+        yield Path(names[1]).stem, radar_figure(report, classifier, labels, values)
+    else:
+        skipped.append({'output': names[1], 'reason': 'Fewer than three radar axes'})
+    for index, key, builder in ((2, 'PSRuns', precision_figure),
+                                (3, 'AccRuns', boxplot_figure), (5, 'RSRuns', violin_figure)):
+        if key in available:
+            yield Path(names[index]).stem, builder(metric_matrix(report, classifier, available[key]),
+                                                   report.algorithms, classifier)
+        else:
+            skipped.append({'output': names[index], 'reason': f'{key} unavailable'})
+    if 'F1Runs' in available:
+        yield Path(names[4]).stem, heatmap_figure(report, classifier, available['F1Runs'])
+    else:
+        skipped.append({'output': names[4], 'reason': 'F1Runs unavailable'})
+    complete = [ds for ds in report.datasets if all(
+        np.asarray(report.indexed[ds, classifier, a].get('Curve', [])).size for a in report.algorithms)]
+    if complete:
+        yield Path(names[6]).stem, convergence_figure(report, classifier, complete)
+    else:
+        skipped.append({'output': names[6], 'reason': 'No complete stored curves'})
+    if {'FeatRuns', 'TimeRuns'} <= available.keys():
+        yield Path(names[7]).stem, tradeoff_figure(metric_matrix(report, classifier, available['FeatRuns']),
+            metric_matrix(report, classifier, available['TimeRuns']), report.algorithms, classifier)
+    else:
+        skipped.append({'output': names[7], 'reason': 'Requires FeatRuns and TimeRuns'})
+
+
+def individual_destination(report, destination):
+    return Path(destination) / INDIVIDUAL_DIRECTORY if report.args.experiment_mode == 'full' else Path(destination)
+
+
 def generate(report, destination):
     skipped = []
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    individual = individual_destination(report, destination)
+    individual.mkdir(parents=True, exist_ok=True)
     with plt.rc_context(STYLE):
+        if report.args.experiment_mode == 'full':
+            for stem, fig in base_publication_figures(report, skipped):
+                save_png(fig, destination / f'{stem}.png')
         for stem, fig in publication_figures(report, skipped):
-            save_png(fig, Path(destination) / f'{stem}.png')
+            save_png(fig, individual / f'{stem}.png')
     return skipped
 
 
@@ -300,8 +401,10 @@ def statistical_figures(analysis, algorithms, metric):
     labels = [algorithms[i] for i in ranked]
     k, n = len(algorithms), len(x)
     fig, ax = plt.subplots(figsize=(max(6, max(map(len, algorithms)) * .12), max(3, k * .45)), layout='constrained')
-    ax.barh(range(k), ranks[ranked], color='#777777')
-    ax.set_yticks(range(k), labels); ax.invert_yaxis()
+    bars = ax.barh(range(k), ranks[ranked], color=list(palette(labels).values()))
+    for bar, label in zip(bars, labels):
+        base_style.highlight_patch(bar, label)
+    ax.set_yticks(range(k), [base_style.display_label(a) for a in labels]); ax.invert_yaxis()
     ax.set_xlabel('Average rank (1 = best)')
     style_axes(ax, True)
     yield 'generic_average_rank', fig
@@ -313,11 +416,11 @@ def statistical_figures(analysis, algorithms, metric):
         fig, ax = plt.subplots(figsize=(8, max(3, len(comparisons)*.5)), layout='constrained')
         values = comparisons.Holm_adjusted_p.to_numpy()
         # Keep zero p-values visible without assigning a made-up positive value.
-        ax.scatter(values, np.arange(len(values)), color='#333333')
+        ax.scatter(values, np.arange(len(values)), color=palette([reference])[reference])
         for i, value in enumerate(values):
             ax.annotate(f'{value:.5g}', (value, i), xytext=(5, 5), textcoords='offset points')
         ax.axvline(.05, linestyle='--', color='#777777')
-        ax.set_yticks(range(len(values)), comparisons.Algorithm_B); ax.invert_yaxis()
+        ax.set_yticks(range(len(values)), [base_style.display_label(a) for a in comparisons.Algorithm_B]); ax.invert_yaxis()
         ax.set_xlim(-.02, 1.08)
         ax.set_xlabel(f'Holm-adjusted p; {len(pairs)}-pair family')
         ax.set_title(f'{reference} versus other algorithms (configured reference)')
@@ -326,7 +429,8 @@ def statistical_figures(analysis, algorithms, metric):
 
     fig, ax = plt.subplots(figsize=(max(5, k * .6), max(4, k * .5)), layout='constrained')
     im = ax.imshow(np.ma.masked_invalid(analysis['matrix']), vmin=0, vmax=1, cmap='Greys_r')
-    ax.set_xticks(range(k), algorithms, rotation=45, ha='right'); ax.set_yticks(range(k), algorithms)
+    labels_all = [base_style.display_label(a) for a in algorithms]
+    ax.set_xticks(range(k), labels_all, rotation=45, ha='right'); ax.set_yticks(range(k), labels_all)
     for i, j in np.ndindex((k, k)):
         p = analysis['matrix'][i, j]
         ax.text(j, i, f'{p:.3g}' if np.isfinite(p) else 'N/A', ha='center', va='center', fontsize=8,
@@ -335,10 +439,13 @@ def statistical_figures(analysis, algorithms, metric):
     yield 'generic_holm_heatmap', fig
 
     fig, ax = plt.subplots(figsize=(max(6, k * .65), 4), layout='constrained')
-    ax.boxplot(x[:, ranked], positions=np.arange(k), showfliers=False)
+    boxes = ax.boxplot(x[:, ranked], positions=np.arange(k), showfliers=False, patch_artist=True, widths=.55)
+    for box, label in zip(boxes['boxes'], labels):
+        box.set_facecolor(palette(labels)[label]); box.set_alpha(.7)
+        base_style.highlight_patch(box, label, 2.8)
     for pos, i in enumerate(ranked):
-        ax.scatter(pos + np.linspace(-.18, .18, n), x[:, i], s=15, color='#555555')
-    ax.set_xticks(range(k), labels, rotation=45, ha='right')
+        ax.scatter(pos + np.linspace(-.18, .18, n), x[:, i], s=15, color=palette(algorithms)[algorithms[i]])
+    ax.set_xticks(range(k), [base_style.display_label(a) for a in labels], rotation=45, ha='right')
     ax.set_ylabel(f'{metric}: cached run mean per matched block')
     style_axes(ax)
     yield 'generic_block_distribution', fig

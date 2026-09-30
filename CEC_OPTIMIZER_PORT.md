@@ -1,0 +1,149 @@
+# CEC optimizer port audit
+
+Audited on 2026-09-29 against the sibling project
+`../Adaptive_Mahalanobis-Cholesky_DIfferential_Evolution`, commit
+`9fd6895d2084760882b5b3325f667701a6964666`. The source files listed below were
+unmodified in that checkout; its unrelated untracked validation script was not
+used. Public identities were traced through `algorithm_acronym_list.py`, then
+through the actual classes, inheritance, backend methods, and `main.py` parameter
+mapping. No CEC benchmark, dataset, reporting, or experiment code was imported.
+
+## Exact identities and the DSADE naming conflict
+
+| Requested CEC name | CEC registry implementation | Feature-selection selection |
+| --- | --- | --- |
+| `DSADE`, `DSA-DE`, `DSA_DE` | `dsade_optimizer.DSADE` | Exact source available as **`DSADE-CEC`** (`dsade_cec_optimizer.DSADE`). Existing **`DSADE`** still resolves to `dsade_awad_optimizer.DSADE`, unchanged. |
+| `MaCRO-DE`, `MACRO_DE`, `MACRODE` | `macro_de_optimizer.MaCRO_DE` | `MaCRO-DE` → `macro_de_optimizer.MaCRO_DE` |
+| `MaCRO-DE-t`, `DE-MC-CF`, `DE_MC_CF` | `de_mc_cf_optimizer.DE_MC_CF` → `de_mc_optimizer.DE_MC` → `de_ablation_base.MahalanobisDEBase` | `MaCRO-DE-t` → existing `macro_de_t_optimizer.MaCRO_DE_t` (verified source-derived port) |
+| `MaCRO-DE-t-v2`, `DE-MC-CF-v2`, `DE_MC_CF_V2` | `de_mc_cf_v2_optimizer.DE_MC_CF_V2` → the preceding chain | `MaCRO-DE-t-v2` → `macro_de_t_v2_optimizer.DE_MC_CF_V2` (also exported as `MaCRO_DE_t_v2`) |
+
+CEC's public DSADE uses greedy fitness survivor selection. This project's DSADE
+additionally accepts an offspring with a better local AWAD contribution even if
+fitness is worse. Replacing it with CEC DSADE would violate the requirement to
+keep existing DSADE unchanged. The extra `DSADE-CEC` entry preserves both exact
+implementations without silently redefining an established alias. Source-local
+historical aliases `DSADE`/`IMPDE` inside CEC's **MaCRO-DE module** are not the
+CEC registry's public DSADE mapping and are not registered as such here.
+
+## Scientific behavior
+
+All variants use AWAD normalized against its cumulative maximum, delayed until
+the next generation, to route toward the close pool at normalized diversity
+`>= 0.5`, otherwise toward the far pool. They use a chi-square Mahalanobis
+threshold, covariance regularization `1e-6`, and Cholesky-based inverse geometry
+with pseudoinverse fallback. Forced binomial crossover and both calls to solution
+correction are retained, including MAFESE's existing binary transfer behavior.
+
+| FS name | Donor population | Mutation and crossover | Survivor selection |
+| --- | --- | --- | --- |
+| `DSADE` (unchanged) | Recomputed per target; can include target among donors | Coordinate-wise uniform beta, multiplied by `clip(1.5 - diversity, .5, 1.5)`, then clipped to `[.1, 1.5]`; crossover `clip(pcr + .25*(1-diversity), .1, .95)` | Better fitness, otherwise better local AWAD |
+| `DSADE-CEC` | Recomputed per target; can include target among donors | Same adaptive scale/crossover formulas | CEC greedy fitness selection |
+| `MaCRO-DE` | Frozen once per generation; can include target among donors | Same adaptive scale/crossover formulas | CEC greedy fitness selection |
+| `MaCRO-DE-t` | Frozen once per generation; target excluded from all donor pools, including fallback | Fixed scalar `wf=.5`, fixed `cr=.9` | CEC greedy fitness selection |
+| `MaCRO-DE-t-v2` | Same frozen population, target exclusion, routing, and geometry as `-t` | Independent coordinate-wise `uniform(beta_min, beta_max)` with **no diversity scaling or clipping**, fixed `pcr` | CEC greedy fitness selection |
+
+The per-target population changes within a generation only in single mode; the
+source's swarm/parallel mode performs deferred population selection. These
+mode-specific semantics, RNG draw order, pool-size fallback, and tie handling
+are preserved. Despite inheriting from `DE_MC`, CEC `DE_MC_CF` explicitly selects
+the **inverse-based `cholesky`** backend path, not `cholesky_solve` whitening.
+V2 retains that override.
+
+## Integration boundary
+
+- Replaced the old local MaCRO-DE implementation with the CEC source; only its
+  backend constructor/import and scientific revision metadata were adapted.
+- Copied v2's methods directly, importing the verified existing `-t` parent.
+- Copied CEC DSADE directly; only documentation and revision metadata were added.
+- Reused `macro_de_t_backend.CECCovarianceKernels` and `MaCRODETBackend`, which
+  transport the CEC covariance equations through the existing NumPy/CuPy GPU
+  owner service. No new numerical backend or CEC batch experiment scheduler is
+  needed. MaCRO-DE, `-t`, and v2 retain CPU/GPU covariance support; their AWAD,
+  RNG, and per-agent control stay on CPU as in the CEC classes. Local DSADE's
+  existing GPU support is untouched. CEC DSADE is correctly declared CPU-only.
+- Registered aliases in `optimizer_adapters.py`; the existing factory, resolver,
+  capability analysis, and scientific cache identity hooks consume them directly.
+  MaCRO-DE's new revision prevents old local MaCRO-DE caches from being treated
+  as the new CEC implementation. Existing result files are not modified.
+- All existing experiment settings remain in force: `dsade_beta_min`,
+  `dsade_beta_max`, `dsade_pcr`, and `dsade_mahal_q` map to the corresponding
+  parameters for DSADE, MaCRO-DE, v2, and DSADE-CEC. `-t` receives only q and keeps
+  fixed F/CR. Direct v2 construction retains its CEC defaults `.10/.60/.10/.50`;
+  `main_best.py` continues to supply its existing `.40/.80/.10/.50` configuration.
+  The CEC experiment settings themselves were not copied.
+
+## Files
+
+Added:
+
+- `macro_de_t_v2_optimizer.py`
+- `dsade_cec_optimizer.py`
+- `tests/test_cec_optimizer_port.py`
+- `CEC_OPTIMIZER_PORT.md`
+
+Modified:
+
+- `macro_de_optimizer.py`: exact CEC generation logic and backend bridge.
+- `optimizer_adapters.py`: independent aliases/classes and parameter mappings.
+- `tests/test_macro_de_t.py`: correct sibling reference path and new alias assertion.
+- `tests/test_dsade_canonical.py`: normalize Python 3.12/3.13 AST formatting to
+  preserve its original Python 3.11 expected fingerprint, without changing it.
+
+`main_best.py`, local DSADE, datasets, fitness, transfer functions, classifiers,
+experiment settings, reporting, and existing results are unchanged.
+
+## Validation
+
+The focused suite tests resolution/construction of every registered candidate
+alias, distinct scientific identities, parameter mappings, and tiny actual
+`main_best._run_single` MAFESE runs (48 synthetic samples, six features, KNN,
+`vstf_01`, ten individuals, two epochs). No full experiment runs.
+
+Source-backed tests compare method ASTs and seeded CPU trajectories against the
+unmodified CEC classes in single and swarm modes, in one and six dimensions.
+They check final populations, fitness histories, AWAD/control histories, routing
+counters, and final RNG state. Existing `-t` tests additionally cover donor
+exclusion, forced crossover, close/far routing, degeneracy, covariance fallback,
+and GPU service transport. CUDA tests skip explicitly when no device is present.
+Set `CEC_SOURCE_DIR` if the reference checkout is elsewhere.
+
+Validation result: **48 tests run, 46 passed, two CUDA tests skipped** because
+the environment reports `cudaErrorNoDevice`. Actual GPU execution therefore
+remains unverified here; CPU source equivalence and GPU service transport passed.
+`git diff --check` passed, and local DSADE was verified byte-for-byte equal to HEAD.
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MPLCONFIGDIR=/tmp/cec-port-mpl \
+  .venv/bin/python -m unittest \
+  tests.test_cec_optimizer_port tests.test_macro_de_t tests.test_dsade_canonical \
+  tests.test_sensitivity_optimizers tests.test_sensitivity_weights -v
+```
+
+To compare the four requested local names, replace only the selection block:
+
+```python
+OPTIMIZERS = [
+    "DSADE",
+    "MaCRO-DE",
+    "MaCRO-DE-t",
+    "MaCRO-DE-t-v2",
+]
+```
+
+For all four **exact CEC implementations**, use `"DSADE-CEC"` in the first slot.
+The existing report-only default also remains unchanged; an explicit
+`--experiment-mode full` uses the existing experiment dispatch when a real run
+is desired.
+
+## Source SHA-256 manifest
+
+```text
+a240cb3b11dcaa4681605252e93302f0f95ce197402f8c73b6be9713b90a3691  algorithm_acronym_list.py
+2fc3a1347a9abdd3ab039643f2fa3bd29c290802e6811d38cb453eb472844b21  dsade_optimizer.py
+fffd33f956215812f4236945d8106e094810dd0ca290e172d8b62570a760c890  macro_de_optimizer.py
+0501f80af33f3bf6d5926b45d88fa545afb261ab3c487697ca8d914c6c42f5eb  de_mc_cf_optimizer.py
+cd62dbfabdebf2d3133e1fb067921c5f5d8ef26d49aea184086d1a2ac52968da  de_mc_cf_v2_optimizer.py
+424907cd4c97bf84540851a45775e83583c6cc21706fd81cdce902dc4a1a6750  de_mc_optimizer.py
+ae7ab5ef49eee6a5c536b56e5117ba7c6695562b9a590263e2477144a8d610f0  de_ablation_base.py
+a79aa07a8a53a8a2aa7a149a09e7174fd89bd346c0e26664e33c08830f036850  compute_backend.py
+```
