@@ -1,12 +1,14 @@
-"""Unmodified CEC DSADE science, exposed as DSADE-CEC to protect local DSADE.
+"""CEC DSADE science with GPU transport, exposed as DSADE-CEC.
 
 Source: Adaptive_Mahalanobis-Cholesky_DIfferential_Evolution/dsade_optimizer.py.
-Only this module docstring and scientific identity metadata were added.
+Population kernels use the existing GPU owner service; RNG, fitness, and greedy
+selection remain on CPU. CPU equations and per-target update order are retained.
 """
 import numpy as np
 from mealpy.optimizer import Optimizer
 from mealpy.utils.agent import Agent
 from scipy.stats import chi2
+from diversity_gpu_batching import DiversityMathBatcher
 
 class DSADE(Optimizer):
     """
@@ -27,6 +29,9 @@ class DSADE(Optimizer):
         beta_max=0.8,
         pcr=0.2,
         mahalanobis_q=0.68,
+        compute_device="cpu",
+        gpu_device_id=0,
+        gpu_memory_fraction=0.85,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -36,10 +41,12 @@ class DSADE(Optimizer):
         self.beta_max = self.validator.check_float("beta_max", beta_max, (0.0, 2.0))
         self.pcr = self.validator.check_float("pcr", pcr, (0.0, 1.0))
         self.mahalanobis_q = self.validator.check_float("mahalanobis_q", mahalanobis_q, (0.0, 1.0))
+        self.compute_device = compute_device
+        self.math_batcher = DiversityMathBatcher(compute_device, gpu_device_id, gpu_memory_fraction)
         if self.beta_min > self.beta_max:
             raise ValueError("beta_min debe ser <= beta_max.")
         self.set_parameters(
-            ["epoch", "pop_size", "beta_min", "beta_max", "pcr", "mahalanobis_q"]
+            ["epoch", "pop_size", "beta_min", "beta_max", "pcr", "mahalanobis_q", "compute_device"]
         )
         self.sort_flag = False
         self.support_parallel_modes = True
@@ -68,6 +75,8 @@ class DSADE(Optimizer):
         return np.array([agent.solution for agent in pop], dtype=float)
 
     def _awad(self, pop_pos, lb, ub):
+        if self.math_batcher.uses_gpu:
+            return self.math_batcher.awad(pop_pos, lb, ub)
         _ = lb, ub
         npop, n_dims = pop_pos.shape
 
@@ -104,6 +113,8 @@ class DSADE(Optimizer):
         return float(div)
 
     def _safe_cov_inv(self, pop_pos):
+        if self.math_batcher.uses_gpu:
+            return self.math_batcher.covariance_inverse(pop_pos, self.problem.n_dims)
         n_dims = self.problem.n_dims
         sigma = np.cov(pop_pos, rowvar=False)
         if np.ndim(sigma) == 0:
@@ -119,6 +130,17 @@ class DSADE(Optimizer):
 
     def _mutation_pool(self, pop_pos, div_norm_used):
         n_dims = self.problem.n_dims
+        if self.math_batcher.uses_gpu:
+            # Same inverse-based Cholesky arithmetic and threshold as CPU.
+            close, far = self.math_batcher.macro_de_t_covariance(
+                "close_far_indices", pop_pos, n_dims,
+                chi2.ppf(self.mahalanobis_q, max(n_dims, 1)), "cholesky", False,
+            )
+            if div_norm_used >= 0.5 and close.size >= 3:
+                return pop_pos[close]
+            if div_norm_used < 0.5 and far.size >= 3:
+                return pop_pos[far]
+            return pop_pos
         mu = np.mean(pop_pos, axis=0)
         sigma_inv = self._safe_cov_inv(pop_pos)
         d = pop_pos - mu
@@ -154,14 +176,14 @@ class DSADE(Optimizer):
             f_vec = np.clip(f_vec, 0.10, 1.50)
             f_used_sum += float(np.mean(f_vec))
 
-            y = x1 + f_vec * (x2 - x3)
+            y = self.math_batcher.mutate(x1, x2, x3, f_vec)
             y = self.correct_solution(y)
 
             z = self.pop[idx].solution.copy()
             j0 = self.generator.integers(0, self.problem.n_dims)
             cross_mask = self.generator.random(self.problem.n_dims) <= pcr_it
             cross_mask[j0] = True
-            z[cross_mask] = y[cross_mask]
+            z = self.math_batcher.crossover(z, y, cross_mask)
             z = self.correct_solution(z)
             candidate = Agent(solution=z)
 

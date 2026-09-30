@@ -1,5 +1,42 @@
 # CEC optimizer port audit
 
+## DSADE-CEC GPU transport (2026-09-30)
+
+DSADE-CEC now accepts `compute_device`, `gpu_device_id`, and
+`gpu_memory_fraction` through the existing custom-optimizer adapter. It is
+registered as `GENERIC_GPU`, using `DiversityMathBatcher` and the existing local
+or remote GPU owner service. AWAD, regularized covariance/Cholesky inverse
+Mahalanobis grouping, mutation, and crossover execute on the device. Agent
+state, ordered RNG draws, adaptation scalars, MAFESE/scikit-learn fitness,
+solution correction, and greedy fitness survivor selection remain on CPU.
+
+The CPU AWAD and covariance equations remain intact. The GPU pool uses the same
+inverse-based Cholesky geometry, chi-square cutoff, pool order, fallback, and
+per-target population reconstruction. No frozen-generation change was applied
+to CEC DSADE: its single-mode population can change after each greedy survivor,
+and swarm-mode selection remains deferred. The scientific revision is unchanged
+because CPU behavior and scientific parameters are unchanged.
+
+GPU requests still raise on unavailable CUDA or failed service operations;
+there is no CPU fallback for explicit GPU mode. Existing factory and comparison
+validation code required no changes. Tests confirm five of five configured
+optimizers validate with an available GPU backend, and unavailable backends
+remain rejected. Main DSADE and all three MaCRO implementations are unchanged.
+
+Validation: **25 focused tests run, 23 passed, two real-CUDA tests skipped**
+(`cudaErrorNoDevice`). Seeded CPU trajectories match the authoritative CEC
+source exactly; the emulated GPU service path matches CPU trajectories/control
+histories in single and swarm modes (one and six dimensions), retaining RNG
+state. Source AST checks normalize only added GPU dispatch/equations. Factory
+device propagation, required kernel dispatch, strict failure behavior, aliases,
+five-optimizer strategy/validation, and main DSADE preservation passed.
+Compile/import checks and `git diff --check` passed. Actual CUDA parity and
+runtime five-of-five validation remain unverified without a CUDA device.
+No full EXP comparison or experiment artifact writes were performed.
+
+Earlier statements below describing DSADE-CEC as CPU-only are historical and
+superseded by this transport integration.
+
 ## Final active v2: MaCRO D-scaled coordinates and adaptive pcr (2026-09-30)
 
 The active revision is `macro-d-scaled-coordinate-adaptive-pcr-v5`:

@@ -67,7 +67,7 @@ class FactoryAndFeatureSelectionTests(unittest.TestCase):
                     self.assertEqual(resolved.canonical_name, name)
                     self.assertIs(resolved.optimizer_class, cls)
                     self.assertIs(type(build_optimizer(alias, settings)), cls)
-                    self.assertEqual(resolved.capability.supports_gpu, name != 'DSADE-CEC')
+                    self.assertTrue(resolved.capability.supports_gpu)
         self.assertEqual(len(set(identities)), len(NAMES))
 
     def test_source_defaults_and_existing_parameter_bridge(self):
@@ -261,12 +261,27 @@ class CECScientificEquivalenceTests(unittest.TestCase):
             for name, method in vars(reference).items():
                 if not inspect.isfunction(method):
                     continue
-                # MaCRO-DE's constructor only substitutes backend transport.
-                if port is MaCRO_DE and name == '__init__':
+                # Constructors add only backend transport/configuration.
+                if port in (MaCRO_DE, CEC_DSADE) and name == '__init__':
                     continue
                 with self.subTest(optimizer=port.__name__, method=name):
                     expected = ast.parse(textwrap.dedent(inspect.getsource(method)))
                     actual = ast.parse(textwrap.dedent(inspect.getsource(getattr(port, name))))
+                    if port is CEC_DSADE:
+                        # Remove GPU dispatch branches, then normalize the two
+                        # backend equations to their exact NumPy equivalents.
+                        body = actual.body[0].body
+                        body[:] = [node for node in body if not (
+                            isinstance(node, ast.If) and
+                            ast.unparse(node.test) == 'self.math_batcher.uses_gpu')]
+                        for node in ast.walk(actual):
+                            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                                call = ast.unparse(node.value.func)
+                                if call == 'self.math_batcher.mutate':
+                                    node.value = ast.parse('x1 + f_vec * (x2 - x3)', mode='eval').body
+                                elif call == 'self.math_batcher.crossover':
+                                    original = ast.parse('z[cross_mask] = y[cross_mask]').body[0]
+                                    node.targets, node.value = original.targets, original.value
                     self.assertEqual(ast.dump(actual), ast.dump(expected))
 
     def test_seeded_cpu_trajectories_match_cec_in_both_modes(self):
@@ -302,7 +317,7 @@ class CECScientificEquivalenceTests(unittest.TestCase):
         args.optimizer_compute_device = 'gpu'
         data = Data(np.random.default_rng(51).normal(size=(48, 6)), np.tile([0, 1], 24))
         data.split_train_test(test_size=.25, random_state=7)
-        for name in ('DSADE', 'MaCRO-DE', 'MaCRO-DE-t', 'MaCRO-DE-t-v2'):
+        for name in ('DSADE', 'DSADE-CEC', 'MaCRO-DE', 'MaCRO-DE-t', 'MaCRO-DE-t-v2'):
             with self.subTest(name=name):
                 result = study._run_single(data, 'knn', name, 'vstf_01', args, 71)
                 self.assertTrue(np.isfinite(result['fit_final']))

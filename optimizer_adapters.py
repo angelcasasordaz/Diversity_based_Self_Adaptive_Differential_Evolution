@@ -246,9 +246,8 @@ _CUSTOM = (
     OptimizerAdapter("MaCRO-DE", MaCRO_DE, ("MACRO-DE", "MACRO_DE", "MACRODE"), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
     OptimizerAdapter("DSADE", DSADE, ("DSA-DE", "DSA_DE"), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
     OptimizerAdapter("DSADE-CEC", CEC_DSADE, ("DSADE_CEC", "DSA-DE-CEC"),
-                     "CPU_ONLY", "the CEC DSADE source uses NumPy only",
-                     tuple(item for item in COMMON_PARAMETERS if item[1] not in
-                           {"compute_device", "gpu_device_id", "gpu_memory_fraction"})),
+                     "GENERIC_GPU", "CEC population kernels use the common GPU owner service",
+                     COMMON_PARAMETERS, _diversity_work, _diversity_memory),
     OptimizerAdapter("DE-AWAD", DE_AWAD, ("DE_AWAD",), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
     OptimizerAdapter("DE-DiversitySelection", DE_DiversitySelection, ("DE_DIVERSITYSELECTION",), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
     OptimizerAdapter("DE-Mahalanobis", DE_Mahalanobis, ("DE_MAHALANOBIS",), "GENERIC_GPU", _GPU_REASON, COMMON_PARAMETERS, _diversity_work, _diversity_memory),
