@@ -38,7 +38,7 @@ NAMES = {
 
 def load_cec_sources():
     directory = Path(os.environ.get('CEC_SOURCE_DIR', Path(__file__).resolve().parents[2] /
-                     'Adaptive_Mahalanobis-Cholesky_DIfferential_Evolution'))
+                     'Adaptive_Mahalanobis-Cholesky_Differential_Evolution_MaCRO_DE'))
     modules = {}
     with patch.dict(sys.modules):
         for name in ('compute_backend', 'de_ablation_base', 'de_mc_optimizer',
@@ -73,7 +73,7 @@ class FactoryAndFeatureSelectionTests(unittest.TestCase):
     def test_source_defaults_and_existing_parameter_bridge(self):
         from tests.test_sensitivity_optimizers import make_args
         settings = make_args()
-        for name in ('DSADE', 'MaCRO-DE', 'MaCRO-DE-t-v2', 'DSADE-CEC'):
+        for name in ('DSADE', 'MaCRO-DE', 'DSADE-CEC'):
             model = build_optimizer(name, settings)
             self.assertEqual((model.beta_min, model.beta_max, model.pcr, model.mahalanobis_q),
                              (settings.dsade_beta_min, settings.dsade_beta_max,
@@ -83,7 +83,11 @@ class FactoryAndFeatureSelectionTests(unittest.TestCase):
         self.assertNotIn('pcr', optimizer_constructor_kwargs('MaCRO-DE-t', settings))
         v2 = MaCRO_DE_t_v2(epoch=2, pop_size=10)
         self.assertEqual((v2.beta_min, v2.beta_max, v2.pcr, v2.mahalanobis_q), (.1, .6, .1, .5))
-        for forbidden in ('wf', 'cr'):
+        kwargs = optimizer_constructor_kwargs('MaCRO-DE-t-v2', settings)
+        self.assertEqual(kwargs['beta_min'], settings.dsade_beta_min)
+        self.assertEqual(kwargs['beta_max'], settings.dsade_beta_max)
+        self.assertFalse({'pcr', 'wf', 'cr'}.intersection(kwargs))
+        for forbidden in ('wf', 'cr', 'pcr'):
             with self.assertRaises(TypeError):
                 MaCRO_DE_t_v2(**{forbidden: .5})
 
@@ -108,14 +112,138 @@ class FactoryAndFeatureSelectionTests(unittest.TestCase):
                 self.assertGreaterEqual(result['n_features'], 1)
                 self.assertLessEqual(result['n_features'], 6)
 
-    def test_v2_scale_draws_are_unscaled_and_unclipped(self):
-        model = MaCRO_DE_t_v2(epoch=2, pop_size=10, beta_min=0., beta_max=2., pcr=0.)
+    def test_v2_coordinate_uniform_draws_with_macro_d_scaling_and_adaptive_pcr(self):
+        model = MaCRO_DE_t_v2(epoch=2, pop_size=10, beta_min=0., beta_max=2.)
         model.problem = SimpleNamespace(n_dims=100)
         model.generator = np.random.default_rng(42)
-        expected = np.random.default_rng(42).uniform(0., 2., 100)
-        np.testing.assert_array_equal(model._sample_scale_factors(), expected)
-        self.assertTrue(np.any(expected < .1))
-        self.assertTrue(np.any(expected > 1.5))
+        expected_rng = np.random.default_rng(42)
+        for D in (0., .25, .5, 1.):
+            for dM in (0., .25, .5, 1.):
+                f, pcr = model._adaptive_control(dM, D)
+                draws = expected_rng.uniform(0., 2., 100)
+                np.testing.assert_array_equal(f, np.clip(draws * np.clip(1.5-D, .5, 1.5), .1, 1.5))
+                self.assertTrue(np.all((f >= .1) & (f <= 1.5)))
+                self.assertGreater(np.ptp(f), 0.)
+                self.assertEqual(pcr, .1 + .25 * (1 - dM))
+        self.assertEqual(model.generator.bit_generator.state, expected_rng.bit_generator.state)
+
+    def test_v2_beta_bound_validation(self):
+        for low, high in ((-.1, .6), (.7, .6), (np.nan, .6), (.1, np.inf)):
+            with self.subTest(low=low, high=high), self.assertRaises(ValueError):
+                MaCRO_DE_t_v2(beta_min=low, beta_max=high)
+        model = MaCRO_DE_t_v2(beta_min=.4, beta_max=.4)
+        model.problem = SimpleNamespace(n_dims=3)
+        model.generator = np.random.default_rng(7)
+        np.testing.assert_array_equal(model._sample_scale_factors(.5), [.4, .4, .4])
+        np.testing.assert_allclose(model._sample_scale_factors(0.), [.6, .6, .6])
+        np.testing.assert_array_equal(model._sample_scale_factors(1.), [.2, .2, .2])
+
+    def test_v2_reuses_macro_diversity_definition(self):
+        from mealpy.utils.agent import Agent
+        population = np.random.default_rng(33).normal(size=(10, 3))
+        models = [cls(epoch=2, pop_size=10) for cls in (MaCRO_DE, MaCRO_DE_t_v2)]
+        for model in models:
+            model.problem = SimpleNamespace(n_dims=3, lb=np.full(3, -5.), ub=np.full(3, 5.))
+            model.pop = [Agent(solution=x.copy()) for x in population]
+            model.initialize_variables()
+            model.before_main_loop()
+        self.assertEqual(models[0].div_max_seen, models[1].div_max_seen)
+        for scale in (0., .1, 1., 2.):
+            values = [model._awad(scale*population, None, None) for model in models]
+            np.testing.assert_allclose(values[0], values[1], rtol=1e-14)
+
+    def test_v2_distance_normalization_and_collapsed_population(self):
+        np.testing.assert_array_equal(MaCRO_DE_t_v2._normalized_mahalanobis(
+            np.array([0., 1., 4., 16.])), [0., .25, .5, 1.])
+        np.testing.assert_array_equal(MaCRO_DE_t_v2._normalized_mahalanobis(np.zeros(5)), np.zeros(5))
+
+    def test_v2_evolution_uses_distance_control_and_greedy_survivors(self):
+        from mealpy.utils.agent import Agent
+        from mealpy.utils.target import Target
+        from scipy.stats import chi2
+        population = np.random.default_rng(73).normal(size=(10, 3))
+        for mode in ('single', 'swarm'):
+            model = MaCRO_DE_t_v2(epoch=1, pop_size=10)
+            model.problem = SimpleNamespace(n_dims=3, lb=np.full(3, -5.),
+                                            ub=np.full(3, 5.), minmax='min')
+            model.mode = mode
+            model.generator = np.random.default_rng(71)
+            model.correct_solution = lambda x: np.clip(x, -5., 5.)
+            model.get_target = lambda x, counted=True: Target(float(np.sum(x*x)))
+            model.pop = [Agent(solution=x.copy(), target=model.get_target(x)) for x in population]
+            model.initialize_variables()
+            model.before_main_loop()
+            model.div_norm_for_update = .25
+            expected_D = .25
+            dist2 = model._mahalanobis_dist2(population)
+            expected_dm = np.sqrt(dist2) / np.max(np.sqrt(dist2))
+            donors, trials, random_draws, crossover_rates = [], [], [], []
+            original_donors = model._sample_mutation_indices
+            original_crossover = model._binomial_crossover
+            def sample(positions, idx):
+                np.testing.assert_array_equal(positions, population)
+                result = original_donors(positions, idx)
+                self.assertNotIn(idx, result)
+                self.assertEqual(len(set(result)), 3)
+                donors.append(result)
+                rng = np.random.default_rng()
+                rng.bit_generator.state = model.generator.bit_generator.state
+                random_draws.append(rng.uniform(model.beta_min, model.beta_max, 3))
+                return result
+            def crossover(parent, mutant):
+                idx = len(trials)
+                i, j, k = donors[idx]
+                expected_f = np.clip(random_draws[idx] * np.clip(1.5-expected_D, .5, 1.5), .1, 1.5)
+                np.testing.assert_allclose(mutant, np.clip(
+                    population[i] + expected_f*(population[j]-population[k]), -5., 5.))
+                crossover_rates.append(model.cr)
+                trial = original_crossover(parent, mutant)
+                trials.append(trial.copy())
+                return trial
+            model._sample_mutation_indices = sample
+            model._binomial_crossover = crossover
+            # AWAD does not enter control or group classification.
+            # Historical note above: AWAD now supplies delayed D for F, never dM/groups.
+            with patch.object(model, '_awad', return_value=123.):
+                model.evolve(1)
+            np.testing.assert_allclose(model.dm_hist[0], expected_dm)
+            np.testing.assert_allclose(model.pcr_hist[0], .1 + .25*(1-expected_dm))
+            np.testing.assert_array_equal(crossover_rates, model.pcr_hist[0])
+            expected_scales = np.clip(np.array(random_draws)*(1.5-expected_D), .1, 1.5)
+            np.testing.assert_allclose(model.f_hist[0], np.mean(expected_scales, axis=1))
+            self.assertEqual(model.d_hist[0], expected_D)
+            self.assertEqual(model.div_norm_for_update,
+                             123. / (max(model.div_max_seen, 123.) + model.EPSILON))
+            self.assertGreater(np.ptp(model.pcr_hist[0]), 0.)
+            close, far = model._close_far_indices(population)
+            np.testing.assert_array_equal(close, np.flatnonzero(dist2 <= chi2.ppf(.5, 3)))
+            np.testing.assert_array_equal(far, np.flatnonzero(dist2 > chi2.ppf(.5, 3)))
+            for idx, trial in enumerate(trials):
+                expected = trial if np.sum(trial*trial) < np.sum(population[idx]**2) else population[idx]
+                np.testing.assert_array_equal(model.pop[idx].solution, expected)
+
+    def test_v2_cache_revision_and_legacy_settings_do_not_override_control(self):
+        settings = SimpleNamespace(epochs=2, pop_size=10, dsade_beta_min=.4,
+                                   dsade_beta_max=.8, dsade_pcr=.9, dsade_mahal_q=.5)
+        for alias in ('MaCRO-DE-t-v2', 'MaCRO_DE_t_v2'):
+            model = build_optimizer(alias, settings)
+            self.assertEqual(model.pcr, .1)
+            self.assertEqual((model.beta_min, model.beta_max), (.4, .8))
+            identity = optimizer_scientific_identity(alias, settings)
+            self.assertEqual(identity['implementation_revision'], 'macro-d-scaled-coordinate-adaptive-pcr-v5')
+            self.assertEqual(set(identity['parameters']),
+                             {'epoch', 'pop_size', 'beta_min', 'beta_max', 'mahalanobis_q'})
+            self.assertEqual(identity['parameters']['beta_min'], .4)
+            self.assertEqual(identity['parameters']['beta_max'], .8)
+        import main_best as study
+        from tests.test_sensitivity_optimizers import make_args
+        args = make_args()
+        args.optimizers = ['MaCRO-DE-t-v2']
+        signature = study.build_cache_signature(args)
+        with patch.object(MaCRO_DE_t_v2, 'IMPLEMENTATION_REVISION', 'coordinate-beta-adaptive-pcr-v4'):
+            self.assertNotEqual(signature, study.build_cache_signature(args))
+        args.dsade_beta_min += .01
+        self.assertNotEqual(signature, study.build_cache_signature(args))
 
 
 class CECScientificEquivalenceTests(unittest.TestCase):
@@ -125,7 +253,6 @@ class CECScientificEquivalenceTests(unittest.TestCase):
         cls.pairs = (
             (MaCRO_DE, cls.modules['macro_de_optimizer'].MaCRO_DE),
             (MaCRO_DE_t, cls.modules['de_mc_cf_optimizer'].DE_MC_CF),
-            (MaCRO_DE_t_v2, cls.modules['de_mc_cf_v2_optimizer'].DE_MC_CF_V2),
             (CEC_DSADE, cls.modules['dsade_optimizer'].DSADE),
         )
 

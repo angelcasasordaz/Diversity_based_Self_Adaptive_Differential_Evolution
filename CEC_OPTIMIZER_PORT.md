@@ -1,5 +1,129 @@
 # CEC optimizer port audit
 
+## Final active v2: MaCRO D-scaled coordinates and adaptive pcr (2026-09-30)
+
+The active revision is `macro-d-scaled-coordinate-adaptive-pcr-v5`:
+
+```text
+F_j = clip(U(beta_min, beta_max) * clip(1.5 - D, 0.5, 1.5), 0.1, 1.5)
+pcr = 0.1 + 0.25 * (1 - dM)
+```
+
+Uniform draws are independent per coordinate and mutation. D is the same
+delayed diversity value used inline by `MaCRO_DE.evolve`:
+`clip(div_norm_for_update, 0, 1)`. V2 reuses its inherited AWAD helper and
+cumulative-maximum normalization, matching MaCRO-DE's definition. The completed
+generation updates diversity as `clip(AWAD / (div_max_seen + EPSILON), 0, 1)`
+for the next generation. Initial D is 1. D is frozen for the generation and
+recorded in `d_hist`; F histories continue to record mean coordinate scales.
+No DSADE additive AWAD-based F formula or scalar `rand*(.60+1-dM)` is used.
+
+The separate target `dM = sqrt(dist2) / max(sqrt(dist2))` still comes from the
+frozen generation's Mahalanobis distances (zero for a collapsed population).
+Close/far groups still compare squared distances to the chi-square threshold
+using regularized covariance/Cholesky geometry. AWAD does not compute the
+groups: it supplies MaCRO D for scale adaptation and routes donor-pool sampling.
+Frozen-generation mutation, target exclusion, forced crossover, and greedy
+fitness survivor selection remain unchanged.
+
+The adapter already forwards beta bounds and q without fixed pcr and needs no
+further change. The revised scientific identity prevents reuse of v4 caches
+without modifying them. Main DSADE still maps to `dsade_awad_optimizer.py`.
+MaCRO-DE, MaCRO-DE-t, DSADE, and DSADE-CEC were not changed. MAFESE integration,
+transfer/fitness functions, datasets, classifiers, reporting, and historical
+comments are retained.
+
+Final v5 validation: **19 focused tests run, 18 passed, one CUDA test skipped**
+(`cudaErrorNoDevice`). Tests verify seeded coordinate draws with MaCRO D
+scaling/clipping, the reused diversity definition, adaptive pcr from dM,
+chi-square grouping, frozen mutation and D, target exclusion, greedy survivors
+in single/swarm modes, both aliases, beta forwarding, cache revision isolation,
+tiny MAFESE/KNN smoke runs, and unchanged comparison variants/main DSADE.
+Compile/import checks and `git diff --check` passed. No full EXP comparison
+was run. Ready for a new CPU EXP rerun; GPU execution remains unverified here.
+
+## Historical v4: unscaled coordinate draws (superseded, 2026-09-30)
+
+MaCRO-DE-t-v2 restores the reference v2 differential scale behavior:
+`F_j ~ U(beta_min, beta_max)`, independently per coordinate and mutation, with
+no dM scaling or clipping. Direct defaults are beta `.10/.60`; the FS adapter
+again forwards `dsade_beta_min`/`dsade_beta_max` (currently `.40/.80` in
+`main_best.py`). Only crossover remains adaptive:
+`pcr = 0.1 + 0.25 * (1 - dM)`.
+
+The target's `dM = sqrt(dist2) / max(sqrt(dist2))` still uses the frozen
+generation's Mahalanobis distances from the population mean; a collapsed
+population uses zero. Close/far remains regularized covariance/Cholesky
+chi-square threshold classification, with pseudoinverse fallback. AWAD only
+routes donor sampling. Frozen-generation mutation, target exclusion (including
+fallback pools), forced crossover, and greedy fitness selection are retained.
+`f_hist` records per-target mean coordinate scales; `fmean_hist` records the
+generation mean. No coordinate-scale history tensor is stored.
+
+Revision `coordinate-beta-adaptive-pcr-v4` includes beta bounds in scientific
+cache identity and prevents reuse of the intermediate scalar-F revision.
+Existing caches and experiment artifacts are untouched. Both
+`MaCRO-DE-t-v2` and `MaCRO_DE_t_v2` resolve to the corrected class. MaCRO-DE,
+MaCRO-DE-t, DSADE, and DSADE-CEC are unchanged; main DSADE still maps to
+`dsade_awad_optimizer.py`. MAFESE integration, transfer/fitness functions,
+datasets, classifiers, and reporting are retained.
+
+Active v4 validation: **18 focused tests run, 17 passed, one CUDA test skipped**
+(`cudaErrorNoDevice`). Tests cover exact seeded coordinate uniform draws,
+beta-bound validation/forwarding and cache identity, adaptive pcr, normalized
+distances, frozen-generation mutation, target exclusion, chi-square grouping,
+greedy survivors in single/swarm modes, both aliases, tiny MAFESE/KNN smoke
+runs, and unchanged source-equivalent comparison variants and main DSADE.
+Compile/import checks and `git diff --check` passed. No full EXP comparison,
+staging, commit, or push was performed. Ready for a new CPU EXP rerun; actual
+GPU execution remains unverified in this environment.
+
+## Historical adaptive v3 correction (superseded F behavior, 2026-09-30)
+
+The active FS `MaCRO-DE-t-v2` intentionally supersedes the fixed/configurable-pcr
+CEC v2 implementation. The supplied reference checkout
+`../Adaptive_Mahalanobis-Cholesky_Differential_Evolution_MaCRO_DE` still contains
+that older behavior, so v2 is no longer an exact source-equivalence comparison.
+`DSADE-CEC` remains the exact CEC/greedy comparison.
+
+For each target in the frozen generation, squared Mahalanobis distance is
+computed from the population mean using regularized covariance (`1e-6`) and
+Cholesky inverse geometry, with pseudoinverse fallback. Close/far classification
+compares that squared distance with `chi2.ppf(mahalanobis_q, n_dims)`.
+AWAD does **not** compute these groups; its existing delayed normalized value
+only routes donor sampling between them.
+
+The adaptive control distance is `dM = sqrt(dist2) / max(sqrt(dist2))` within
+the frozen generation; all-zero distances give all-zero dM. Each target uses
+one scalar `rand` draw in `[0, 1)`:
+
+```text
+F   = rand * (0.60 + (1 - dM))
+pcr = 0.1 + 0.25 * (1 - dM)
+```
+
+V2 accepts epoch, population size, q, and device settings. The adapter does not
+forward beta bounds or fixed pcr, and direct fixed-control arguments are rejected.
+The revision `mahalanobis-adaptive-control-v3` distinguishes its cache identity
+without changing existing caches. The MAFESE wrapper, transfer and fitness
+functions, datasets, classifiers, reporting, and historical commented options
+are retained. MaCRO-DE, MaCRO-DE-t, and v2 all use greedy fitness survivors.
+Among these comparison variants, only main DSADE uses AWAD survivor selection
+and still maps to `dsade_awad_optimizer.py`; the independent
+`DE-DiversitySelection` ablation also has AWAD selection.
+
+The earlier source audit below is historical wherever it describes fixed v2.
+
+Correction validation: **17 focused tests run, 16 passed, one CUDA test skipped**
+(`cudaErrorNoDevice`). This includes adaptive-control formula and generation
+tests, both aliases, cache revision isolation, unchanged DSADE fingerprint and
+AWAD selection, source equivalence for the remaining exact ports, and the
+existing tiny MAFESE/KNN smoke runs. Compile/import checks passed without
+writing bytecode; `git diff --check` passed. No full EXP comparison was run;
+EXP627/EXP628 artifacts, datasets, reports, figures, and caches were untouched.
+`optimizer_factory.py` was audited and required no change: its existing adapter
+and revision hooks already consume the corrected v2 mapping and identity.
+
 Audited on 2026-09-29 against the sibling project
 `../Adaptive_Mahalanobis-Cholesky_DIfferential_Evolution`, commit
 `9fd6895d2084760882b5b3325f667701a6964666`. The source files listed below were
@@ -40,7 +164,7 @@ correction are retained, including MAFESE's existing binary transfer behavior.
 | `DSADE-CEC` | Recomputed per target; can include target among donors | Same adaptive scale/crossover formulas | CEC greedy fitness selection |
 | `MaCRO-DE` | Frozen once per generation; can include target among donors | Same adaptive scale/crossover formulas | CEC greedy fitness selection |
 | `MaCRO-DE-t` | Frozen once per generation; target excluded from all donor pools, including fallback | Fixed scalar `wf=.5`, fixed `cr=.9` | CEC greedy fitness selection |
-| `MaCRO-DE-t-v2` | Same frozen population, target exclusion, routing, and geometry as `-t` | Independent coordinate-wise `uniform(beta_min, beta_max)` with **no diversity scaling or clipping**, fixed `pcr` | CEC greedy fitness selection |
+| `MaCRO-DE-t-v2` | Same frozen population, target exclusion, routing, and geometry as `-t` | `F_j = clip(U(beta_min,beta_max)*clip(1.5-D,.5,1.5),.1,1.5)` with MaCRO D; adaptive `pcr = .1+.25*(1-dM)` | Greedy fitness selection |
 
 The per-target population changes within a generation only in single mode; the
 source's swarm/parallel mode performs deferred population selection. These
@@ -53,7 +177,8 @@ V2 retains that override.
 
 - Replaced the old local MaCRO-DE implementation with the CEC source; only its
   backend constructor/import and scientific revision metadata were adapted.
-- Copied v2's methods directly, importing the verified existing `-t` parent.
+- Initially copied v2's methods directly, importing the verified existing `-t`
+  parent; the adaptive correction above now replaces its fixed control.
 - Copied CEC DSADE directly; only documentation and revision metadata were added.
 - Reused `macro_de_t_backend.CECCovarianceKernels` and `MaCRODETBackend`, which
   transport the CEC covariance equations through the existing NumPy/CuPy GPU
@@ -67,9 +192,10 @@ V2 retains that override.
   as the new CEC implementation. Existing result files are not modified.
 - All existing experiment settings remain in force: `dsade_beta_min`,
   `dsade_beta_max`, `dsade_pcr`, and `dsade_mahal_q` map to the corresponding
-  parameters for DSADE, MaCRO-DE, v2, and DSADE-CEC. `-t` receives only q and keeps
-  fixed F/CR. Direct v2 construction retains its CEC defaults `.10/.60/.10/.50`;
-  `main_best.py` continues to supply its existing `.40/.80/.10/.50` configuration.
+  parameters for DSADE, MaCRO-DE, and DSADE-CEC. `-t` receives only q and keeps
+  fixed F/CR. V2 receives beta bounds and q, scales coordinate-wise uniform F
+  with MaCRO D and clips it, and adapts pcr from target dM; direct v2
+  construction defaults to beta `.10/.60`, q `.50`.
   The CEC experiment settings themselves were not copied.
 
 ## Files
@@ -130,7 +256,8 @@ OPTIMIZERS = [
 ]
 ```
 
-For all four **exact CEC implementations**, use `"DSADE-CEC"` in the first slot.
+For the exact CEC DSADE comparison, use `"DSADE-CEC"` in the first slot. Active
+v2 intentionally differs from the supplied CEC v2 source.
 The existing report-only default also remains unchanged; an explicit
 `--experiment-mode full` uses the existing experiment dispatch when a real run
 is desired.

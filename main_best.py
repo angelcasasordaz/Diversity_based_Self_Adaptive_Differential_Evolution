@@ -1,6 +1,3 @@
-if __name__ == "__main__":
-    print("[startup] Loading framework dependencies ...", flush=True)
-
 import argparse
 from contextvars import ContextVar
 import ctypes
@@ -228,7 +225,6 @@ def available_memory_bytes() -> Optional[int]:
         return None
     return int(page_size * available_pages)
 
-
 def automatic_worker_count(
     logical_cpus: Optional[int] = None,
     available_ram: Optional[int] = None,
@@ -249,13 +245,10 @@ def automatic_worker_count(
     ram_limit = max(1, usable_ram // AUTO_WORKER_RAM_BYTES)
     return max(1, min(cpu_limit, ram_limit))
 
-
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-# EXP_ID = 627
 EXP_ID = 628
-# REUSE_CACHE_FROM_EXP_ID = 627
 REUSE_CACHE_FROM_EXP_ID = None
 # None -> do not search another experiment.
 #
@@ -266,10 +259,9 @@ TEST_SIZE = 0.2
 RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
-# REUSE_CACHE = True
 REUSE_CACHE = False
 FIGURES_ONLY = False
-COMPUTE_DEVICE = "cpu"
+COMPUTE_DEVICE = "gpu"
 # Options:
 # "cpu"
 # "gpu"
@@ -291,6 +283,14 @@ DSADE_BETA_MIN = 0.40
 DSADE_BETA_MAX = 0.80
 DSADE_PCR = 0.10
 DSADE_MAHAL_Q = 0.50
+
+# Historical v3 control note (superseded by v4 below):
+# MaCRO-DE-t-v2 uses only q from these control settings. Its F and pcr adapt
+# per target from normalized Mahalanobis distance: rand*(.60+1-dM), .1+.25*(1-dM).
+# Active v4 forwards beta_min, beta_max and q. F_j ~ U(beta_min, beta_max)
+# independently per coordinate; pcr = .1+.25*(1-dM) remains adaptive.
+# Active v5 supersedes the v4 F note: F_j = clip(U(beta_min,beta_max) *
+# clip(1.5-D,.5,1.5),.1,1.5), using MaCRO-DE's delayed normalized diversity D.
 
 SENSITIVITY_OPTIMIZERS = [
     "DSA-DE",
