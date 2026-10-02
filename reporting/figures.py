@@ -76,7 +76,7 @@ def panel_grid(count, *, width=5, height=4, polar=False):
 
 
 def algorithm_ticks(ax, algorithms, *, horizontal=False):
-    labels = [base_style.display_label(a) for a in algorithms]
+    labels = [base_style.display_label(a, algorithms) for a in algorithms]
     if horizontal:
         ax.set_yticks(range(len(algorithms)), labels)
     else:
@@ -112,7 +112,7 @@ def summary_figure(report, classifier=None):
             style_axes(ax)
         for mi in range(len(metrics), rows_per_classifier*columns):
             axes[ci*rows_per_classifier + mi//columns, mi % columns].set_visible(False)
-    fig.legend(handles=[Patch(color=colors[a], label=base_style.display_label(a)) for a in report.algorithms],
+    fig.legend(handles=[Patch(color=colors[a], label=base_style.display_label(a, report.algorithms)) for a in report.algorithms],
                loc='lower center', ncol=min(6, len(report.algorithms)), fontsize=9, framealpha=.95)
     fig.tight_layout(rect=(0, .06, 1, 1))
     return fig
@@ -143,7 +143,7 @@ def radar_figure(report, classifier, labels, values):
             observed = values[ai, di]
             highlighted = base_style.method_key(algorithm) == 'DSADE'
             ax.plot(angles, np.r_[observed, observed[0]], color=colors[algorithm],
-                    label=base_style.display_label(algorithm), **base_style.line_style(algorithm),
+                    label=base_style.display_label(algorithm, report.algorithms), **base_style.line_style(algorithm),
                     markersize=4, linewidth=2.4 if highlighted else 1.1,
                     markeredgecolor='black' if highlighted else colors[algorithm])
             ax.fill(angles, np.r_[observed, observed[0]], color=colors[algorithm], alpha=.12 if highlighted else .04)
@@ -249,7 +249,7 @@ def convergence_figure(report, classifier, datasets):
     for ax, ds in zip(axes, datasets):
         for i, algorithm in enumerate(report.algorithms):
             curve = np.asarray(report.indexed[ds, classifier, algorithm]['Curve'])
-            ax.plot(np.arange(len(curve)), curve, label=base_style.display_label(algorithm), color=colors[algorithm],
+            ax.plot(np.arange(len(curve)), curve, label=base_style.display_label(algorithm, report.algorithms), color=colors[algorithm],
                     **base_style.line_style(algorithm), markersize=4, markevery=max(1, len(curve)//12),
                     linewidth=2.4 if base_style.method_key(algorithm) == 'DSADE' else 1.4)
         ax.set_title(f'{ds} / {classifier.upper()}', fontsize=11, fontweight='bold')
@@ -404,7 +404,7 @@ def statistical_figures(analysis, algorithms, metric):
     bars = ax.barh(range(k), ranks[ranked], color=list(palette(labels).values()))
     for bar, label in zip(bars, labels):
         base_style.highlight_patch(bar, label)
-    ax.set_yticks(range(k), [base_style.display_label(a) for a in labels]); ax.invert_yaxis()
+    ax.set_yticks(range(k), [base_style.display_label(a, algorithms) for a in labels]); ax.invert_yaxis()
     ax.set_xlabel('Average rank (1 = best)')
     style_axes(ax, True)
     yield 'generic_average_rank', fig
@@ -420,16 +420,16 @@ def statistical_figures(analysis, algorithms, metric):
         for i, value in enumerate(values):
             ax.annotate(f'{value:.5g}', (value, i), xytext=(5, 5), textcoords='offset points')
         ax.axvline(.05, linestyle='--', color='#777777')
-        ax.set_yticks(range(len(values)), [base_style.display_label(a) for a in comparisons.Algorithm_B]); ax.invert_yaxis()
+        ax.set_yticks(range(len(values)), [base_style.display_label(a, algorithms) for a in comparisons.Algorithm_B]); ax.invert_yaxis()
         ax.set_xlim(-.02, 1.08)
         ax.set_xlabel(f'Holm-adjusted p; {len(pairs)}-pair family')
-        ax.set_title(f'{reference} versus other algorithms (configured reference)')
+        ax.set_title(f'{base_style.display_label(reference, algorithms)} versus other algorithms (configured reference)')
         style_axes(ax, True)
         yield 'generic_reference_comparisons', fig
 
     fig, ax = plt.subplots(figsize=(max(5, k * .6), max(4, k * .5)), layout='constrained')
     im = ax.imshow(np.ma.masked_invalid(analysis['matrix']), vmin=0, vmax=1, cmap='Greys_r')
-    labels_all = [base_style.display_label(a) for a in algorithms]
+    labels_all = [base_style.display_label(a, algorithms) for a in algorithms]
     ax.set_xticks(range(k), labels_all, rotation=45, ha='right'); ax.set_yticks(range(k), labels_all)
     for i, j in np.ndindex((k, k)):
         p = analysis['matrix'][i, j]
@@ -445,7 +445,7 @@ def statistical_figures(analysis, algorithms, metric):
         base_style.highlight_patch(box, label, 2.8)
     for pos, i in enumerate(ranked):
         ax.scatter(pos + np.linspace(-.18, .18, n), x[:, i], s=15, color=palette(algorithms)[algorithms[i]])
-    ax.set_xticks(range(k), [base_style.display_label(a) for a in labels], rotation=45, ha='right')
+    ax.set_xticks(range(k), [base_style.display_label(a, algorithms) for a in labels], rotation=45, ha='right')
     ax.set_ylabel(f'{metric}: cached run mean per matched block')
     style_axes(ax)
     yield 'generic_block_distribution', fig

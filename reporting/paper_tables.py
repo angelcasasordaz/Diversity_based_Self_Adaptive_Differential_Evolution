@@ -17,6 +17,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from plot_labels import report_display_label
 
 
 STATS = ("Best", "Worst", "Mean", "Std")
@@ -101,7 +102,7 @@ def make_workbook(tables, algorithms, layouts, *, title, description,
         for i, opt in enumerate(algorithms):
             first = 3+i*4
             ws.merge_cells(start_row=first, start_column=1, end_row=first+3, end_column=1)
-            ws.cell(first, 1, (algorithm_labels or {}).get(opt, opt))
+            ws.cell(first, 1, (algorithm_labels or {}).get(opt, report_display_label(opt, algorithms)))
             for stat_index, stat in enumerate(STATS):
                 row = first+stat_index
                 ws.cell(row, 2, stat)

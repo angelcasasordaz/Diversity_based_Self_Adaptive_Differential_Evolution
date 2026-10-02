@@ -4,6 +4,7 @@ import math
 
 import matplotlib.pyplot as plt
 import numpy as np
+from plot_labels import plot_display_label
 
 
 STYLE_ID = 'numbered-full-v1-neutral-text'
@@ -32,8 +33,8 @@ def method_key(name):
     return 'DSADE' if name in {'DSADE', 'DSA-DE', 'DSA_DE'} else name
 
 
-def display_label(name):
-    return 'DSA-DE' if method_key(name) == 'DSADE' else str(name)
+def display_label(name, present_methods=()):
+    return 'DSA-DE' if method_key(name) == 'DSADE' else plot_display_label(name, present_methods)
 
 
 def method_index(name):

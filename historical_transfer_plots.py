@@ -20,6 +20,7 @@ import pandas as pd
 
 # This resolver is unchanged between the historical commit and current HEAD.
 from optimizer_factory import optimizer_acronym
+from plot_labels import plot_display_label
 
 METRICS_FILENAME = "TransferFunctions_ClassificationMetrics_Blue.png"
 TRADEOFF_FILENAME = "TransferFunctions_FeaturesRuntimeTradeoff_Blue.png"
@@ -40,8 +41,8 @@ def muted_color_palette(n: int) -> np.ndarray:
     cmap = plt.get_cmap(CHART_CMAP, max(n, 1))
     return cmap(np.arange(max(n, 1)))[:, :3]
 
-def optimizer_display_label(name: str) -> str:
-    return optimizer_acronym(str(name))
+def optimizer_display_label(name: str, present_methods=()) -> str:
+    return plot_display_label(optimizer_acronym(str(name)), present_methods)
 
 def is_exact_dsade_method(name: str) -> bool:
     return str(name).strip().upper() in {"DSA-DE", "DSADE", "DSA_DE"}
@@ -114,7 +115,7 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str]) -> tuple[pd.Data
         method = meta["Optimizer"]
         tf = meta["TransferFunction"]
         color_map[group] = transfer_colors.get(tf, blue)
-        base_label = optimizer_display_label(method)
+        base_label = optimizer_display_label(method, present_methods)
         label_map[group] = f"{base_label} {tf.upper()}" if tf and method in variant_methods else base_label
 
     return plot_df, opts, color_map, label_map

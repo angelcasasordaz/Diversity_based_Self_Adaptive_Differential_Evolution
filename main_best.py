@@ -50,6 +50,7 @@ from optimizer_factory import (
 )
 from optimizer_interceptor import Workload
 import full_plot_style
+from plot_labels import PLOT_LABEL_OVERRIDES, plot_display_label, report_display_label
 
 # ============================================================
 # EXPERIMENT CONFIGURATION
@@ -244,7 +245,7 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 629
+EXP_ID = 630
 REUSE_CACHE_FROM_EXP_ID = 627
 # None -> do not search another experiment.
 #
@@ -257,7 +258,7 @@ SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = True
 FIGURES_ONLY = False
-COMPUTE_DEVICE = "cpu"
+COMPUTE_DEVICE = "gpu"
 # Options:
 # "cpu"
 # "gpu"
@@ -2903,8 +2904,8 @@ def parse_result_label(label: str, args: argparse.Namespace) -> dict:
     }
 
 
-def optimizer_display_label(name: str) -> str:
-    return optimizer_acronym(str(name))
+def optimizer_display_label(name: str, present_methods=()) -> str:
+    return plot_display_label(optimizer_acronym(str(name)), present_methods)
 
 def is_dsade_method(name: str) -> bool:
     return str(name).upper() in {"MACRO-DE", "DSA-DE", "DSADE", "DSA_DE"}
@@ -2993,7 +2994,7 @@ def prepare_plot_groups(df: pd.DataFrame, opt_order: List[str], transfer_variant
         color_map[group] = MACRO_DE_COLOR if str(method).upper() == "MACRO-DE" else colors[i]
         if _FULL_REPORT_STYLE.get() and not transfer_variants:
             color_map[group] = full_plot_style.palette([optimizer_acronym(method)])[optimizer_acronym(method)]
-        base_label = optimizer_display_label(method)
+        base_label = optimizer_display_label(method, present_methods)
         label_map[group] = f"{base_label} {tf.upper()}" if tf and (transfer_variants or method in variant_methods) else base_label
 
     if transfer_variants:
@@ -3019,7 +3020,7 @@ def plot_bar(values: np.ndarray, labels: List[str], ylabel: str, title: str, out
     for i, (b, label) in enumerate(zip(bars, labels)):
         b.set_color(MACRO_DE_COLOR if str(label).upper().startswith("MACRO-DE") else colors[i])
         apply_dsade_patch_highlight(b, label)
-    plt.xticks(np.arange(len(labels)), labels, rotation=45, ha="right")
+    plt.xticks(np.arange(len(labels)), [report_display_label(label, labels) for label in labels], rotation=45, ha="right")
     plt.ylabel(ylabel)
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
@@ -3048,7 +3049,7 @@ def plot_lines(curves_by_label: Dict[str, np.ndarray], title: str, ylabel: str, 
             linewidth=3.8 if is_macro else 2.4,
             zorder=10 if is_macro else 2,
             linestyle=styles[i % len(styles)],
-            label="MaCRO-DE" if is_macro else label,
+            label=report_display_label(label, labels) if str(label).upper() == "MACRO-DE-T" else ("MaCRO-DE" if is_macro else label),
         )
     plt.xlabel("Iteration")
     plt.ylabel(ylabel)
@@ -3269,7 +3270,8 @@ def export_statistical_excel(
 
     with pd.ExcelWriter(out_path) as writer:
         for sheet_name, df in sheets.items():
-            df.to_excel(writer, sheet_name=sheet_name, merge_cells=True)
+            df.rename(columns={label: report_display_label(label, optimizers) for label in optimizers}).to_excel(
+                writer, sheet_name=sheet_name, merge_cells=True)
     return out_path
 
 def _holm_adjusted_pvalues(p_values: List[float]) -> np.ndarray:
@@ -4072,7 +4074,7 @@ def generate_sensitivity_main_figure(df: pd.DataFrame, out_dir: str, args: argpa
                     linestyle=optimizer_linestyles[
                         optimizer_idx % len(optimizer_linestyles)
                     ],
-                    label=optimizer,
+                    label=optimizer_display_label(optimizer, optimizer_order),
                 )
                 for optimizer_idx, optimizer in enumerate(optimizer_order)
             ]
@@ -4234,7 +4236,7 @@ def generate_sensitivity_dataset_figures(
         ax1.grid(axis="y", alpha=0.25)
         ax1.set_axisbelow(True)
         ax1.set_title(
-            f"Sensitivity Study: {optimizer} — "
+            f"Sensitivity Study: {optimizer_display_label(optimizer)} — "
             f"{args.sensitivity_parameter} — {metric_label}",
             fontweight="bold",
         )
@@ -4366,7 +4368,7 @@ def generate_weight_sensitivity_main_figure(
 
     plot_title = f"Fitness Weight Sensitivity — {dataset_name}"
     if optimizer_name is not None:
-        plot_title = f"{plot_title} — {selected_optimizer}"
+        plot_title = f"{plot_title} — {optimizer_display_label(selected_optimizer)}"
     fig.suptitle(plot_title, fontsize=14, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     if optimizer_name is None:
@@ -4576,7 +4578,7 @@ def generate_weight_sensitivity_dual_bars_figure(
         fontsize=9,
     )
     fig.suptitle(
-        f"Fitness Weight Sensitivity — {dataset_name} — {selected_optimizer}",
+        f"Fitness Weight Sensitivity — {dataset_name} — {optimizer_display_label(selected_optimizer)}",
         fontsize=14,
         fontweight="bold",
     )
@@ -4659,7 +4661,7 @@ def generate_weight_sensitivity_separated_panels_figure(
         ax.set_axisbelow(True)
 
     fig.suptitle(
-        f"Fitness Weight Sensitivity — {dataset_name} — {selected_optimizer}",
+        f"Fitness Weight Sensitivity — {dataset_name} — {optimizer_display_label(selected_optimizer)}",
         fontsize=14,
         fontweight="bold",
     )
