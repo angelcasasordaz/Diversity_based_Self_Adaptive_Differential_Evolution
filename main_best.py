@@ -14,6 +14,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import inspect
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -121,27 +122,22 @@ TRANSFER_FUNCTION_DATASETS = [
 MAFESE_DATASET_SUITE = "test14"
 
 OPTIMIZERS = [
-    # "MaCRO-DE-t",
-    # "MaCRO-DE",
-    "DSADE",
-    "DSADE-CEC",
-    "MaCRO-DE",
-    "MaCRO-DE-t",
-    "MaCRO-DE-t-v2",
-    # "DE",
-    # "JADE",
-    # "SHADE",
-    # "PSO",
-    # "WOA",
-    # "HHO",
-    # "GOA",
-    # "SA",
-    # "BRO",
-    # "RUN",
-    # "FOX",
     # "DSADE",
-    # MaCRO-DE Corrections
+    # "DSADE-CEC",
     # "MaCRO-DE",
+    "MaCRO-DE-t",
+    # "MaCRO-DE-t-v2",
+    "DE",
+    "JADE",
+    "SHADE",
+    "PSO",
+    "WOA",
+    "HHO",
+    "GOA",
+    "SA",
+    "BRO",
+    "RUN",
+    "FOX",
     # "BRO",
     # "DBO",
     # "DE",
@@ -168,7 +164,7 @@ ABLATION_OPTIMIZERS = [
 ESTIMATORS = [
     "knn",
     "svm",
-    # "rf",
+    "rf",
 ]
 
 TRANSFER_FUNCTIONS = [
@@ -248,8 +244,8 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 628
-REUSE_CACHE_FROM_EXP_ID = None
+EXP_ID = 629
+REUSE_CACHE_FROM_EXP_ID = 627
 # None -> do not search another experiment.
 #
 # Example:
@@ -259,15 +255,21 @@ TEST_SIZE = 0.2
 RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
-REUSE_CACHE = False
+REUSE_CACHE = True
 FIGURES_ONLY = False
-COMPUTE_DEVICE = "gpu"
+COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
 # "gpu"
 # "hybrid"
 GPU_DEVICE_ID = 0
 GPU_MEMORY_FRACTION = 0.85
+RF_CPU_FALLBACK = True
+# Opt in to historical sklearn RF fitness/evaluation when cuML is unavailable.
+RF_BACKEND_POLICY = "auto"
+# "auto": GPU cuML when usable, sklearn only with RF_CPU_FALLBACK enabled.
+# "sklearn": historical CPU RF even with GPU optimizer kernels.
+# "cuml": require cuML in GPU mode; cached cuML rows need no cuML import.
 HYBRID_GPU_MIN_KERNEL_WORK = 1_000_000
 HYBRID_GPU_MIN_EPOCHS = 2
 
@@ -504,10 +506,14 @@ def parse_args() -> argparse.Namespace:
         "--compute-device",
         default=COMPUTE_DEVICE,
         choices=["cpu", "gpu", "hybrid"],
-        help="Custom-optimizer math backend; sklearn/MAFESE fitness always stays on CPU",
+        help="Custom-optimizer math backend; GPU mode also uses cuML for RF when available",
     )
     parser.add_argument("--gpu-device-id", type=int, default=GPU_DEVICE_ID)
     parser.add_argument("--gpu-memory-fraction", type=float, default=GPU_MEMORY_FRACTION)
+    parser.add_argument("--rf-cpu-fallback", action="store_true", default=RF_CPU_FALLBACK,
+                        help="Allow sklearn RF on CPU when cuML is unavailable; optimizer GPU kernels remain enabled")
+    parser.add_argument("--rf-backend-policy", choices=["auto", "sklearn", "cuml"], default=RF_BACKEND_POLICY,
+                        help="Scientific RF backend; CPU mode always uses sklearn. Explicit cuml forbids fallback.")
     parser.add_argument("--list-optimizers", action="store_true", help="List available optimizers and exit")
     parser.add_argument("--parallel", default="yes" if PARALLEL else "no", choices=["yes", "no"], help="Run independent runs in parallel: yes/no")
     parser.add_argument(
@@ -757,7 +763,8 @@ def configure_compute_backend(args: argparse.Namespace) -> None:
         print(f"GPU run workers selected: {owner_capacity}")
     else:
         print(f"CPU workers selected: {active_workers}")
-    print("Fitness backend: CPU (MAFESE/scikit-learn)")
+    print("Fitness backend: cuML RF on GPU when available; KNN/SVM and RF fallback on CPU"
+          if requested_device == "gpu" else "Fitness backend: CPU (MAFESE/scikit-learn)")
 
 
 def select_execution_strategy(
@@ -1201,7 +1208,8 @@ def print_dataset_summary(args: argparse.Namespace, dataset_specs: List[DatasetS
         print(f"- {spec.name}")
 
 
-def build_cache_signature(args: argparse.Namespace) -> str:
+def build_legacy_cache_signature(args: argparse.Namespace) -> str:
+    """Historical comparison signature, retained only to verify old checkpoints."""
     payload = {
         "experiment_mode": str(args.experiment_mode),
         "optimizers": [resolve_optimizer_name(name) for name in args.optimizers],
@@ -1241,6 +1249,125 @@ def build_cache_signature(args: argparse.Namespace) -> str:
     if str(args.experiment_mode) == "sensitivity":
         return f"{args.sensitivity_parameter}_{digest}"
     return digest
+
+
+# Backend transport and resource choices do not change the scientific method.
+FULL_EXECUTION_PARAMETER_KEYS = frozenset({
+    "compute_device", "gpu_device_id", "gpu_memory_fraction",
+})
+
+
+def full_cache_identity(args, optimizer_name=None, dataset_name=None,
+                        estimator=None, transfer_function=None):
+    """Scientific FULL identity; comparison selections are presentation only.
+
+    Without an optimizer this is the shared file namespace. Each stored row
+    carries the complete local identity, including its constructor parameters.
+    """
+    identity = {
+        "experiment_mode": str(args.experiment_mode),
+        "dataset_source": str(getattr(args, "dataset_source", DATASET_SOURCE)),
+        "runs": int(args.runs), "epochs": int(args.epochs),
+        "pop_size": int(args.pop_size), "test_size": float(args.test_size),
+        "random_state": int(args.random_state), "seed_base": int(args.seed_base),
+        "obj_name": "AS",
+        "fitness_mode": "minimize_metric_loss_plus_feature_ratio_v1",
+        "fitness_alpha": float(getattr(args, "fitness_alpha", DEFAULT_FITNESS_ALPHA)),
+        "fitness_beta": float(getattr(args, "fitness_beta", DEFAULT_FITNESS_BETA)),
+    }
+    if optimizer_name is not None:
+        resolved = resolve_optimizer(optimizer_name)
+        parameters = {}
+        # Include constructor defaults as well as explicit adapter settings.
+        # GPU adapters use **kwargs, so inspect the scientific parent too.
+        for cls in reversed(resolved.optimizer_class.__mro__[:-1]):
+            for name, parameter in inspect.signature(cls.__init__).parameters.items():
+                if (name != "self" and parameter.default is not inspect.Parameter.empty
+                        and parameter.kind not in (inspect.Parameter.VAR_POSITIONAL,
+                                                   inspect.Parameter.VAR_KEYWORD)):
+                    parameters[name] = parameter.default
+        parameters.update(optimizer_constructor_kwargs(optimizer_name, args))
+        parameters = {key: value for key, value in parameters.items()
+                      if key not in FULL_EXECUTION_PARAMETER_KEYS}
+        revisioned = optimizer_scientific_identity(optimizer_name, args)
+        if revisioned:
+            parameters = revisioned["parameters"]
+        identity.update({
+            "dataset_name": str(dataset_name), "classifier": str(estimator).lower(),
+            "transfer_function": str(transfer_function),
+            "optimizer": resolved.canonical_name,
+            "optimizer_parameters": parameters,
+            "optimizer_scientific_identity": revisioned,
+        })
+    if str(estimator).lower() == "rf":
+        identity["rf_backend"] = resolve_rf_backend(args)
+    return identity
+
+
+def classifier_cache_signature(args, cache_sig, estimator):
+    """Separate RF shared/mode files without changing any KNN/SVM signature."""
+    return f"{cache_sig}_rf_{resolve_rf_backend(args)}" if str(estimator).lower() == "rf" else cache_sig
+
+
+def build_cache_signature(args: argparse.Namespace, optimizer_name=None,
+                          dataset_name=None, estimator=None, transfer_function=None) -> str:
+    """FULL signatures are local; other modes retain their historical layout."""
+    if str(args.experiment_mode) != "full":
+        return build_legacy_cache_signature(args)
+    identity = full_cache_identity(args, optimizer_name, dataset_name, estimator, transfer_function)
+    return hashlib.sha1(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+
+
+def full_checkpoint_metadata(args, optimizer_name, dataset_name, estimator, transfer_function):
+    return {"ExperimentMode": "full", "CacheIdentity": full_cache_identity(
+        args, optimizer_name, dataset_name, estimator, transfer_function,
+    )}
+
+
+def save_full_optimizer_checkpoint(paths, args, dataset_name, estimator,
+                                   optimizer_name, transfer_function, row):
+    """Persist one optimizer-local row in the destination EXP only.
+
+    The shared comparison file is retained for existing reporting. These local
+    files preserve independent scientific configurations and are discovered by
+    the same metadata-validated wildcard lookup used for legacy source files.
+    """
+    if paths.exp_tag != f"EXP{args.exp_id:03d}" or paths.mode != "full":
+        raise ValueError("FULL local checkpoints must belong to the destination experiment")
+    signature = build_cache_signature(
+        args, optimizer_name, dataset_name, estimator, transfer_function,
+    )
+    # Comparison display flags must not affect a local checkpoint's label.
+    label = build_alg_label(optimizer_name, transfer_function, estimator, True, True)
+    payload = {label: row}
+    for kind in ("progress", "results"):
+        filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{signature}_{kind}.pkl"
+        save_full_cache_snapshot(os.path.join(paths.cache_dir, filename), payload,
+                                 primary=(kind == "progress" or row["CompletedRuns"] == args.runs))
+
+
+def save_full_cache_snapshot(path, payload, *, primary=True):
+    """Append new FULL snapshots without replacing any existing checkpoint."""
+    data = pickle.dumps(payload)
+    target = Path(path)
+    if target.exists() and target.read_bytes() == data:
+        return
+    if target.exists() or not primary:
+        stem, kind = target.stem.rsplit("_", 1)
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        target = target.with_name(f"{stem}_snapshot_{digest}_{kind}.pkl")
+    base = target
+    for index in range(10000):
+        try:
+            with target.open("xb") as stream:
+                stream.write(data)
+            return
+        except FileExistsError:
+            if target.read_bytes() == data:
+                return
+            stem, kind = base.stem.rsplit("_", 1)
+            target = base.with_name(f"{stem}_{index + 1:04d}_{kind}.pkl")
+    raise RuntimeError(f"No unused FULL snapshot destination: {base}")
 
 def build_alg_label(
     method: str,
@@ -1357,12 +1484,18 @@ class RobustClassificationFeatureSelectionProblem(FeatureSelectionProblem):
             return float(evaluator.get_metric_by_name(self.obj_name, paras=paras)[self.obj_name])
 
 
+class CuMLUnavailableError(RuntimeError):
+    """The optional RF dependency cannot be imported, rather than a fit failure."""
+
+
 def gpu_random_forest_class():
     """Resolve the optional single-GPU cuML RF implementation without fallback."""
     try:
         from cuml.ensemble import RandomForestClassifier as CuMLRandomForestClassifier
     except Exception as exc:
-        raise RuntimeError("GPU Random Forest backend unavailable") from exc
+        raise CuMLUnavailableError(
+            "RF GPU execution requires cuML. Use COMPUTE_DEVICE='cpu', remove rf, or install cuML."
+        ) from exc
     return CuMLRandomForestClassifier
 
 
@@ -1384,6 +1517,9 @@ def build_gpu_random_forest(seed: int):
         "min_samples_split": 2,
         "min_impurity_decrease": 0.0,
         "random_state": int(seed),
+        # cuML recommends one stream for reproducible seeded forest building.
+        # Trees/nodes still use GPU kernels; avoid competing forest workspaces.
+        "n_streams": 1,
         "oob_score": False,
         "class_weight": None,
         "verbose": False,
@@ -1403,27 +1539,63 @@ def build_gpu_random_forest(seed: int):
         raise RuntimeError("GPU Random Forest backend unavailable") from exc
 
 
+def rf_cpu_fallback_enabled(args: argparse.Namespace) -> bool:
+    """Honor CLI arguments, or the configured default for older namespaces."""
+    return bool(getattr(args, "rf_cpu_fallback", RF_CPU_FALLBACK))
+
+
+def resolve_rf_backend(args: argparse.Namespace) -> str:
+    """Freeze one scientific RF choice for cache lookup and every optimizer run.
+
+    Explicit policies never import cuML during lookup. Auto only probes an import
+    when CPU fallback is permitted; it never constructs or fits an estimator.
+    The resolved choice is copied with args into mode variants and workers.
+    """
+    device = str(getattr(args, "compute_device", "cpu")).lower()
+    policy = str(getattr(args, "rf_backend_policy", RF_BACKEND_POLICY)).lower()
+    if policy not in {"auto", "sklearn", "cuml"}:
+        raise ValueError("RF_BACKEND_POLICY must be 'auto', 'sklearn', or 'cuml'")
+    context = (device, policy, rf_cpu_fallback_enabled(args))
+    if getattr(args, "_rf_backend_context", None) == context:
+        return args._rf_selected_backend
+    backend = "sklearn"
+    if device == "gpu" and policy != "sklearn":
+        backend = "cuml"
+        if policy == "auto" and rf_cpu_fallback_enabled(args):
+            try:
+                gpu_random_forest_class()
+            except CuMLUnavailableError:
+                backend = "sklearn"
+                print("cuML unavailable; using sklearn RF on CPU while optimizer backend remains GPU.", flush=True)
+    args._rf_backend_context, args._rf_selected_backend = context, backend
+    return backend
+
+
 def build_run_estimator(estimator: str, args: argparse.Namespace, seed: int):
-    """Select GPU RF only for strict GPU mode; retain MAFESE elsewhere."""
-    if (
-        str(estimator).lower() == "rf"
-        and str(getattr(args, "compute_device", "cpu")).lower() == "gpu"
-    ):
-        return build_gpu_random_forest(seed)
+    """Select RF independently of optimizer kernels, with an explicit CPU opt-in."""
+    if str(estimator).lower() == "rf":
+        backend = resolve_rf_backend(args)
+        args._rf_use_sklearn = backend == "sklearn"
+        if backend == "cuml":
+            # Once lookup selects cuML, a worker must not silently compute a
+            # sklearn result under the cuML scientific identity.
+            return build_gpu_random_forest(seed)
+        if str(getattr(args, "compute_device", "cpu")).lower() == "gpu":
+            return get_general_estimator("classification", "rf")
     return estimator
 
 
-def validate_gpu_random_forest_backend(args: argparse.Namespace) -> None:
-    """Fail before experiments when strict GPU RF cannot be constructed."""
+def validate_gpu_random_forest_backend(args: argparse.Namespace, estimator: str) -> None:
+    """Validate the classifier for a pending run group, after cache reuse."""
     strict_gpu_rf = (
         str(getattr(args, "compute_device", "cpu")).lower() == "gpu"
-        and any(str(estimator).lower() == "rf" for estimator in args.estimators)
+        and str(estimator).lower() == "rf"
     )
-    if not strict_gpu_rf:
+    if not strict_gpu_rf or resolve_rf_backend(args) != "cuml":
         return
-    if GPU_OWNER_BACKEND is None or not GPU_OWNER_BACKEND.uses_gpu:
-        raise RuntimeError("GPU Random Forest backend unavailable")
-    build_gpu_random_forest(args.seed_base)
+    if rf_cpu_fallback_enabled(args) and getattr(args, "rf_backend_policy", RF_BACKEND_POLICY) == "auto":
+        return
+    build_run_estimator(estimator, args, args.seed_base)
 
 
 def _run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: argparse.Namespace, seed: int):
@@ -1505,7 +1677,7 @@ def _run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: 
             str(estimator).lower() == "rf"
             and str(getattr(args, "compute_device", "cpu")).lower() == "gpu"
         ):
-            est = build_gpu_random_forest(seed)
+            est = build_run_estimator(estimator, args, seed)
         else:
             est = clone(selector.estimator)
         est.fit(X_train_sel, data.y_train)
@@ -1516,7 +1688,7 @@ def _run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: 
         rs_test = float(recall_score(data.y_test, y_pred, labels=labels, average="macro", zero_division=0))
         f1_test = float(f1_score(data.y_test, y_pred, labels=labels, average="macro", zero_division=0))
 
-    return {
+    result = {
         "as_test": 100.0 * as_test,
         "ps_test": ps_test,
         "rs_test": rs_test,
@@ -1526,6 +1698,18 @@ def _run_single(data: Data, estimator: str, optimizer_name: str, tf: str, args: 
         "runtime": runtime,
         "curve": fit_curve,
     }
+    if str(estimator).lower() == "rf":
+        # Return worker execution metadata so parallel checkpoints report the
+        # actual classifier backend even when dependency preflight was skipped.
+        result["rf_backend"] = (
+            "sklearn" if getattr(args, "_rf_use_sklearn", False)
+            or str(getattr(args, "compute_device", "cpu")).lower() != "gpu" else "cuml")
+        result["rf_execution"] = {
+            "backend": result["rf_backend"],
+            "version": getattr(sys.modules.get(result["rf_backend"]), "__version__", None),
+            "parameters": selector.estimator.get_params(deep=False),
+        }
+    return result
 
 
 def run_single(
@@ -1654,12 +1838,17 @@ def execute_pending_runs(
     on_run_complete=None,
     dataset_name: Optional[str] = None,
 ):
+    if pending_runs:
+        validate_gpu_random_forest_backend(args, estimator)
     strategy = select_execution_strategy(args, data, method, len(pending_runs))
     worker_args = argparse.Namespace(**vars(args))
     worker_args.optimizer_compute_device = strategy.optimizer_compute_device
     requested_device = str(getattr(args, "compute_device", "cpu")).lower()
+    gpu_rf_group = requested_device == "gpu" and str(estimator).lower() == "rf"
+    if gpu_rf_group and args.parallel == "yes" and len(pending_runs) > 1:
+        print("RF GPU run concurrency limited to 1: cuML forest memory is outside the optimizer VRAM estimate.", flush=True)
 
-    if args.parallel != "yes" or len(pending_runs) <= 1:
+    if args.parallel != "yes" or len(pending_runs) <= 1 or gpu_rf_group:
         completed = []
         for run in pending_runs:
             item = (
@@ -2043,12 +2232,86 @@ def sensitivity_checkpoint_metadata_matches(
         return False
 
 
+def rf_checkpoint_backend(row):
+    """Resolve provenance conservatively; unrecorded legacy RF means sklearn/unknown."""
+    if not isinstance(row, dict):
+        return None, "RF payload is not a dictionary", False
+    identity = row.get("CacheIdentity", {})
+    declared = identity.get("rf_backend") if isinstance(identity, dict) else None
+    scientific = row.get("RFScientificBackend")
+    recorded = row.get("RFBackend")
+    if declared is not None and (not isinstance(declared, str) or declared not in {"sklearn", "cuml"}):
+        return None, f"invalid scientific RF backend: {declared}", False
+    if scientific is not None and (not isinstance(scientific, str) or scientific not in {"sklearn", "cuml"}):
+        return None, f"invalid scientific RF backend: {scientific}", False
+    if recorded is not None and not isinstance(recorded, str):
+        return None, f"invalid RF backend provenance: {recorded}", False
+    if recorded == "mixed":
+        return None, "RF backend provenance is mixed", False
+    if recorded not in {None, "unknown", "sklearn", "cuml"}:
+        return None, f"invalid RF backend provenance: {recorded}", False
+    known = {value for value in (declared, scientific, recorded) if value in {"sklearn", "cuml"}}
+    unknown = False
+    trace = row.get("RFExecutionRuns")
+    if trace is not None:
+        if not isinstance(trace, list) or len(trace) != row.get("CompletedRuns", len(row.get("AccRuns", []))):
+            return None, "RF backend provenance does not cover completed runs", False
+        for item in trace:
+            backend = item.get("backend", "unknown") if isinstance(item, dict) else None
+            if not isinstance(backend, str):
+                return None, f"invalid per-run RF backend provenance: {backend}", False
+            if backend in {"sklearn", "cuml"}:
+                known.add(backend)
+            elif backend == "unknown":
+                unknown = True
+            else:
+                return None, f"invalid per-run RF backend provenance: {backend}", False
+    if len(known) > 1 or (unknown and "cuml" in known):
+        return None, "RF backend provenance is conflicting or mixes cuML with unknown legacy runs", False
+    inferred = not known
+    return next(iter(known)) if known else "sklearn", None, inferred
+
+
+def rf_backend_compatibility(row, expected_backend):
+    actual, reason, inferred = rf_checkpoint_backend(row)
+    if reason:
+        return reason
+    if actual != expected_backend:
+        provenance = "sklearn/unknown (legacy provenance absent)" if inferred else actual
+        return f"RF backend incompatible: expected={expected_backend}, actual={provenance}"
+    return None
+
+
+def normalize_rf_checkpoint(row, expected_backend):
+    """Upgrade backend metadata in memory only after proving it matches selection."""
+    reason = rf_backend_compatibility(row, expected_backend)
+    if reason:
+        return row, reason
+    backend, _, inferred = rf_checkpoint_backend(row)
+    normalized = dict(row)
+    if isinstance(row.get("CacheIdentity"), dict):
+        normalized["CacheIdentity"] = {**row["CacheIdentity"], "rf_backend": backend}
+    if inferred:
+        normalized["RFBackendProvenance"] = "legacy_unknown_assumed_sklearn"
+    return normalized, None
+
+
 def checkpoint_metadata_matches(row: dict, expected_metadata: Optional[dict]) -> bool:
     if expected_metadata is None:
         return True
+    expected_backend = expected_metadata.get("CacheIdentity", {}).get("rf_backend") or expected_metadata.get("RFScientificBackend")
+    if expected_backend:
+        row, reason = normalize_rf_checkpoint(row, expected_backend)
+        if reason:
+            return False
+    if expected_metadata.get("ExperimentMode") == "full":
+        return (isinstance(row, dict) and row.get("ExperimentMode") == "full"
+                and row.get("CacheIdentity") == expected_metadata["CacheIdentity"])
     if expected_metadata.get("ExperimentMode") == "sensitivity":
         return sensitivity_checkpoint_metadata_matches(row, expected_metadata)
-    return weight_checkpoint_metadata_matches(row, expected_metadata)
+    if expected_metadata.get("ExperimentMode") == "sensitivity_weights":
+        return weight_checkpoint_metadata_matches(row, expected_metadata)
+    return expected_backend is not None
 
 def save_cache(path: str, payload: dict):
     with open(path, "wb") as f:
@@ -2091,7 +2354,11 @@ def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_name
         estimators = (list(dict.fromkeys([*args.estimators, *SUPPORTED_ESTIMATORS]))
                       if args.experiment_mode == "transfer_functions" else args.estimators)
         for estimator in estimators:
-            payload = load_best_cache_payload(paths, dataset_name, estimator, cache_sig)
+            payload = (load_compatible_full_cache_payload(
+                paths, args, dataset_name, estimator, include_legacy_directory=True,
+            )[0]
+                       if args.experiment_mode == "full" else
+                       load_mode_cache_payload(paths, args, dataset_name, estimator, cache_sig)[0])
             if payload is None:
                 missing.append(f"{dataset_name}/{estimator}")
                 continue
@@ -2188,6 +2455,204 @@ def load_best_source_cache_payload(
         return None, reason
     return max(candidates, key=payload_completed_runs), None
 
+
+def load_mode_cache_payload(paths, args, dataset_name, estimator, cache_sig, *, source=False):
+    """Read backend-specific RF files and safely verify exact-signature legacy RF."""
+    loader = load_best_source_cache_payload if source else load_best_cache_payload
+    if str(estimator).lower() != "rf":
+        loaded = loader(paths, dataset_name, estimator, cache_sig)
+        return loaded if source else (loaded, None)
+    selected, reasons = {}, []
+    backend = resolve_rf_backend(args)
+    for signature in (classifier_cache_signature(args, cache_sig, estimator), cache_sig):
+        loaded = loader(paths, dataset_name, estimator, signature)
+        payload, reason = loaded if source else (loaded, None)
+        if reason:
+            reasons.append(reason)
+        for label, row in (payload or {}).items():
+            normalized, reason = normalize_rf_checkpoint(row, backend)
+            if reason:
+                reasons.append(f"{label}: {reason}")
+            elif label not in selected or normalized.get("CompletedRuns", 0) > selected[label].get("CompletedRuns", 0):
+                selected[label] = normalized
+    return selected or None, "; ".join(dict.fromkeys(reasons)) or None
+
+
+def legacy_full_cache_args(path, payload, args, dataset_name, estimator):
+    """Recover old identity only when its complete filename digest is verified.
+
+    Old FULL files omitted row identity and dataset source/fitness weights from
+    their digest. Restrict those omissions to the historical code-smell/default
+    fitness contract. Never infer an unrecorded implementation revision.
+    """
+    if (getattr(args, "dataset_source", DATASET_SOURCE) != "codesmell"
+            or args.fitness_alpha != DEFAULT_FITNESS_ALPHA
+            or args.fitness_beta != DEFAULT_FITNESS_BETA):
+        return None
+    prefix = f"{path.name.split('_', 1)[0]}_{dataset_name}_{estimator.lower()}_"
+    digest = path.name[len(prefix):].rsplit("_", 1)[0]
+    optimizers = []
+    try:
+        for label in payload:
+            method = label
+            suffix = f"_{estimator.upper()}"
+            if method.endswith(suffix):
+                method = method[:-len(suffix)]
+            for tf in args.transfer_functions:
+                if method.endswith(f"_{tf.upper()}"):
+                    method = method[:-len(tf) - 1]
+                    break
+            canonical = resolve_optimizer_name(method)
+            if canonical not in optimizers:
+                optimizers.append(canonical)
+    except ValueError:
+        return None
+    historical = argparse.Namespace(**vars(args))
+    historical.optimizers = optimizers
+    candidates = [historical]
+    configured = [resolve_optimizer_name(name) for name in args.optimizers]
+    # An interrupted comparison records only an ordered prefix of its selected
+    # optimizers. The full configured list is admissible only if its old digest
+    # verifies; a matching label or prefix alone never proves compatibility.
+    if optimizers == configured[:len(optimizers)]:
+        configured_args = argparse.Namespace(**vars(args))
+        configured_args.optimizers = configured
+        candidates.append(configured_args)
+    # Irrelevant DSA/sensitivity settings formerly polluted baseline signatures.
+    # This is the historical default contract, not an EXP-specific exception.
+    for candidate in list(candidates):
+        defaults = argparse.Namespace(**vars(candidate))
+        defaults.dsade_beta_min, defaults.dsade_beta_max = 0.40, 0.80
+        defaults.dsade_pcr, defaults.dsade_mahal_q = 0.10, 0.50
+        defaults.sensitivity_parameter = "mahalanobis_q"
+        defaults.sensitivity_values = [0.50, 0.68, 0.80, 0.90]
+        candidates.append(defaults)
+    for candidate in candidates:
+        if build_legacy_cache_signature(candidate) == digest:
+            return candidate
+    return None
+
+
+def load_compatible_full_cache_payload(paths, args, dataset_name, estimator,
+                                     *, include_legacy_directory=False, return_origins=False):
+    """Select compatible prefixes per optimizer/TF across wildcard signatures.
+
+    Source files are opened only for reading. A longer incompatible checkpoint
+    cannot hide a shorter compatible checkpoint for another optimizer.
+    """
+    directories = [Path(paths.cache_dir)]
+    if include_legacy_directory:
+        directories.append(Path(legacy_cache_dir(paths)))
+    candidates, load_reasons = [], []
+    seen = set()
+    for directory in directories:
+        for kind in ("results", "progress"):
+            pattern = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_*_{kind}.pkl"
+            for path in sorted(directory.glob(pattern)):
+                if path in seen:
+                    continue
+                seen.add(path)
+                payload = load_cache_safe(str(path), f"FULL {kind} checkpoint")
+                if isinstance(payload, dict):
+                    candidates.append((path, payload, legacy_full_cache_args(
+                        path, payload, args, dataset_name, estimator)))
+                else:
+                    load_reasons.append(f"{path.name}: checkpoint unreadable or not a dictionary")
+    selected, reasons, origins, selected_tiers = {}, load_reasons, {}, {}
+    show_tf, show_cls = len(args.transfer_functions) > 1, len(args.estimators) > 1
+    for method in args.optimizers:
+        for tf in args.transfer_functions:
+            label = build_alg_label(method, tf, estimator, show_tf, show_cls)
+            expected = full_checkpoint_metadata(args, method, dataset_name, estimator, tf)
+            local_signature = build_cache_signature(args, method, dataset_name, estimator, tf)
+            local_prefix = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{local_signature}_"
+            aliases = list(dict.fromkeys(
+                builder(method, tf, estimator, tf_flag, cls_flag)
+                for builder in (build_alg_label, build_legacy_alg_label)
+                for tf_flag in (True, False) for cls_flag in (True, False)
+            ))
+            for path, payload, legacy_args in candidates:
+                matches = [key for key in aliases if key in payload]
+                if not matches:
+                    continue
+                if len(matches) != 1:
+                    reasons.append(f"{path.name}/{label}: ambiguous scientific label")
+                    continue
+                row = payload[matches[0]]
+                if str(estimator).lower() == "rf":
+                    row, backend_reason = normalize_rf_checkpoint(row, expected["CacheIdentity"]["rf_backend"])
+                    if backend_reason:
+                        reasons.append(f"{path.name}/{label}: {backend_reason}")
+                        continue
+                if isinstance(row, dict) and "CacheIdentity" not in row and legacy_args is not None:
+                    inferred = full_checkpoint_metadata(legacy_args, method, dataset_name, estimator, tf)
+                    # The legacy digest proves parameters and any revision that
+                    # it encoded. Conflicting explicit metadata still rejects it.
+                    identity = inferred["CacheIdentity"]
+                    explicit = {
+                        "ExperimentMode": "full", "Optimizer": identity["optimizer"],
+                        "OptimizerScientificIdentity": identity["optimizer_scientific_identity"],
+                        "OptimizerScientificParameters": identity["optimizer_parameters"],
+                        "FitnessAlpha": identity["fitness_alpha"],
+                        "FitnessBeta": identity["fitness_beta"],
+                    }
+                    if (inferred == expected and all(
+                            key not in row or row[key] == value
+                            for key, value in explicit.items())):
+                        row = {**row, **inferred}
+                values, reason = validate_source_label_runs(row, estimator, args.runs, expected)
+                if reason is not None:
+                    reasons.append(f"{path.name}/{label}: {reason}")
+                    continue
+                tier = 0 if path.name.startswith(local_prefix) else 1
+                if label in selected and tier != selected_tiers[label]:
+                    old = selected[label]
+                    short, long = sorted((old, row), key=lambda item: item["CompletedRuns"])
+                    count = short["CompletedRuns"]
+                    same_prefix = all(np.array_equal(np.asarray(short[key], dtype=float),
+                        np.asarray(long[key][:count], dtype=float), equal_nan=True)
+                        for key in ("AccRuns", "PSRuns", "RSRuns", "F1Runs", "FitRuns", "FeatRuns", "TimeRuns"))
+                    same_prefix = same_prefix and all(np.array_equal(np.asarray(a, dtype=float),
+                        np.asarray(b, dtype=float), equal_nan=True)
+                        for a, b in zip(short["CurvesAll"], long["CurvesAll"][:count]))
+                    # A shared continuation may fill a local prefix only when
+                    # every existing observation is identical. Local conflicts
+                    # retain priority, never silently changing stored values.
+                    if same_prefix and short["CompletedRuns"] < long["CompletedRuns"]:
+                        if long is row:
+                            selected[label], origins[label] = row, str(path)
+                        selected_tiers[label] = min(tier, selected_tiers[label])
+                        continue
+                if (label not in selected or tier < selected_tiers[label]
+                        or (tier == selected_tiers[label] and len(values["AccRuns"]) >
+                            int(selected[label]["CompletedRuns"]))):
+                    selected[label] = row
+                    selected_tiers[label], origins[label] = tier, str(path)
+    result = selected or None, "; ".join(dict.fromkeys(reasons)) or None
+    return (*result, origins) if return_origins else result
+
+
+def materialize_current_full_cache(paths, args, dataset_names):
+    """Recover current shared/legacy rows into local files without source writes."""
+    for dataset in dataset_names:
+        for estimator in args.estimators:
+            payload, _, origins = load_compatible_full_cache_payload(
+                paths, args, dataset, estimator, include_legacy_directory=True, return_origins=True,
+            )
+            for label, row in (payload or {}).items():
+                identity = row["CacheIdentity"]
+                signature = build_cache_signature(args, identity["optimizer"], dataset,
+                                                  estimator, identity["transfer_function"])
+                if Path(origins[label]).name.startswith(
+                        f"{paths.exp_tag}_{dataset}_{estimator.lower()}_{signature}_"):
+                    continue
+                save_full_optimizer_checkpoint(paths, args, dataset, estimator,
+                    identity["optimizer"], identity["transfer_function"], row)
+                print(f"CACHE IMPORTED | from={paths.exp_tag} shared/legacy | to={paths.exp_tag} local | "
+                      f"dataset={dataset} | classifier={estimator} | label={label} | runs={row['CompletedRuns']}"
+                      + (f" | rf_backend={identity['rf_backend']} | provenance={row.get('RFBackendProvenance', 'recorded')}"
+                         if estimator.lower() == "rf" else ""))
+
 def validate_source_label_runs(
     row: dict,
     estimator: str,
@@ -2199,13 +2664,23 @@ def validate_source_label_runs(
         return None, "label payload is not a dictionary"
     if str(row.get("Estimator", "")).lower() != str(estimator).lower():
         return None, "classifier metadata does not match"
+    expected_backend = (expected_metadata or {}).get("CacheIdentity", {}).get("rf_backend") or (expected_metadata or {}).get("RFScientificBackend")
+    if str(estimator).lower() == "rf" and expected_backend:
+        reason = rf_backend_compatibility(row, expected_backend)
+        if reason:
+            return None, reason
     if expected_metadata:
-        if expected_metadata.get("ExperimentMode") == "sensitivity":
+        if expected_metadata.get("ExperimentMode") == "full":
+            if not checkpoint_metadata_matches(row, expected_metadata):
+                return None, "FULL scientific metadata does not match"
+        elif expected_metadata.get("ExperimentMode") == "sensitivity":
             if not sensitivity_checkpoint_metadata_matches(row, expected_metadata):
                 return None, "sensitivity metadata does not match"
         elif expected_metadata.get("ExperimentMode") == "sensitivity_weights":
             if not weight_checkpoint_metadata_matches(row, expected_metadata):
                 return None, "weight metadata does not match"
+        elif expected_metadata.get("ExperimentMode") is None:
+            pass  # Backend-only RF metadata for historical ablation/TF modes.
         elif row.get("ExperimentMode") != expected_metadata["ExperimentMode"]:
             return None, "experiment mode metadata does not match"
         else:
@@ -2301,7 +2776,10 @@ def mode_cache_is_complete(
 ) -> bool:
     for dataset_name in dataset_names:
         for estimator in args.estimators:
-            payload = load_best_cache_payload(paths, dataset_name, estimator, cache_sig)
+            payload = (load_compatible_full_cache_payload(
+                paths, args, dataset_name, estimator, include_legacy_directory=True,
+            )[0] if args.experiment_mode == "full" else
+                load_mode_cache_payload(paths, args, dataset_name, estimator, cache_sig)[0])
             if payload is None:
                 return False
             for label, legacy_label in expected_result_labels(args, estimator, show_tf, show_cls):
@@ -5434,6 +5912,8 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
     print(f"Mode: {args.experiment_mode}")
     print_dataset_summary(args, dataset_specs)
     print(f"Cache signature: {cache_sig}")
+    if "rf" in [str(estimator).lower() for estimator in args.estimators]:
+        print(f"RF scientific backend: {resolve_rf_backend(args)} | policy={getattr(args, 'rf_backend_policy', RF_BACKEND_POLICY)}")
     if source_paths is not None:
         print(f"Read-only cache source: {source_paths.exp_tag}/{args.experiment_mode}")
 
@@ -5455,7 +5935,11 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
             print(f"  - {p}")
         return
 
+    if args.experiment_mode == "full":
+        materialize_current_full_cache(paths, args, dataset_names)
+
     if mode_cache_is_complete(paths, args, dataset_names, cache_sig, show_tf, show_cls):
+        print(f"CACHE HIT | exp={paths.exp_tag} | mode={args.experiment_mode} | all selected runs complete")
         exported, summary_csv, generated_charts, statistical_excel, friedman_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
         print(f"[mode-complete] {args.experiment_mode} cache is complete; skipped optimization.")
         print(f"Cache dir: {paths.cache_dir}")
@@ -5484,12 +5968,38 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
             data.split_train_test(test_size=args.test_size, random_state=args.random_state)
 
         for estimator in args.estimators:
-            cache_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_results.pkl"
-            progress_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{cache_sig}_progress.pkl"
+            classifier_sig = classifier_cache_signature(args, cache_sig, estimator)
+            cache_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{classifier_sig}_results.pkl"
+            progress_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{classifier_sig}_progress.pkl"
             cache_file = os.path.join(paths.cache_dir, cache_filename)
             progress_file = os.path.join(paths.cache_dir, progress_filename)
+            def persist_current_checkpoint():
+                if args.experiment_mode == "full":
+                    complete = all(payload_label_completed_runs(cls_payload, label, legacy) >= args.runs
+                                   for label, legacy in expected_result_labels(args, estimator, show_tf, show_cls))
+                    save_full_cache_snapshot(progress_file, cls_payload)
+                    save_full_cache_snapshot(cache_file, cls_payload, primary=complete)
+                else:
+                    save_cache(progress_file, cls_payload)
+                    save_cache(cache_file, cls_payload)
             cache_payload = load_cache_with_legacy_fallback(paths, cache_filename, "final cache")
             progress_payload = load_cache_with_legacy_fallback(paths, progress_filename, "partial checkpoint")
+            if args.experiment_mode == "full":
+                compatible_payload, current_reason = load_compatible_full_cache_payload(
+                    paths, args, dataset_name, estimator, include_legacy_directory=True,
+                )
+                # Keep stored rows for optimizers removed from this comparison.
+                # Each selected row is still checked below before any reuse.
+                stored_payload = cache_payload if isinstance(cache_payload, dict) else {}
+                cache_payload = {**stored_payload, **(compatible_payload or {})} or None
+                progress_payload = None
+                if current_reason:
+                    print(f"CACHE SOURCE INCOMPATIBLE | exp={paths.exp_tag} | reason={current_reason}")
+            elif estimator.lower() == "rf":
+                cache_payload, current_reason = load_mode_cache_payload(paths, args, dataset_name, estimator, cache_sig)
+                progress_payload = None
+                if current_reason:
+                    print(f"CACHE SOURCE INCOMPATIBLE | exp={paths.exp_tag} | reason={current_reason}")
             if cache_payload is not None and (
                 progress_payload is None
                 or payload_completed_runs(cache_payload) >= payload_completed_runs(progress_payload)
@@ -5502,13 +6012,18 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                     print(f"[resume] Resuming {dataset_name} / {estimator} from partial checkpoint")
             source_payload = None
             source_load_reason = None
-            if source_paths is not None:
-                source_payload, source_load_reason = load_best_source_cache_payload(
-                    source_paths,
-                    dataset_name,
-                    estimator,
-                    cache_sig,
-                )
+            current_complete = (args.experiment_mode == "full" and all(
+                payload_label_completed_runs(compatible_payload or {}, label, legacy) >= args.runs
+                for label, legacy in expected_result_labels(args, estimator, show_tf, show_cls)))
+            if source_paths is not None and not current_complete:
+                if args.experiment_mode == "full":
+                    source_payload, source_load_reason = load_compatible_full_cache_payload(
+                        source_paths, args, dataset_name, estimator,
+                    )
+                else:
+                    source_payload, source_load_reason = load_mode_cache_payload(
+                        source_paths, args, dataset_name, estimator, cache_sig, source=True,
+                    )
                 if source_load_reason is not None:
                     print(
                         "CACHE SOURCE INCOMPATIBLE | "
@@ -5525,7 +6040,11 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                         elif args.experiment_mode == "sensitivity_weights" and variant_value is not None:
                             run_args = sensitivity_weight_variant_args(args, variant_value)
                         variant_suffix = experiment_variant_label_suffix(args, variant_value)
-                        if args.experiment_mode == "sensitivity":
+                        if args.experiment_mode == "full":
+                            scientific_metadata = full_checkpoint_metadata(
+                                run_args, method, dataset_name, estimator, tf,
+                            )
+                        elif args.experiment_mode == "sensitivity":
                             scientific_metadata = sensitivity_checkpoint_metadata(
                                 run_args,
                                 method,
@@ -5536,18 +6055,25 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                 run_args,
                                 method,
                             )
+                        if estimator.lower() == "rf" and args.experiment_mode != "full":
+                            scientific_metadata = {**(scientific_metadata or {}), "RFScientificBackend": resolve_rf_backend(run_args)}
                         label = build_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix)
                         legacy_label = build_legacy_alg_label(method, tf, estimator, show_tf, show_cls, variant_suffix)
                         if label not in cls_payload and legacy_label in cls_payload:
                             cls_payload[label] = cls_payload.pop(legacy_label)
                         prev = cls_payload.get(label, {})
-                        if prev and not checkpoint_metadata_matches(
-                            prev,
-                            scientific_metadata,
-                        ):
+                        prev_reason = None
+                        if prev and args.experiment_mode == "full":
+                            _, prev_reason = validate_source_label_runs(
+                                prev, estimator, args.runs, scientific_metadata,
+                            )
+                        elif prev and not checkpoint_metadata_matches(prev, scientific_metadata):
+                            prev_reason = "scientific metadata does not match"
+                        if prev_reason:
                             print(
-                                "[cache-warning] Ignored checkpoint with mismatched "
-                                f"scientific metadata: {dataset_name} / {estimator} / {label}"
+                                "CACHE SOURCE INCOMPATIBLE | "
+                                f"exp={paths.exp_tag} | dataset={dataset_name} | "
+                                f"classifier={estimator} | label={label} | reason={prev_reason}"
                             )
                             cls_payload.pop(label, None)
                             prev = {}
@@ -5561,9 +6087,9 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                         curves = list(prev.get("CurvesAll", []))
 
                         done = len(acc_runs)
-                        if source_paths is not None and done >= args.runs:
+                        if done >= args.runs:
                             print(
-                                "CACHE HIT CURRENT | "
+                                "CACHE HIT | "
                                 f"exp={paths.exp_tag} | mode={args.experiment_mode} | "
                                 f"dataset={dataset_name} | classifier={estimator} | "
                                 f"label={label} | runs={args.runs}/{args.runs}"
@@ -5588,7 +6114,7 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                 current_runs,
                                 expected_metadata=scientific_metadata,
                             )
-                            if incompatibility is not None:
+                            if incompatibility is not None and incompatibility != "scientific label is absent":
                                 print(
                                     "CACHE SOURCE INCOMPATIBLE | "
                                     f"from={source_paths.exp_tag} | to={paths.exp_tag} | "
@@ -5597,6 +6123,18 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                     f"reason={incompatibility}"
                                 )
                             if imported:
+                                if estimator.lower() == "rf" and scientific_metadata is not None:
+                                    source_row = source_payload.get(label, source_payload.get(legacy_label, {}))
+                                    existing_trace = list(prev.get("RFExecutionRuns", []))[:done]
+                                    existing_trace.extend({"backend": "unknown", "version": None}
+                                                          for _ in range(done - len(existing_trace)))
+                                    source_trace = list(source_row.get("RFExecutionRuns", []))[:len(acc_runs)]
+                                    source_trace.extend({"backend": "unknown", "version": None}
+                                                        for _ in range(len(acc_runs) - len(source_trace)))
+                                    scientific_metadata["RFExecutionRuns"] = existing_trace + source_trace[done:]
+                                    scientific_metadata["RFBackend"] = resolve_rf_backend(run_args)
+                                    if source_row.get("RFBackendProvenance"):
+                                        scientific_metadata["RFBackendProvenance"] = source_row["RFBackendProvenance"]
                                 cls_payload[label] = build_label_payload(
                                     estimator,
                                     acc_runs,
@@ -5610,8 +6148,12 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                     run_args.epochs,
                                     scientific_metadata=scientific_metadata,
                                 )
-                                save_cache(progress_file, cls_payload)
-                                save_cache(cache_file, cls_payload)
+                                persist_current_checkpoint()
+                                if args.experiment_mode == "full":
+                                    save_full_optimizer_checkpoint(
+                                        paths, run_args, dataset_name, estimator, method, tf,
+                                        cls_payload[label],
+                                    )
                                 done = len(acc_runs)
                                 print(
                                     "CACHE IMPORTED | "
@@ -5619,11 +6161,13 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                     f"mode={args.experiment_mode} | dataset={dataset_name} | "
                                     f"classifier={estimator} | label={label} | "
                                     f"runs={imported} | completed={done}/{args.runs}"
+                                    + (f" | rf_backend={resolve_rf_backend(run_args)} | provenance={source_row.get('RFBackendProvenance', 'recorded')}"
+                                       if estimator.lower() == "rf" and scientific_metadata is not None else "")
                                 )
-                        if source_paths is not None and done < args.runs:
+                        if done < args.runs:
                             print(
                                 "CACHE MISS | "
-                                f"exp={paths.exp_tag} | source={source_paths.exp_tag} | "
+                                f"exp={paths.exp_tag} | source={source_paths.exp_tag if source_paths else 'none'} | "
                                 f"mode={args.experiment_mode} | dataset={dataset_name} | "
                                 f"classifier={estimator} | label={label} | "
                                 f"missing={args.runs - done}"
@@ -5634,7 +6178,22 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                         print(f"Running {dataset_name} | {label} | runs={args.runs} (resume from {done})")
 
                         pending_runs = list(range(done, args.runs))
+                        # Preserve per-run backend provenance on mixed resumes.
+                        # Legacy observations without this trace remain unknown.
+                        rf_execution_runs = list(cls_payload.get(label, {}).get("RFExecutionRuns", []))[:done]
+                        rf_execution_runs.extend({"backend": "unknown", "version": None}
+                                                 for _ in range(done - len(rf_execution_runs)))
                         def checkpoint_run(run, out):
+                            if estimator.lower() == "rf" and scientific_metadata is not None:
+                                backend = out.get("rf_backend", (
+                                    "sklearn" if getattr(run_args, "_rf_use_sklearn", False)
+                                    or str(run_args.compute_device).lower() != "gpu" else "cuml"))
+                                if backend != resolve_rf_backend(run_args):
+                                    raise RuntimeError(f"RF worker backend {backend} does not match scientific selection {resolve_rf_backend(run_args)}")
+                                rf_execution_runs.append(out.get("rf_execution", {
+                                    "backend": backend, "version": None}))
+                                scientific_metadata["RFExecutionRuns"] = list(rf_execution_runs)
+                                scientific_metadata["RFBackend"] = backend
                             acc_runs.append(out["as_test"])
                             ps_runs.append(out["ps_test"])
                             rs_runs.append(out["rs_test"])
@@ -5661,8 +6220,12 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                 run_args.epochs,
                                 scientific_metadata=scientific_metadata,
                             )
-                            save_cache(progress_file, cls_payload)
-                            save_cache(cache_file, cls_payload)
+                            persist_current_checkpoint()
+                            if args.experiment_mode == "full":
+                                save_full_optimizer_checkpoint(
+                                    paths, run_args, dataset_name, estimator, method, tf,
+                                    cls_payload[label],
+                                )
 
                         if args.parallel == "yes" and len(pending_runs) > 1:
                             display_workers = min(args.n_workers, len(pending_runs))
@@ -5695,9 +6258,9 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                                             display_workers,
                                             HYBRID_MAX_RUN_WORKERS,
                                         )
-                            print(
-                                f"  Parallel: yes | CPU run workers={display_workers}"
-                            )
+                            if str(args.compute_device).lower() == "gpu" and estimator.lower() == "rf":
+                                display_workers = 1
+                            print(f"  Parallel: yes | run workers={display_workers}")
                         execute_pending_runs(
                             data,
                             estimator,
@@ -5722,11 +6285,26 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             run_args.epochs,
                             scientific_metadata=scientific_metadata,
                         )
-                        save_cache(progress_file, cls_payload)
-                        save_cache(cache_file, cls_payload)
-            save_cache(cache_file, cls_payload)
+                        persist_current_checkpoint()
+                        if args.experiment_mode == "full":
+                            save_full_optimizer_checkpoint(
+                                paths, run_args, dataset_name, estimator, method, tf,
+                                cls_payload[label],
+                            )
+            if args.experiment_mode == "full":
+                persist_current_checkpoint()
+            else:
+                save_cache(cache_file, cls_payload)
 
-            results_struct[dataset_name].update(cls_payload)
+            if args.experiment_mode == "full":
+                selected_labels = {label for label, _ in expected_result_labels(
+                    args, estimator, show_tf, show_cls,
+                )}
+                results_struct[dataset_name].update({
+                    label: row for label, row in cls_payload.items() if label in selected_labels
+                })
+            else:
+                results_struct[dataset_name].update(cls_payload)
 
     exported, summary_csv, generated_charts, statistical_excel, friedman_excel = export_mode_outputs(paths, args, dataset_names, results_struct)
     chart_dir = paths.fig_dir
@@ -5774,7 +6352,6 @@ def main():
         raise ValueError("--n-workers must be >= 1")
 
     configure_compute_backend(args)
-    validate_gpu_random_forest_backend(args)
 
     comparison_optimizers = []
     for mode in modes:

@@ -82,14 +82,16 @@ class CanonicalDSADETests(unittest.TestCase):
         self.assertEqual(set(identity['parameters']), set(DSADE.SCIENTIFIC_PARAMETERS))
         for mode in ['full', 'ablation', 'sensitivity', 'sensitivity_weights', 'transfer_functions']:
             args.experiment_mode = mode
-            new_signature = study.build_cache_signature(args)
+            def signature():
+                return study.build_cache_signature(args, args.optimizers[0])
+            new_signature = signature()
             for alias in ['DSADE', 'DSA-DE', 'DSA_DE']:
                 args.optimizers = [alias]
-                self.assertEqual(new_signature, study.build_cache_signature(args))
+                self.assertEqual(new_signature, signature())
             with patch.object(DSADE, 'IMPLEMENTATION_REVISION', None):
-                self.assertNotEqual(new_signature, study.build_cache_signature(args))
+                self.assertNotEqual(new_signature, signature())
             with patch.object(DSADE, 'IMPLEMENTATION_REVISION', 'incompatible'):
-                self.assertNotEqual(new_signature, study.build_cache_signature(args))
+                self.assertNotEqual(new_signature, signature())
 
     def test_old_unversioned_checkpoints_are_rejected(self):
         args = make_args()

@@ -122,6 +122,152 @@ This uses the original `full/` directories and normal cache-reuse and scientific
 execution rules. It is **not** a report-only command and is never redirected into
 `full_repN`. All other existing experiment modes remain available.
 
+## Optimizer-local FULL cache reuse
+
+FULL saves each optimizer/transfer-function checkpoint under its local signature:
+`Results/EXP<ID>/full/cache/EXP<ID>_<dataset>_<classifier>_<local-signature>_{results,progress}.pkl`.
+Each local file contains one row with a stable optimizer/TF/classifier label and
+its own `CacheIdentity`. Its identity
+includes mode, dataset source/name, classifier, transfer function, canonical
+optimizer, runs/epochs/population size, test split, random state, seed base,
+fitness definition and weights, and only that optimizer's scientific constructor
+parameters and implementation revision. The optimizer comparison list, unrelated
+optimizer parameters, device, GPU resource settings, and worker count are excluded.
+The optimizer-local signature is available through `build_cache_signature(args,
+optimizer_name, dataset_name, estimator, transfer_function)`.
+Shared comparison files with a common-settings signature are also retained for
+existing reporting. Changing one optimizer's scientific settings creates new
+local files while preserving its previous scientific configurations.
+
+Normal execution searches `Results/EXP<ID>/full/cache/EXP<ID>_<dataset>_<classifier>_*_{results,progress}.pkl`
+in the current EXP and the configured `--reuse-cache-from-exp-id` source. Each row
+must independently pass scientific identity and run-array validation. The longest
+compatible prefix is selected per optimizer and transfer function. Imported runs
+are saved under optimizer-local signatures only in the current EXP, together with
+the reporting comparison files; source caches are read-only. Filename signatures
+need not match the current signature when complete scientific metadata matches.
+Logs identify
+`CACHE IMPORTED`, `CACHE HIT`, `CACHE MISS`, and `CACHE SOURCE INCOMPATIBLE`.
+
+Historical FULL rows without `CacheIdentity` require a verified reconstruction of
+their complete legacy filename digest, including the source comparison list and
+any encoded implementation revisions. Because that schema omitted dataset source
+and FULL fitness weights, legacy imports are limited to the historical code-smell
+source and default fitness weights. Unknown signatures and conflicting metadata
+are rejected. Historical reporting retains exact legacy lookup and never imports.
+Interrupted shared files may contain only an ordered prefix of the configured
+comparison. That prefix is accepted only when the full configured legacy digest
+matches the filename. Lookup prioritizes current optimizer-local files, then
+current shared/legacy files, then the configured source EXP. Compatible current
+legacy rows are materialized as local checkpoints before testing completion.
+FULL writes append immutable snapshots instead of replacing existing cache files.
+
+RF cache hits and imports never construct an RF estimator. Explicit backend
+policies do not import cuML during lookup. For missing RF runs, GPU mode uses
+cuML under the default `RF_BACKEND_POLICY="auto"`. Set `RF_CPU_FALLBACK = True` or pass `--rf-cpu-fallback` to allow
+the historical sklearn/MAFESE RF path when cuML cannot be imported. Optimizer
+kernels remain on GPU; only RF fitness/evaluation uses CPU. The log says
+`cuML unavailable; using sklearn RF on CPU while optimizer backend remains GPU.`
+With fallback enabled, pending-run validation skips the mandatory cuML preflight.
+Estimator construction returns a sklearn RF instance when cuML is unavailable;
+evaluation recovery uses that same backend selection. Both the CLI flag and the
+configured default are preserved in mode/worker arguments.
+Fallback does not hide optimizer, fitting, or cuML constructor errors.
+
+RF backend is scientific identity. Configure `RF_BACKEND_POLICY` or pass
+`--rf-backend-policy auto|sklearn|cuml`:
+
+| Policy | GPU mode | CPU/hybrid mode |
+| --- | --- | --- |
+| `auto` | cuML; sklearn if cuML cannot be imported and fallback is enabled | sklearn |
+| `sklearn` | sklearn RF with GPU optimizer kernels | sklearn |
+| `cuml` | cuML required for new RF runs; CPU fallback is forbidden | sklearn |
+
+The choice is resolved once and shared by every optimizer, mode variant, and
+worker. FULL optimizer-local signatures include `CacheIdentity.rf_backend`.
+RF shared files and other modes use a backend suffix plus checked backend
+metadata. KNN/SVM identities and filenames are unchanged. Recorded sklearn and
+cuML RF rows are never mutually compatible. Workers cannot silently substitute
+sklearn after a cuML cache identity has been selected.
+
+Legacy RF rows without provenance are eligible only for sklearn/unknown reuse,
+after the complete existing identity or legacy filename digest is verified.
+Imports log `rf_backend=sklearn | provenance=legacy_unknown_assumed_sklearn`.
+For a cuML selection these rows log `CACHE SOURCE INCOMPATIBLE` with
+`expected=cuml, actual=sklearn/unknown`. There is no option to bypass this check.
+Older rows with an explicit consistent cuML backend can be recovered after all
+other scientific fields pass. Mixed, conflicting, or incomplete backend traces
+are rejected. Existing files remain intact; FULL migration writes new snapshots.
+
+## Optional cuML RF GPU setup
+
+The validated stable setup is RAPIDS/cuML 26.08 with CUDA 13, CuPy 14.2.0,
+and Python 3.13.16 on Ubuntu 26.04. RAPIDS 26.08 supports Python 3.11–3.14
+and CUDA 13.0–13.3 on Linux with glibc 2.28+. CUDA 13 requires an NVIDIA
+driver at least 580.65.06 and a Turing/SM75 or newer GPU. Check the
+[official release matrix](https://docs.rapids.ai/platform-support/#rapids-26-08)
+and [installation guide](https://docs.rapids.ai/install/) on each future PC;
+`nvidia-smi` reports driver capability, not an installed toolkit.
+
+`requirements-gpu.txt` contains optional RF/CuPy dependencies with validated
+RAPIDS patch versions. `requirements-linux-gpu.txt` includes both the base
+requirements and this GPU file. CPU requirements never include cuML.
+Use a separate venv on another PC if its existing dependencies would need major
+changes. On an already compatible project venv, inspect the plan before installing:
+
+```bash
+.venv/bin/python -m pip install --dry-run --only-binary=:all: -r requirements-gpu.txt
+.venv/bin/python -m pip install --only-binary=:all: -r requirements-gpu.txt
+.venv/bin/python -c "from cuml.ensemble import RandomForestClassifier; print('cuML RF OK')"
+RUN_CUML_RF_SMOKE=1 .venv/bin/python -B -m unittest tests.test_cuml_rf_smoke -v
+```
+
+The smoke check uses 128 synthetic rows, fits small native cuML forests, and
+constructs no optimizers or experiment outputs. Prebuilt wheels do not require
+`nvcc` on PATH; their matching CUDA/NVRTC libraries are resolved as dependencies.
+These pins are CUDA 13 specific; choose the official matching package family
+for a CUDA 12 environment rather than mixing wheel families.
+
+Select `COMPUTE_DEVICE="gpu"` or `--compute-device gpu` for future experiment
+runs. Native cuML RF is preferred even if `RF_CPU_FALLBACK=True`; the fallback
+flag only permits sklearn when cuML cannot be imported under `auto`. Use
+`--rf-backend-policy cuml` to require GPU RF and its distinct compatible caches.
+The configured CPU default is retained. CPU RF keeps historical
+sklearn defaults (`n_jobs=None`); independent CPU runs can still run in parallel.
+
+Native RF training and prediction execute GPU kernels. Dataset preparation,
+host/device transfers, Python orchestration and metric calculation still involve
+CPU work. cuML uses quantile splits, which can produce different results from
+sklearn's exact splits despite matching common parameters; GPU RF must not be
+described as numerically identical to historical sklearn RF.
+
+GPU RF run groups execute one run at a time because forest/RMM allocations are
+outside the optimizer CuPy memory limit and VRAM estimate. Each forest uses
+`n_streams=1` for reproducible seeded training, while tree/node calculations
+remain parallel on GPU. This prevents multiple forest workspaces from competing
+on a 6 GB GPU; a single oversized forest can still exhaust VRAM. KNN/SVM retain
+their existing worker policy. Scientific forest defaults (100 trees, unlimited
+depth in cuML 26.08, `max_features="sqrt"`, 128 bins) are retained.
+
+New RF observations record backend, library version and estimator parameters in
+`RFExecutionRuns`. Resumed legacy observations lacking this trace remain marked
+`unknown` and can continue only with sklearn. Mixed legacy rows are rejected;
+new runs must match the selected scientific backend. Historical sklearn results
+remain reusable under the sklearn selection. Reusing those results does not
+recompute them on GPU or convert their provenance into cuML results.
+
+With EXP629 configured to read EXP627, unchanged DE, JADE, SHADE, PSO, WOA, HHO,
+GOA, SA, BRO, RUN, and FOX rows can be reused while missing MaCRO-DE-t runs execute.
+Adding/removing comparison optimizers does not change FULL scientific identity.
+Other modes retain their historical scientific signatures with the added RF-only
+backend filename suffix and compatibility check.
+
+Focused validation (mocked optimization and exports, temporary output only):
+
+```bash
+python -B -m unittest tests.test_full_cache_reuse
+```
+
 ## Inexpensive reporting validation
 
 ```bash

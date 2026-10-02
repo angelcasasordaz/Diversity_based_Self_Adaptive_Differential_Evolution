@@ -2,6 +2,5 @@
 # in requirements.txt and does not import CuPy unless gpu/hybrid is selected.
 -r requirements.txt
 
-# CUDA runtime/toolkit dependencies are resolved by the ctk extra.
-cupy-cuda13x[ctk]==14.2.0
-cuml-cu13==26.8.0
+# Optional cuML RF/CuPy dependencies and compatibility notes.
+-r requirements-gpu.txt

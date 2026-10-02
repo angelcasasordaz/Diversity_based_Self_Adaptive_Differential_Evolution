@@ -40,6 +40,12 @@ def caches(args):
                 base = np.array([.2, .3, .4]) + di * .01 + ci * .005 + ai * .002
                 row = {'Estimator': cls, 'CompletedRuns': args.runs, 'Curve': [.9, .7, .5],
                        'CurvesAll': [[.9, .7, .5]] * args.runs}
+                if args.experiment_mode == 'full':
+                    parsed = m.parse_result_label(label, args)
+                    row.update(m.full_checkpoint_metadata(
+                        args, parsed['method'], ds, cls,
+                        parsed['transfer_function'] or args.transfer_functions[0],
+                    ))
                 for metric in paper_tables.METRICS:
                     values = base * metric.scale
                     row[metric.run_key] = values.tolist()

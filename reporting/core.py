@@ -180,7 +180,17 @@ def load_completed_cache(args):
     for dataset in datasets:
         results[dataset] = {}
         for classifier in classifiers:
-            path = safe_path(cache / f'{tag}_{dataset}_{classifier}_{signature}_results.pkl')
+            legacy_full = False
+            classifier_signature = m.classifier_cache_signature(args, signature, classifier)
+            path = safe_path(cache / f'{tag}_{dataset}_{classifier}_{classifier_signature}_results.pkl')
+            if not path.is_file() and classifier == 'rf':
+                path = safe_path(cache / f'{tag}_{dataset}_{classifier}_{signature}_results.pkl')
+            if not path.is_file() and args.experiment_mode == 'full':
+                # Historical reporting stays exact and read-only; wildcard
+                # migration belongs exclusively to normal scientific execution.
+                legacy_signature = m.build_legacy_cache_signature(args)
+                path = safe_path(cache / f'{tag}_{dataset}_{classifier}_{legacy_signature}_results.pkl')
+                legacy_full = True
             if not path.is_file():
                 raise FileNotFoundError(f"Missing completed cache: {path}; no recomputation allowed")
             before = sha256(path)
@@ -188,6 +198,31 @@ def load_completed_cache(args):
             expected = m.expected_result_labels(args, classifier, show_tf, show_cls)
             canonical = m.expected_result_labels(args, classifier, show_tf, True)
             groups = m.expected_result_labels(args, classifier, show_tf, False)
+            if args.experiment_mode == 'full' and not legacy_full:
+                # FULL updates append snapshots. Keep reporting read-only and
+                # final-only, selecting a complete scientifically matching grid.
+                snapshot_signature = classifier_signature if path.name.startswith(f'{tag}_{dataset}_{classifier}_{classifier_signature}_') else signature
+                snapshots = sorted(cache.glob(f'{tag}_{dataset}_{classifier}_{snapshot_signature}_snapshot_*_results.pkl'))
+                for candidate in (path, *snapshots):
+                    candidate = safe_path(candidate)
+                    stored = m.load_cache(str(candidate))
+                    selected = {}
+                    for (label, legacy), (output, output_legacy), (group, group_legacy) in zip(expected, canonical, groups):
+                        keys = [key for key in dict.fromkeys((label, legacy, output, output_legacy, group, group_legacy))
+                                if isinstance(stored, dict) and key in stored]
+                        if len(keys) != 1:
+                            break
+                        row = stored[keys[0]]
+                        parsed = m.parse_result_label(output, args)
+                        metadata = m.full_checkpoint_metadata(args, parsed['method'], dataset, classifier,
+                            parsed['transfer_function'] or args.transfer_functions[0])
+                        values, reason = m.validate_source_label_runs(row, classifier, args.runs, metadata)
+                        if reason or len(values['AccRuns']) != args.runs:
+                            break
+                        selected[keys[0]] = row
+                    else:
+                        path, payload, before = candidate, selected, sha256(candidate)
+                        break
             if not isinstance(payload, dict) or len(payload) != len(expected):
                 raise ValueError(f"Incomplete/extra optimizer rows: {path}")
             used = set()
@@ -201,6 +236,10 @@ def load_completed_cache(args):
                 row = payload[matches[0]]
                 if not isinstance(row, dict):
                     raise ValueError(f"Invalid cache row: {path}/{label}")
+                if classifier == 'rf':
+                    backend_reason = m.rf_backend_compatibility(row, m.resolve_rf_backend(args))
+                    if backend_reason:
+                        raise ValueError(f'{path.name}/{label}: {backend_reason}')
                 fields = [metric.run_key for metric in METRICS] + ['CurvesAll']
                 if all(field in row for field in fields):
                     values, reason = m.validate_source_label_runs(row, classifier, args.runs)
@@ -213,6 +252,13 @@ def load_completed_cache(args):
                 if reason or int(row.get('CompletedRuns', 0)) != args.runs:
                     raise ValueError(f"Incomplete cache {path}/{label}: {reason or 'completed run count mismatch'}")
                 parsed = m.parse_result_label(output_label, args)
+                if args.experiment_mode == 'full' and (not legacy_full or 'CacheIdentity' in row):
+                    expected_metadata = m.full_checkpoint_metadata(
+                        args, parsed['method'], dataset, classifier,
+                        parsed['transfer_function'] or args.transfer_functions[0],
+                    )
+                    if not m.checkpoint_metadata_matches(row, expected_metadata):
+                        raise ValueError(f'Scientific cache identity mismatch: {path}/{label}')
                 if parsed['estimator'] != classifier:
                     raise ValueError(f"Classifier identity mismatch: {output_label}")
                 if row.get('ExperimentMode', args.experiment_mode) != args.experiment_mode:

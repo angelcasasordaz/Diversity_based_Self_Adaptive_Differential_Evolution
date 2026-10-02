@@ -105,6 +105,8 @@ class SensitivityWeightsTests(unittest.TestCase):
                 self.assertEqual((args.fitness_alpha, args.fitness_beta), (0.90, 0.10))
                 if any(study.resolve_optimizer_name(name) == "DSADE" for name in args.optimizers):
                     self.assertNotEqual(study.build_cache_signature(args), legacy_cache_signature(args))
+                elif mode == "full":
+                    self.assertNotEqual(study.build_cache_signature(args), legacy_cache_signature(args))
                 else:
                     self.assertEqual(study.build_cache_signature(args), legacy_cache_signature(args))
 
