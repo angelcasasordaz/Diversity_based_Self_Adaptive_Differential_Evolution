@@ -23,7 +23,10 @@ def arguments(root, mode='full'):
                                   '--exp-id', '913', '--output-root', str(root), '--datasets', 'First', 'Second',
                                   '--optimizers', 'DE', 'PSO', 'JADE', '--estimators', 'knn', 'rf',
                                   '--runs', '3', '--epochs', '3']):
-        return m.parse_args()
+        args = m.parse_args()
+        # Synthetic historical RF fixtures represent sklearn regardless of GPU availability.
+        args.rf_backend_policy = 'sklearn'
+        return args
 
 
 def caches(args):
@@ -66,6 +69,12 @@ def tiny_base_figures(report, skipped):
         yield Path(name).stem, plt.figure(figsize=(.5, .5))
 
 
+def tiny_dataset_figures(report, skipped):
+    for dataset in report.datasets:
+        for classifier in report.classifiers:
+            yield f'convergence_{dataset}_{classifier}', plt.figure(figsize=(.5, .5))
+
+
 class GenericReportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -73,6 +82,7 @@ class GenericReportTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.stack = ExitStack(); self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(figures, 'base_publication_figures', tiny_base_figures))
+        self.stack.enter_context(patch.object(figures, 'per_dataset_figures', tiny_dataset_figures))
         for name in ('_run_single', 'execute_pending_runs', 'build_optimizer', 'load_dataset', 'save_cache', 'configure_compute_backend'):
             mock = self.stack.enter_context(patch.object(m, name, side_effect=AssertionError('Optimization forbidden')))
             self.addCleanup(mock.assert_not_called)

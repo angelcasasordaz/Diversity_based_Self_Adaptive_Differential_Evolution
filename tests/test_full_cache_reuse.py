@@ -306,6 +306,7 @@ class FullCacheReuseTests(unittest.TestCase):
         with patch.object(sys, "argv", ["main_best.py", "--experiment-mode", "full"]):
             args = study.parse_args()
         args.exp_id, args.reuse_cache_from_exp_id, args.output_root = 629, 627, str(root)
+        args.rf_backend_policy = "sklearn"  # Historical RF caches predate cuML execution.
         args.optimizers = ["MaCRO-DE-t", "DE", "JADE", "SHADE", "PSO", "WOA", "HHO", "GOA", "SA", "BRO", "RUN", "FOX"]
         args.estimators, args.transfer_functions = ["knn", "svm", "rf"], ["vstf_01"]
         args.runs, args.epochs, args.pop_size = 30, 150, 50

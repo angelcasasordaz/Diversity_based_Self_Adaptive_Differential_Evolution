@@ -22,7 +22,10 @@ class CuMLRFSmokeTests(unittest.TestCase):
         y = (X[:, 0] + X[:, 1] > 0).astype(np.int32)
         for fallback in (False, True):
             with self.subTest(fallback=fallback):
-                args = argparse.Namespace(compute_device="gpu", rf_cpu_fallback=fallback)
+                # This opt-in native check is independent of the historical
+                # sklearn policy selected for normal EXP629 continuation.
+                args = argparse.Namespace(compute_device="gpu", rf_cpu_fallback=fallback,
+                                          rf_backend_policy="cuml")
                 classifier = study.build_run_estimator("rf", args, 42)
                 self.assertIsInstance(classifier, RandomForestClassifier)
                 self.assertEqual(classifier.get_params()["n_streams"], 1)

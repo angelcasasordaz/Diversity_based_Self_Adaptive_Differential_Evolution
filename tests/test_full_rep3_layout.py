@@ -1,5 +1,6 @@
 """Replica figure layout/style contracts; synthetic caches and temporary outputs."""
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,7 +22,7 @@ class FullReplicaLayoutTests(unittest.TestCase):
         self.report = report_fixture(('A', 'B', 'C', 'D', 'E', 'F'),
                                      ('DSADE', 'DE', 'PSO'), ('knn', 'svm', 'rf'))
 
-    def test_root_has_exactly_eight_base_figures_and_every_generic_is_nested(self):
+    def test_root_has_nine_main_views_with_individual_and_statistics_siblings(self):
         """Use the real builders and PNG sink; reduce physical size for this test."""
         def small_save(fig, target):
             fig.set_size_inches(1, 1)
@@ -32,18 +33,20 @@ class FullReplicaLayoutTests(unittest.TestCase):
         original = figures.save_png
         with tempfile.TemporaryDirectory() as directory, patch.object(figures, 'save_png', small_save):
             root = Path(directory)
-            figures.generate(self.report, root)
-            statistics.export(self.report, root / 'individual/statistics', root / 'results')
-            self.assertEqual({p.name for p in root.glob('*.png')}, set(figures.BASE_FIGURES))
-            expected = {f'generic_{kind}_c{c}.png' for c in (1, 2, 3) for kind in
-                        ('summary', 'radar', 'precision', 'accuracy_boxplot', 'recall_violin',
-                         'convergence', 'features_runtime')}
-            expected |= {f'generic_heatmap_c{c}_m{m}.png' for c in (1, 2, 3) for m in range(1, 8)}
+            report = replace(self.report, datasets=['A', 'B'], classifiers=['knn'])
+            figures.generate(report, root)
+            statistics.export(report, root / 'statistics', root / 'results')
+            self.assertEqual({p.name for p in root.glob('*.png')}, set(figures.base_figure_names(report)))
+            self.assertEqual(len(list(root.glob('*.png'))), 9)
+            expected = {f'generic_{kind}_knn.png' for kind in
+                        ('summary', 'radar', 'precision', 'convergence', 'features_runtime', 'accuracy_boxplot', 'recall_violin')}
+            expected |= {f'{kind}_{ds}_knn.png' for ds in report.datasets for kind in ('radar', 'convergence', 'features_runtime')}
             self.assertEqual({p.name for p in (root / 'individual').glob('*.png')}, expected)
-            self.assertEqual({p.name for p in (root / 'individual/statistics').glob('*.png')},
-                             {'generic_average_rank.png', 'generic_reference_comparisons.png',
-                              'generic_holm_heatmap.png', 'generic_block_distribution.png'})
-            self.assertEqual(len(list(root.rglob('*.png'))), 54)
+            expected_statistics = {'generic_average_rank.png', 'generic_reference_comparisons.png',
+                                   'generic_holm_heatmap.png', 'generic_block_distribution.png'}
+            self.assertEqual({p.name for p in (root / 'statistics').glob('*.png')}, expected_statistics)
+            self.assertFalse((root / 'individual/statistics').exists())
+            self.assertEqual(len(list(root.rglob('*.png'))), 9 + len(expected) + len(expected_statistics))
             self.assertFalse(list(root.rglob('*.pdf')))
 
     def test_full_numbered_base_and_generic_use_one_style_and_identity_palette(self):
@@ -64,12 +67,13 @@ class FullReplicaLayoutTests(unittest.TestCase):
                         self.assertEqual(fig.get_facecolor(), to_rgba('white'))
                         for text in fig.findobj(match=Text):
                             self.assertIn(to_rgba(text.get_color()), (to_rgba('black'), to_rgba('white')), name)
-                        if 'summary' in name or name == 'grafica_resumen_general':
+                        if 'summary' in name or name.startswith('01_'):
                             self.assertEqual(fig.axes[0].patches[0].get_facecolor(), to_rgba('#0072B2'))
                             self.assertEqual(fig.axes[0].patches[0].get_edgecolor(), to_rgba('black'))
                         if 'convergence' in name:
-                            self.assertEqual(fig.axes[0].lines[0].get_color(), '#0072B2')
-                            self.assertEqual(fig.axes[0].lines[0].get_marker(), 'o')
+                            line = next(line for line in fig.axes[0].lines if line.get_label() == 'DSA-DE')
+                            self.assertEqual(line.get_color(), '#0072B2')
+                            self.assertEqual(line.get_marker(), 'o')
                     finally:
                         plt.close(fig)
 
@@ -128,7 +132,7 @@ class FullReplicaLayoutTests(unittest.TestCase):
         self.assertEqual(len(observed), 4)
 
     def test_orchestration_routes_stats_and_checks_root_without_scientific_execution(self):
-        from tests.test_generic_reporting import arguments, caches, tiny_figures, tiny_base_figures
+        from tests.test_generic_reporting import arguments, caches, tiny_figures, tiny_base_figures, tiny_dataset_figures
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             args = arguments(root)
@@ -139,15 +143,19 @@ class FullReplicaLayoutTests(unittest.TestCase):
                     (root / kind / 'EXP913' / f'full_rep{version}').mkdir(parents=True)
             with patch.object(figures, 'base_publication_figures', tiny_base_figures), \
                     patch.object(figures, 'publication_figures', tiny_figures), \
+                    patch.object(figures, 'per_dataset_figures', tiny_dataset_figures), \
                     patch.object(figures, 'statistical_figures', tiny_figures), \
                     patch.object(main, 'build_optimizer', side_effect=AssertionError('No optimizer')):
                 manifest = core.run_report(args)
             self.assertEqual(manifest['report_version'], 3)
             self.assertEqual(manifest['optimization_calls'], 0)
             entry = manifest['reports'][0]
-            self.assertEqual(len(entry['root_figures']), 8)
+            self.assertEqual(len(entry['root_figures']), 9)
+            self.assertIn('02_radar_por_dataset_knn.png', entry['root_figures'])
             self.assertEqual(entry['figure_style'], style.STYLE_ID)
-            self.assertEqual(entry['individual_figures'], ['individual/statistics/tiny.png', 'individual/tiny.png'])
+            self.assertIn('individual/tiny.png', entry['individual_figures'])
+            self.assertEqual(entry['statistical_figures'], ['statistics/tiny.png'])
+            self.assertIn('individual/convergence_First_knn.png', entry['individual_figures'])
             self.assertTrue(all(core.sha256(p) == h for p, h in hashes.items()))
 
 

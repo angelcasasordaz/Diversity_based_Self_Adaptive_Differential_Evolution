@@ -3,12 +3,21 @@ The Diversity Self-Adaptive Differential Evolution (DSA-DE) algorithm implements
 
 ## Cache-only reporting
 
-A plain IDE Run of `main_best.py` uses the configured `EXP_ID` and experiment
-modes, reads completed caches, and creates the next report version. It never
-executes optimization or changes the experiment ID. For an explicit selection:
+A plain IDE Run of `main_best.py` continues EXP629 using compatible current
+EXP629 checkpoints first, then imports missing compatible rows from read-only
+EXP627. Its defaults are `EXP_ID=629`, `REUSE_CACHE_FROM_EXP_ID=627`,
+`REUSE_CACHE=True`, `COMPUTE_DEVICE="gpu"`, `RF_BACKEND_POLICY="sklearn"`, and
+`RF_CPU_FALLBACK=True`. RF stays compatible with historical sklearn results even
+when cuML is installed; custom optimizer kernels can still use GPU. Scientific
+run counts, budgets, datasets, optimizer parameters and seeds are unchanged.
+EXP630 is not the default. `FULL_REPLICA_REPORT_ONLY=False` continues the real
+experiment in `EXP629/full`; incomplete combinations may execute new runs.
+
+Use `--report-only` after the selected EXP629 caches are complete to create the
+next presentation version without optimization:
 
 ```bash
-python -B main_best.py --report-only --exp-id 627 --experiment-mode full
+python -B main_best.py --report-only --exp-id 629 --experiment-mode full
 ```
 
 The console prints flushed startup, stage, and per-PNG progress with elapsed
@@ -64,6 +73,58 @@ Insufficient blocks and all-tied Friedman inputs have no invented test result.
 Wilcoxon zeros/ties and exact versus approximate methods are recorded per pair.
 
 ## Generic publication figures
+
+New FULL exports use the same layout for normal runs and cache-only reports:
+
+```text
+Figures/EXP629/full/             # completed experiment exports
+  01_...png through 09_...png    # main publication figures
+  individual/                   # additional generic and single-smell views
+  statistics/                   # average ranks, Holm/posthoc, p-value heatmaps
+Figures/EXP629/full_repN/        # new cache-only presentation version
+  01_...png through 09_...png    # same main publication names/renderers
+  individual/
+  statistics/
+Results/EXP629/full/             # existing experiment workbooks, summary CSV, cache/
+Results/EXP629/full_repN/        # existing versioned report workbook convention
+  statistics/                   # statistical CSV/text outputs, as before
+```
+
+Root holds nine main figures: all-classifier overview (01), radar grid (02),
+dataset feature/runtime grid (03), dataset accuracy boxplots (04), convergence
+grid (05), F1 heatmap (06), recall violin (07), global accuracy distribution (08),
+and global feature/runtime tradeoff (09). Both FULL paths share one renderer.
+`PLOT_GLOBAL_ESTIMATOR="knn"` (or `--plot-global-estimator`) selects the main
+classifier; the first observed classifier is used if that choice is absent.
+Classifier-specific root names reflect the actual classifier. Plot settings do
+not affect scientific/cache identity. Main distributions retain observed cached
+runs; generic confidence/distribution views retain their existing dataset means.
+
+Extra multi-dataset views use names such as `generic_convergence_knn.png`
+and `generic_features_runtime_svm.png`.
+Single-smell panels always name their smell, for example
+`convergence_DataClass_knn.png`, `radar_GodClass_svm.png`,
+and `features_runtime_SwitchStatements_knn.png`.
+Metric tokens are accuracy, precision, recall, f1, fitness, features, and runtime;
+opaque `cN/mN` indices are no longer exported. Unsafe filename characters are
+percent-encoded without changing dataset keys. All these extra views stay in
+`individual/`, including additional generic boxplots/violins. FULL generates
+only the main metric heatmap (06); no extra heatmaps are generated in `individual/`.
+
+The eight historical report filenames (`grafica_resumen_general`,
+`radar_6smells_grid_svm`, `ranking_precision`, `boxplot_accuracy_general`,
+`violin_recall`, `heatmap_f1score`, `convergence_curve`, and
+`features_runtime_per_optimizer`) are not renamed on disk. New exports use the
+numbered main set and readable individual names instead.
+Average-rank, reference-comparison, Holm heatmap and matched-block distribution
+PNGs are siblings of `individual/`, rather than inside it. Report manifests list
+root, individual and statistical figures separately. Existing figures are never
+moved or deleted by this layout change; older root files can remain in place.
+Workbooks retain their existing Results destinations. The plot/report alias
+`MaCRO-DE-t` → `DSA-DE` does not change cache labels or scientific identity.
+Its visual identity uses the established primary blue, solid line/circle marker,
+strong black curve/heatmap outlines, and emphasized bars. Numeric bar labels,
+runtime hatching, distribution mean/median markers and cell annotations remain.
 
 Every selected experiment uses the same reporting implementation. There are no
 experiment-specific modules, presets, signatures, layouts, or classifier choices.
@@ -164,7 +225,9 @@ FULL writes append immutable snapshots instead of replacing existing cache files
 
 RF cache hits and imports never construct an RF estimator. Explicit backend
 policies do not import cuML during lookup. For missing RF runs, GPU mode uses
-cuML under the default `RF_BACKEND_POLICY="auto"`. Set `RF_CPU_FALLBACK = True` or pass `--rf-cpu-fallback` to allow
+cuML when `RF_BACKEND_POLICY="auto"` is selected. The EXP629 default is
+`RF_BACKEND_POLICY="sklearn"` to retain historical RF cache compatibility.
+Set `RF_CPU_FALLBACK = True` or pass `--rf-cpu-fallback` to allow
 the historical sklearn/MAFESE RF path when cuML cannot be imported. Optimizer
 kernels remain on GPU; only RF fitness/evaluation uses CPU. The log says
 `cuML unavailable; using sklearn RF on CPU while optimizer backend remains GPU.`
@@ -228,11 +291,12 @@ constructs no optimizers or experiment outputs. Prebuilt wheels do not require
 These pins are CUDA 13 specific; choose the official matching package family
 for a CUDA 12 environment rather than mixing wheel families.
 
-Select `COMPUTE_DEVICE="gpu"` or `--compute-device gpu` for future experiment
-runs. Native cuML RF is preferred even if `RF_CPU_FALLBACK=True`; the fallback
+The current EXP629 default uses GPU optimizer kernels with sklearn RF. For future
+experiments selecting `--rf-backend-policy auto`, native cuML RF is preferred
+even if `RF_CPU_FALLBACK=True`; the fallback
 flag only permits sklearn when cuML cannot be imported under `auto`. Use
 `--rf-backend-policy cuml` to require GPU RF and its distinct compatible caches.
-The configured CPU default is retained. CPU RF keeps historical
+CPU mode always uses sklearn RF. sklearn RF keeps historical
 sklearn defaults (`n_jobs=None`); independent CPU runs can still run in parallel.
 
 Native RF training and prediction execute GPU kernels. Dataset preparation,
@@ -269,6 +333,49 @@ python -B -m unittest tests.test_full_cache_reuse
 ```
 
 ## Inexpensive reporting validation
+
+Main FULL/full_repN publication figures have three presentation-only settings in
+`main_best.py`: `PLOT_GLOBAL_ESTIMATOR = "knn"`,
+`PLOT_GLOBAL_METRIC = "accuracy"`, and `FIGURE_LANGUAGE = "en"`. The equivalent
+CLI options are `--plot-global-estimator {knn,svm,rf}`,
+`--plot-global-metric {accuracy,f1,precision,recall}`, and
+`--figure-language {en,es}`. For example, render a new cache-only report using
+stored SVM recall results with Spanish root-figure text:
+
+```bash
+.venv/bin/python main_best.py --report-only --exp-id 629 --experiment-mode full \
+  --plot-global-estimator svm --plot-global-metric recall --figure-language es
+```
+
+The selected classifier must have stored results. Figure 01 remains the
+all-classifier overview. Figures 02–05 use the selected classifier; 04 also uses
+the selected metric. Figure 06 is the selected metric's **dataset run-mean
+heatmap**. Figures 07 (violin) and 08 (boxplot) use **all cached runs pooled across
+datasets for the selected classifier**, not dataset means or pooled classifiers.
+Accuracy is displayed on a 0–1 scale using the existing percentage conversion;
+F1, precision and recall retain their stored 0–1 units. Figure 09 also uses the
+selected classifier's features/runtime data. Distribution views retain mean and
+median indicators without individual scatter points.
+
+Root filenames use English tokens, including
+`04_boxplot_<metric>_por_dataset_<classifier>.png`,
+`06_heatmap_<metric>_<classifier>.png`,
+`07_violin_<metric>_<classifier>.png`, and
+`08_global_<metric>_distribution.png`. Figure 08's title identifies its selected
+classifier. Spanish changes only visible root-figure text (recall is
+“Sensibilidad”); datasets and algorithm names are preserved. Individual and
+statistical destinations and names remain unchanged. Presentation selections are
+recorded in new report manifests, never in cache signatures or scientific
+identities. Existing report directories are not rewritten by report-only runs.
+
+Convergence panels include an inset of the final quarter of stored iterations,
+titled “Final stage” / “Etapa final”, with all algorithms and palette-colored
+curves. Insets stay in the lower-right corner without changing main-axis limits.
+Their vertical zoom uses the lowest final-fitness band (the bottom 10% of the
+final-value range, capped at the lower half), so high curves need not be visible,
+including DSA-DE when it converges high. A missing,
+invalid, or shorter-than-three-iteration curve prevents that panel's inset and is
+reported explicitly in `skipped_outputs`; available main curves remain visible.
 
 ```bash
 python -B -m unittest tests.test_dispatch tests.test_full_rep1_validation tests.test_replica_safety tests.test_paper_tables tests.test_generic_reporting tests.test_generic_figures tests.test_reporting_png tests.test_mode_datasets tests.test_statistical_transfer_exports tests.test_reporting_reference

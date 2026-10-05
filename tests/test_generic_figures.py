@@ -22,8 +22,8 @@ def report_fixture(datasets, algorithms, classifiers):
 
 
 class GenericPublicationTypesTests(unittest.TestCase):
-    def test_eight_types_adapt_to_actual_dimensions_and_classifiers(self):
-        types = {'summary', 'radar', 'heatmap', 'precision', 'accuracy_boxplot',
+    def test_full_types_adapt_to_actual_dimensions_and_classifiers_without_extra_heatmaps(self):
+        types = {'summary', 'radar', 'precision', 'accuracy_boxplot',
                  'recall_violin', 'convergence', 'features_runtime'}
         for datasets, algorithms, classifiers in [(('Only',), ('DE',), ('tree',)),
                                                    (('A', 'B', 'C', 'D'), ('DE', 'PSO', 'JADE'), ('knn', 'rf'))]:
@@ -40,10 +40,11 @@ class GenericPublicationTypesTests(unittest.TestCase):
                     fig.canvas.draw()  # Small in-memory default DPI only.
                 finally:
                     plt.close(fig)
-            for ci in range(1, len(classifiers) + 1):
+            for classifier in classifiers:
                 for kind in types:
-                    self.assertTrue(any(name.startswith(f'generic_{kind}_c{ci}') for name in names), kind)
-            self.assertEqual(len(names), (7 + len(report.metrics)) * len(classifiers))
+                    self.assertTrue(any(name.startswith(f'generic_{kind}_{classifier}') for name in names), kind)
+            self.assertEqual(len(names), 7 * len(classifiers))
+            self.assertFalse(any('heatmap' in name for name in names))
             if len(datasets) == 1:
                 self.assertTrue(any(item['output'].startswith('Precision CI') for item in skipped))
                 self.assertTrue(any(item['output'].startswith('Violin density') for item in skipped))

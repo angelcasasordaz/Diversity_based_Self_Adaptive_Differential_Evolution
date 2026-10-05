@@ -1,5 +1,7 @@
 """Publication figures derived from actual cached datasets, classifiers and algorithms."""
 from pathlib import Path
+import argparse
+from dataclasses import replace
 import math
 
 import matplotlib
@@ -12,6 +14,8 @@ from scipy.stats import t
 
 from reporting.core import framework, report_stage
 import full_plot_style as base_style
+from figure_layout import full_figure_directories, full_figure_path, STATISTICS, main_figure_names, filename_component, METRIC_TOKENS
+from figure_text import localize_figure, visible_text
 
 
 STYLE = base_style.STYLE
@@ -23,7 +27,44 @@ BASE_FIGURES = (
     'ranking_precision.png', 'boxplot_accuracy_general.png', 'heatmap_f1score.png',
     'violin_recall.png', 'convergence_curve.png', 'features_runtime_per_optimizer.png',
 )
+# Historical names above are retained for reference; new FULL exports are numbered.
 INDIVIDUAL_DIRECTORY = 'individual'
+
+
+def report_from_results(args, results):
+    """Adapt completed in-memory results for plotting, without cache/science writes."""
+    from reporting.core import CompletedReport
+    from reporting.paper_tables import METRICS
+    m = framework()
+    plot_args = argparse.Namespace(**vars(args))
+    indexed, algorithms, classifiers = {}, [], []
+    for dataset, rows in results.items():
+        for label, row in rows.items():
+            parsed = m.parse_result_label(label, plot_args)
+            classifier = str(row['Estimator']).lower()
+            algorithm = m.build_alg_label(parsed['method'], parsed['transfer_function'] or args.transfer_functions[0],
+                                           classifier, len(args.transfer_functions) > 1, False)
+            key = dataset, classifier, algorithm
+            if key in indexed:
+                raise ValueError(f'Ambiguous plot observations: {key}')
+            indexed[key] = row
+            if algorithm not in algorithms:
+                algorithms.append(algorithm)
+            if classifier not in classifiers:
+                classifiers.append(classifier)
+    metrics = [metric for metric in METRICS if all(metric.run_key in row for row in indexed.values())]
+    return CompletedReport(plot_args, results, indexed, list(results), classifiers, algorithms, metrics, 'in-memory', {})
+
+
+def metric_token(metric):
+    return {'AccRuns': 'accuracy', 'PSRuns': 'precision', 'RSRuns': 'recall', 'F1Runs': 'f1',
+            'FitRuns': 'fitness', 'FeatRuns': 'features', 'TimeRuns': 'runtime'}[metric.run_key]
+
+
+def run_values(report, classifier, key, scale=1):
+    """Preserve the established main distributions over observed cached runs."""
+    return np.asarray([np.concatenate([np.asarray(report.indexed[ds, classifier, algorithm][key], dtype=float)
+                                      for ds in report.datasets]) / scale for algorithm in report.algorithms])
 
 
 def metric_values(df, metric, classifier, datasets, algorithms):
@@ -139,18 +180,23 @@ def radar_figure(report, classifier, labels, values):
     angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False)
     angles = np.r_[angles, angles[0]]
     for di, (ax, dataset) in enumerate(zip(axes, report.datasets)):
-        for ai, algorithm in enumerate(report.algorithms):
+        for ai in curve_draw_order(report.algorithms):
+            algorithm = report.algorithms[ai]
             observed = values[ai, di]
             highlighted = base_style.method_key(algorithm) == 'DSADE'
             ax.plot(angles, np.r_[observed, observed[0]], color=colors[algorithm],
                     label=base_style.display_label(algorithm, report.algorithms), **base_style.line_style(algorithm),
-                    markersize=4, linewidth=2.4 if highlighted else 1.1,
-                    markeredgecolor='black' if highlighted else colors[algorithm])
-            ax.fill(angles, np.r_[observed, observed[0]], color=colors[algorithm], alpha=.12 if highlighted else .04)
+                    markersize=4, linewidth=2.1 if highlighted else 1.2,
+                    zorder=3 if highlighted else 2,
+                    markeredgecolor=colors[algorithm])
+            ax.fill(angles, np.r_[observed, observed[0]], color=colors[algorithm], alpha=.04)
         ax.set_xticks(angles[:-1], labels, fontsize=8)
         ax.set_ylim(min(0., float(values.min())), max(1., float(values.max())))
         ax.set_title(f'{dataset} / {classifier.upper()}', fontsize=11, fontweight='bold', pad=14)
     handles, names = axes[0].get_legend_handles_labels()
+    legend_order = np.argsort(curve_draw_order(report.algorithms))
+    handles = [handles[i] for i in legend_order]
+    names = [names[i] for i in legend_order]
     fig.legend(handles, names, loc='lower center', ncol=min(6, len(names)), fontsize=9)
     fig.tight_layout(rect=(0, .08, 1, 1))
     return fig
@@ -193,35 +239,86 @@ def precision_figure(values, algorithms, classifier):
     return fig
 
 
-def observations(ax, values, algorithms, *, means=False):
+def observations(ax, values, algorithms, *, means=False, points=True):
     colors = palette(algorithms)
     for i, algorithm in enumerate(algorithms):
         highlighted = base_style.method_key(algorithm) == 'DSADE'
-        ax.scatter(i + np.linspace(-.08, .08, values.shape[1]), values[i], s=45 if highlighted else 35,
-                   color=colors[algorithm], edgecolor='black' if highlighted else 'white',
-                   linewidth=1.2 if highlighted else .5, zorder=4)
+        if points:
+            ax.scatter(i + np.linspace(-.08, .08, values.shape[1]), values[i], s=45 if highlighted else 35,
+                       color=colors[algorithm], edgecolor='black' if highlighted else 'white',
+                       linewidth=1.2 if highlighted else .5, zorder=4)
         if means:
-            ax.scatter(i, values[i].mean(), marker='D', s=140, color='black', edgecolor='white', zorder=5)
+            if points:
+                ax.scatter(i, values[i].mean(), marker='D', s=140, color='black', edgecolor='white', zorder=5)
+                ax.annotate(f'{values[i].mean():.3f}', (i, values[i].mean()), xytext=(5, 8),
+                            textcoords='offset points', fontsize=8)
+            else:
+                ax.plot(i, values[i].mean(), marker='D', markersize=8, color='black',
+                        markeredgecolor='white', linestyle='none', zorder=5)
     algorithm_ticks(ax, algorithms)
     style_axes(ax)
 
 
-def boxplot_figure(values, algorithms, classifier):
+def distribution_points(ax, values, algorithms):
+    """Small run observations with reproducible horizontal-only jitter."""
+    rng = np.random.default_rng(0)
+    for i, (algorithm, color) in enumerate(palette(algorithms).items()):
+        jitter = rng.uniform(-.06, .06, len(values[i]))
+        ax.scatter(i + jitter, values[i], s=12, alpha=.65, color=color,
+                   edgecolor='white', linewidth=.25, zorder=3)
+
+
+def mean_value_labels(ax, values):
+    """Center mean numbers beside their markers, away from the median line."""
+    for i, sample in enumerate(values):
+        mean = float(np.mean(sample))
+        above = mean >= float(np.median(sample))
+        label = ax.annotate(f'{mean:.3f}', (i, mean),
+                            xytext=(0, 9 if above else -9), textcoords='offset points',
+                            ha='center', va='bottom' if above else 'top',
+                            fontsize=8, color='black', fontweight='bold', zorder=6)
+        label.set_in_layout(False)
+
+
+def boxplot_figure(values, algorithms, classifier, *, show_points=True, metric_name='Accuracy'):
     fig, ax = plt.subplots(figsize=base_style.figure_size('boxplot', len(algorithms)))
     boxes = ax.boxplot(values.T, positions=np.arange(len(algorithms)), patch_artist=True, widths=.55,
-                       showfliers=False, showmeans=True, medianprops={'color': 'black', 'linewidth': 1.5})
+                       showfliers=False, showmeans=True, medianprops={'color': 'black', 'linewidth': 1.5},
+                       **({} if show_points else {'meanprops': {'marker': 'D', 'markersize': 8,
+                           'markerfacecolor': 'black', 'markeredgecolor': 'white'}}))
     for box, algorithm, color in zip(boxes['boxes'], algorithms, palette(algorithms).values()):
         box.set_facecolor(color); box.set_alpha(.70)
         base_style.highlight_patch(box, algorithm, 2.8)
-    observations(ax, values, algorithms)
-    ax.set_ylabel('Accuracy (test): one cached run mean per dataset')
+    observations(ax, values, algorithms, means=show_points, points=show_points)
+    ax.set_ylabel(f'{metric_name} (test): one cached run mean per dataset')
     ax.set_title(classifier.upper())
+    ax.legend(handles=[Line2D([], [], marker='D', color='none', markerfacecolor='black', label='Mean'),
+                       Line2D([], [], color='black', label='Median')], loc='lower right')
     fig.tight_layout()
     return fig
 
 
-def violin_figure(values, algorithms, classifier):
-    """Draw densities only for nonconstant samples, retaining every observation."""
+def dataset_boxplot_figure(report, classifier, metric=None):
+    if metric is None:
+        metric = next(m for m in report.metrics if m.run_key == 'AccRuns')
+    fig, axes = panel_grid(len(report.datasets), width=5.8, height=4.6)
+    for ax, dataset in zip(axes, report.datasets):
+        values = np.asarray([report.indexed[dataset, classifier, a][metric.run_key] for a in report.algorithms]) / metric.scale
+        boxes = ax.boxplot(values.T, positions=np.arange(len(report.algorithms)), patch_artist=True,
+                           widths=.55, showmeans=True, medianprops={'color': 'black'})
+        for box, algorithm, color in zip(boxes['boxes'], report.algorithms, palette(report.algorithms).values()):
+            box.set_facecolor(color); box.set_alpha(.6)
+            base_style.highlight_patch(box, algorithm, 2.5)
+        algorithm_ticks(ax, report.algorithms)
+        ax.set_ylim(0, 1.08); ax.set_ylabel(f'{metric.name} (test)')
+        ax.set_title(f'{dataset} / {classifier.upper()}')
+        style_axes(ax)
+    fig.tight_layout()
+    return fig
+
+
+def violin_figure(values, algorithms, classifier, *, show_points=True, metric_name='Recall'):
+    """Densities use every supplied value; point visibility never changes the sample."""
     fig, ax = plt.subplots(figsize=base_style.figure_size('violin', len(algorithms)))
     for i, (algorithm, color) in enumerate(palette(algorithms).items()):
         if len(values[i]) > 1 and np.ptp(values[i]) > 0:
@@ -232,68 +329,160 @@ def violin_figure(values, algorithms, classifier):
                 parts['bodies'][0].set_edgecolor('black')
                 parts['bodies'][0].set_linewidth(2.4)
         ax.hlines(np.median(values[i]), i-.3, i+.3, colors='black', linestyles='--', linewidth=1.3)
-    observations(ax, values, algorithms, means=True)
-    ax.set_ylabel('Recall (test): one cached run mean per dataset')
+    observations(ax, values, algorithms, means=True, points=show_points)
+    ax.set_ylabel(f'{metric_name} (test): one cached run mean per dataset')
     ax.set_title(classifier.upper())
     ax.legend(handles=[Line2D([], [], marker='D', color='none', markerfacecolor='#777777', label='Mean'),
-                       Line2D([], [], color='black', linestyle='--', label='Median'),
-                       Line2D([], [], marker='o', color='none', markerfacecolor='#777777', label='Dataset mean')],
+                       Line2D([], [], color='black', linestyle='--', label='Median')]
+                       + ([Line2D([], [], marker='o', color='none', markerfacecolor='#777777', label='Dataset mean')]
+                          if show_points else []),
               loc='lower right', framealpha=.9)
     fig.tight_layout()
     return fig
 
 
-def convergence_figure(report, classifier, datasets):
+def curve_draw_order(algorithms):
+    """Paint primary curves last without changing stored algorithm order."""
+    return sorted(range(len(algorithms)), key=lambda i: base_style.method_key(algorithms[i]) == 'DSADE')
+
+
+def final_stage_inset(ax, curves, algorithms, colors, language):
+    """Magnify the lowest final-stage curves in the lower-right corner."""
+    # These are child axes, so the six dataset panels and common legend stay intact.
+    shortest = min(len(curve) for curve in curves)
+    start = min(int(.75 * shortest), shortest - 2)
+    inset = ax.inset_axes((.56, .16, .39, .30))
+    inset.set_in_layout(False)
+    for i in curve_draw_order(algorithms):
+        algorithm, curve = algorithms[i], curves[i]
+        highlighted = base_style.method_key(algorithm) == 'DSADE'
+        inset.plot(np.arange(start, len(curve)), curve[start:], color=colors[algorithm],
+                   label=base_style.display_label(algorithm, algorithms), **base_style.line_style(algorithm),
+                   markersize=3, markevery=max(1, (len(curve)-start)//5),
+                   linewidth=2.4 if highlighted else 1.3, zorder=3 if highlighted else 2)
+    # Use the bottom band of final fitness values, capped at the lower half.
+    # High methods remain plotted but cannot expand the zoom, including DSA-DE.
+    finals = np.asarray([curve[-1] for curve in curves])
+    cutoff = min(float(np.median(finals)), float(finals.min() + .1*np.ptp(finals)))
+    tail = np.concatenate([curve[start:] for curve in curves if curve[-1] <= cutoff])
+    padding = max(float(np.ptp(tail))*.12, float(np.max(np.abs(tail)))*.001, 1e-6)
+    inset.set_xlim(start, max(len(curve)-1 for curve in curves))
+    inset.set_ylim(float(tail.min())-padding, float(tail.max())+padding)
+    inset.set_title(visible_text('Final stage', language), fontsize=8, fontweight='normal', pad=3)
+    inset.tick_params(labelsize=6)
+    inset.ticklabel_format(axis='y', style='sci', scilimits=(-3, 3))
+    inset.yaxis.get_offset_text().set_fontsize(6)
+    inset.grid(alpha=.2)
+    return inset
+
+
+def convergence_figure(report, classifier, datasets, *, skipped=None):
     fig, axes = panel_grid(len(datasets), width=5.8, height=4.4)
     colors = palette(report.algorithms)
+    language = figure_language(report)
     for ax, ds in zip(axes, datasets):
-        for i, algorithm in enumerate(report.algorithms):
-            curve = np.asarray(report.indexed[ds, classifier, algorithm]['Curve'])
-            ax.plot(np.arange(len(curve)), curve, label=base_style.display_label(algorithm, report.algorithms), color=colors[algorithm],
+        curves, missing = [], []
+        for i in curve_draw_order(report.algorithms):
+            algorithm = report.algorithms[i]
+            curve = np.asarray(report.indexed[ds, classifier, algorithm].get('Curve', []), dtype=float)
+            if curve.ndim != 1 or not curve.size or not np.isfinite(curve).all():
+                missing.append(algorithm)
+                continue
+            curves.append((algorithm, curve))
+            highlighted = base_style.method_key(algorithm) == 'DSADE'
+            ax.plot(np.arange(len(curve)), curve, color=colors[algorithm],
+                    label=base_style.display_label(algorithm, report.algorithms),
                     **base_style.line_style(algorithm), markersize=4, markevery=max(1, len(curve)//12),
-                    linewidth=2.4 if base_style.method_key(algorithm) == 'DSADE' else 1.4)
+                    linewidth=2.4 if highlighted else 1.3, zorder=3 if highlighted else 2)
         ax.set_title(f'{ds} / {classifier.upper()}', fontsize=11, fontweight='bold')
         ax.set_xlabel('Iteration', fontsize=9); ax.set_ylabel('Fitness', fontsize=9)
         style_axes(ax)
-    handles, names = axes[0].get_legend_handles_labels()
-    fig.legend(handles, names, loc='lower center', ncol=min(6, len(names)), fontsize=9)
+        if not missing and min((len(curve) for _, curve in curves), default=0) >= 3:
+            # Supply stored curves in the same order as their algorithm names.
+            stored_curves = dict(curves)
+            final_stage_inset(ax, [stored_curves[a] for a in report.algorithms],
+                              report.algorithms, colors, language)
+        else:
+            reason = (f'Final-stage inset unavailable: missing/invalid stored curves for {missing}'
+                      if missing else 'Final-stage inset unavailable: fewer than three stored iterations')
+            if skipped is not None:
+                skipped.append({'output': f'Convergence inset {ds}/{classifier}', 'reason': reason})
+            if not curves:
+                ax.text(.5, .5, visible_text('No stored curves', language), transform=ax.transAxes, ha='center')
+    handles = [Line2D([], [], color=colors[a], label=base_style.display_label(a, report.algorithms),
+                     **base_style.line_style(a), markersize=4,
+                     linewidth=2.4 if base_style.method_key(a) == 'DSADE' else 1.3) for a in report.algorithms]
+    fig.legend(handles=handles, loc='lower center', ncol=min(6, len(handles)), fontsize=9)
     fig.tight_layout(rect=(0, .08, 1, 1))
     return fig
 
 
 def tradeoff_figure(features, runtime, algorithms, classifier):
     fig, ax = plt.subplots(figsize=base_style.figure_size('features_runtime', len(algorithms)))
-    twin = ax.twinx()
-    colors = list(palette(algorithms).values())
-    for axis, values, shift, hatch, alpha in ((ax, features.mean(axis=1), -.19, None, .85),
-                                             (twin, runtime.mean(axis=1), .19, '///', .45)):
-        bars = axis.bar(np.arange(len(algorithms))+shift, values, width=.38, color=colors, hatch=hatch, alpha=alpha)
-        for bar, algorithm in zip(bars, algorithms):
-            base_style.highlight_patch(bar, algorithm, 2.8)
-        axis.set_ylim(0, max(1., float(values.max())*1.2))
-    algorithm_ticks(ax, algorithms)
-    ax.set_ylabel('Average selected features'); twin.set_ylabel('Average runtime (s)')
+    draw_tradeoff_axes(ax, features.mean(axis=1), runtime.mean(axis=1), algorithms)
     ax.set_title(classifier.upper())
-    style_axes(ax)
-    ax.legend(handles=[Patch(facecolor='#777777', label='Selected features'),
-                       Patch(facecolor='#777777', hatch='///', alpha=.45, label='Runtime')], framealpha=.95)
     fig.tight_layout()
     return fig
 
 
+def draw_tradeoff_axes(ax, features, runtime, algorithms, *, compact_labels=False):
+    twin = ax.twinx()
+    colors = list(palette(algorithms).values())
+    for axis, values, shift, hatch, alpha in ((ax, features, -.19, None, .85),
+                                             (twin, runtime, .19, '///', .45)):
+        bars = axis.bar(np.arange(len(algorithms))+shift, values, width=.38, color=colors, hatch=hatch, alpha=alpha)
+        for bar, algorithm, value in zip(bars, algorithms, values):
+            base_style.highlight_patch(bar, algorithm, 2.8)
+            axis.annotate(f'{value:.1f}s' if hatch else f'{value:.2f}',
+                          (bar.get_x() + bar.get_width()/2, value), xytext=(0, 3 if compact_labels else 6),
+                          textcoords='offset points', ha='center', va='bottom',
+                          fontsize=6 if compact_labels else 8, rotation=90 if compact_labels else 0,
+                          fontweight='bold' if base_style.method_key(algorithm) == 'DSADE' else 'normal')
+        axis.set_ylim(0, max(1., float(values.max())*(1.4 if compact_labels else 1.2)))
+        if compact_labels:
+            axis.tick_params(axis='y', labelsize=8)
+    algorithm_ticks(ax, algorithms)
+    ax.set_ylabel('Average selected features'); twin.set_ylabel('Average runtime (s)')
+    style_axes(ax)
+    if compact_labels:
+        ax.tick_params(axis='x', labelsize=7)
+        ax.yaxis.label.set_size(9)
+        twin.yaxis.label.set_size(9)
+    else:
+        ax.legend(handles=[Patch(facecolor='#777777', label='Selected features'),
+                           Patch(facecolor='#777777', hatch='///', alpha=.45, label='Runtime')], framealpha=.95)
+
+
+def dataset_tradeoff_figure(report, classifier, *, compact_labels=False):
+    available = {m.run_key: m for m in report.metrics}
+    features = metric_matrix(report, classifier, available['FeatRuns'])
+    runtime = metric_matrix(report, classifier, available['TimeRuns'])
+    fig, axes = panel_grid(len(report.datasets), width=5.8, height=4.6)
+    for i, (ax, dataset) in enumerate(zip(axes, report.datasets)):
+        draw_tradeoff_axes(ax, features[:, i], runtime[:, i], report.algorithms, compact_labels=compact_labels)
+        ax.set_title(f'{dataset} / {classifier.upper()}')
+    if compact_labels:
+        fig.legend(handles=[Patch(facecolor='#777777', label='Selected features'),
+                            Patch(facecolor='#777777', hatch='///', alpha=.45, label='Runtime')],
+                   loc='lower center', ncol=2, fontsize=9, framealpha=.95)
+    fig.tight_layout(rect=(0, .06, 1, 1) if compact_labels else (0, 0, 1, 1))
+    return fig
+
+
 def publication_figures(report, skipped):
-    """Eight figure types, applied uniformly to every actual classifier."""
+    """Generic views for every classifier; FULL reserves metric heatmaps for 06."""
     available = {metric.run_key: metric for metric in report.metrics}
-    for ci, classifier in enumerate(report.classifiers, 1):
-        suffix = f'c{ci}'
+    for classifier in report.classifiers:
+        suffix = filename_component(classifier)
         yield f'generic_summary_{suffix}', summary_figure(report, classifier)
         labels, radar = radar_values(report, classifier)
         if len(labels) >= 3:
             yield f'generic_radar_{suffix}', radar_figure(report, classifier, labels, radar)
         else:
             skipped.append({'output': f'Radar/{classifier}', 'reason': 'Fewer than three available classification/feature-efficiency axes'})
-        for mi, metric in enumerate(report.metrics, 1):
-            yield f'generic_heatmap_{suffix}_m{mi}', heatmap_figure(report, classifier, metric)
+        if report.args.experiment_mode != 'full':
+            for metric in report.metrics:
+                yield f'generic_heatmap_{suffix}_{metric_token(metric)}', heatmap_figure(report, classifier, metric)
         for key, stem, generate_figure in (('PSRuns', 'precision', precision_figure),
                                            ('AccRuns', 'accuracy_boxplot', boxplot_figure),
                                            ('RSRuns', 'recall_violin', violin_figure)):
@@ -327,23 +516,51 @@ def publication_figures(report, skipped):
 
 
 def base_classifier(report):
-    """Preserve the historical base views' SVM; use observed data on other suites."""
-    return 'svm' if 'svm' in report.classifiers else report.classifiers[0]
+    """One presentation-only main classifier, shared by FULL and replicas."""
+    configured = str(getattr(report.args, 'plot_global_estimator', framework().PLOT_GLOBAL_ESTIMATOR)).lower()
+    if configured not in report.classifiers and hasattr(report.args, 'plot_global_estimator'):
+        raise ValueError(f'Selected publication classifier {configured!r} has no stored results; '
+                         f'available classifiers: {report.classifiers}')
+    return configured if configured in report.classifiers else report.classifiers[0]
+
+
+def base_metric_token(report):
+    configured = str(getattr(report.args, 'plot_global_metric', framework().PLOT_GLOBAL_METRIC)).lower()
+    if configured not in METRIC_TOKENS:
+        raise ValueError(f'Unsupported publication metric: {configured}')
+    return configured
+
+
+def figure_language(report):
+    language = getattr(report.args, 'figure_language', framework().FIGURE_LANGUAGE)
+    if language not in ('en', 'es'):
+        raise ValueError(f'Unsupported figure language: {language}')
+    return language
 
 
 def base_figure_names(report):
-    names = list(BASE_FIGURES)
-    classifier = base_classifier(report)
-    if len(report.datasets) != 6 or classifier != 'svm':
-        names[1] = f'radar_{len(report.datasets)}datasets_grid_{classifier}.png'
-    return tuple(names)
+    return main_figure_names(base_classifier(report), base_metric_token(report))
 
 
 def base_publication_figures(report, skipped):
-    """Eight existing base identities, sharing the individual figure builders."""
+    """Localize root figure text only; filenames and stored identities are unchanged."""
+    language = figure_language(report)
+    protected = [*report.datasets, *report.algorithms,
+                 *(base_style.display_label(a, report.algorithms) for a in report.algorithms)]
+    for stem, fig in _base_publication_figures(report, skipped):
+        localize_figure(fig, language, protected=protected)
+        if language == 'es':
+            bottom = {'01': .06, '02': .08, '03': .06, '05': .08}.get(stem[:2], 0)
+            fig.tight_layout(rect=(0, bottom, 1, 1))
+        yield stem, fig
+
+
+def _base_publication_figures(report, skipped):
+    """The same nine publication views for normal FULL and cache-only reports."""
     names = base_figure_names(report)
     classifier = base_classifier(report)
     available = {m.run_key: m for m in report.metrics}
+    metric = next((m for m in report.metrics if metric_token(m) == base_metric_token(report)), None)
     if any(k in available for k in ('AccRuns', 'PSRuns', 'RSRuns', 'F1Runs')):
         yield Path(names[0]).stem, summary_figure(report)
     else:
@@ -353,46 +570,100 @@ def base_publication_figures(report, skipped):
         yield Path(names[1]).stem, radar_figure(report, classifier, labels, values)
     else:
         skipped.append({'output': names[1], 'reason': 'Fewer than three radar axes'})
-    for index, key, builder in ((2, 'PSRuns', precision_figure),
-                                (3, 'AccRuns', boxplot_figure), (5, 'RSRuns', violin_figure)):
-        if key in available:
-            yield Path(names[index]).stem, builder(metric_matrix(report, classifier, available[key]),
-                                                   report.algorithms, classifier)
-        else:
-            skipped.append({'output': names[index], 'reason': f'{key} unavailable'})
-    if 'F1Runs' in available:
-        yield Path(names[4]).stem, heatmap_figure(report, classifier, available['F1Runs'])
-    else:
-        skipped.append({'output': names[4], 'reason': 'F1Runs unavailable'})
-    complete = [ds for ds in report.datasets if all(
-        np.asarray(report.indexed[ds, classifier, a].get('Curve', [])).size for a in report.algorithms)]
-    if complete:
-        yield Path(names[6]).stem, convergence_figure(report, classifier, complete)
-    else:
-        skipped.append({'output': names[6], 'reason': 'No complete stored curves'})
     if {'FeatRuns', 'TimeRuns'} <= available.keys():
-        yield Path(names[7]).stem, tradeoff_figure(metric_matrix(report, classifier, available['FeatRuns']),
+        yield Path(names[2]).stem, dataset_tradeoff_figure(report, classifier, compact_labels=True)
+    else:
+        skipped.append({'output': names[2], 'reason': 'Requires FeatRuns and TimeRuns'})
+    if metric is not None:
+        yield Path(names[3]).stem, dataset_boxplot_figure(report, classifier, metric)
+    else:
+        skipped.append({'output': names[3], 'reason': f'{base_metric_token(report)} unavailable'})
+    if metric is not None:
+        fig = heatmap_figure(report, classifier, metric)
+        fig.axes[0].set_xlabel('Dataset'); fig.axes[0].set_ylabel('Metaheuristics')
+        yield Path(names[5]).stem, fig
+    else:
+        skipped.append({'output': names[5], 'reason': f'{base_metric_token(report)} unavailable'})
+    yield Path(names[4]).stem, convergence_figure(report, classifier, report.datasets, skipped=skipped)
+    if metric is not None:
+        values = run_values(report, classifier, metric.run_key, metric.scale)
+        fig = violin_figure(values, report.algorithms,
+                           classifier, show_points=False, metric_name=metric.name)
+        fig.axes[0].set_ylabel(f'{metric.name} (test): cached runs across datasets')
+        mean_value_labels(fig.axes[0], values)
+        yield Path(names[6]).stem, fig
+    else:
+        skipped.append({'output': names[6], 'reason': f'{base_metric_token(report)} unavailable'})
+    if metric is not None:
+        values = run_values(report, classifier, metric.run_key, metric.scale)
+        fig = boxplot_figure(values, report.algorithms,
+                            classifier, show_points=False, metric_name=metric.name)
+        fig.axes[0].set_ylabel(f'{metric.name} (test): cached runs across datasets')
+        mean_value_labels(fig.axes[0], values)
+        yield Path(names[7]).stem, fig
+    else:
+        skipped.append({'output': names[7], 'reason': f'{base_metric_token(report)} unavailable'})
+    if {'FeatRuns', 'TimeRuns'} <= available.keys():
+        yield Path(names[8]).stem, tradeoff_figure(metric_matrix(report, classifier, available['FeatRuns']),
             metric_matrix(report, classifier, available['TimeRuns']), report.algorithms, classifier)
     else:
-        skipped.append({'output': names[7], 'reason': 'Requires FeatRuns and TimeRuns'})
+        skipped.append({'output': names[8], 'reason': 'Requires FeatRuns and TimeRuns'})
+
+
+def per_dataset_figures(report, skipped):
+    """Extra single-smell panels always identify the smell and classifier."""
+    available = {m.run_key: m for m in report.metrics}
+    for dataset in report.datasets:
+        single = replace(report, datasets=[dataset])
+        for classifier in report.classifiers:
+            suffix = f'{filename_component(dataset)}_{filename_component(classifier)}'
+            labels, values = radar_values(single, classifier)
+            if len(labels) >= 3:
+                yield f'radar_{suffix}', radar_figure(single, classifier, labels, values)
+            if all(np.asarray(single.indexed[dataset, classifier, a].get('Curve', [])).size for a in report.algorithms):
+                yield f'convergence_{suffix}', convergence_figure(single, classifier, [dataset])
+            if report.args.experiment_mode != 'full':
+                for metric in report.metrics:
+                    yield f'heatmap_{suffix}_{metric_token(metric)}', heatmap_figure(single, classifier, metric)
+            if {'FeatRuns', 'TimeRuns'} <= available.keys():
+                yield f'features_runtime_{suffix}', dataset_tradeoff_figure(single, classifier)
 
 
 def individual_destination(report, destination):
     return Path(destination) / INDIVIDUAL_DIRECTORY if report.args.experiment_mode == 'full' else Path(destination)
 
 
-def generate(report, destination):
+def statistics_destination(report, destination):
+    return Path(destination) / STATISTICS
+
+
+def generate(report, destination, *, generated=None):
     skipped = []
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     individual = individual_destination(report, destination)
     individual.mkdir(parents=True, exist_ok=True)
+    if report.args.experiment_mode == 'full':
+        full_figure_directories(destination)
     with plt.rc_context(STYLE):
         if report.args.experiment_mode == 'full':
             for stem, fig in base_publication_figures(report, skipped):
-                save_png(fig, destination / f'{stem}.png')
+                target = full_figure_path(destination, f'{stem}.png')
+                save_png(fig, target)
+                if generated is not None:
+                    generated.append(str(target.relative_to(destination)))
         for stem, fig in publication_figures(report, skipped):
-            save_png(fig, individual / f'{stem}.png')
+            target = (full_figure_path(destination, f'{stem}.png')
+                      if report.args.experiment_mode == 'full' else individual / f'{stem}.png')
+            save_png(fig, target)
+            if generated is not None:
+                generated.append(str(target.relative_to(destination)))
+        if report.args.experiment_mode == 'full':
+            for stem, fig in per_dataset_figures(report, skipped):
+                target = individual / f'{stem}.png'
+                save_png(fig, target)
+                if generated is not None:
+                    generated.append(str(target.relative_to(destination)))
     return skipped
 
 

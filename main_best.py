@@ -50,6 +50,7 @@ from optimizer_factory import (
 )
 from optimizer_interceptor import Workload
 import full_plot_style
+from figure_layout import full_figure_directories, full_figure_path, MAIN_ESTIMATOR
 from plot_labels import PLOT_LABEL_OVERRIDES, plot_display_label, report_display_label
 
 # ============================================================
@@ -58,11 +59,14 @@ from plot_labels import PLOT_LABEL_OVERRIDES, plot_display_label, report_display
 
 DATASET_SOURCE = "codesmell"
 # FULL_REPLICA_REPORT_ONLY = True
-FULL_REPLICA_REPORT_ONLY = False
+FULL_REPLICA_REPORT_ONLY = True
 
 # Reporting identity only; scientific optimizer configuration is unchanged.
 FULL_OPTIMIZER_COLORS = full_plot_style.OPTIMIZER_COLORS
 _FULL_REPORT_STYLE = ContextVar("full_report_style", default=False)
+PLOT_GLOBAL_ESTIMATOR = "knn"  # Presentation only: knn, svm, rf; compatible with MAIN_ESTIMATOR.
+PLOT_GLOBAL_METRIC = "accuracy"  # Presentation only: accuracy, f1, precision, recall.
+FIGURE_LANGUAGE = "en"  # Figure-visible text only: en, es.
 
 def full_optimizer_line_style(name):
     return full_plot_style.line_style(optimizer_acronym(name))
@@ -245,7 +249,8 @@ def automatic_worker_count(
 N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
-EXP_ID = 630
+# Continue the real EXP629; EXP627 is a read-only source for missing rows.
+EXP_ID = 629
 REUSE_CACHE_FROM_EXP_ID = 627
 # None -> do not search another experiment.
 #
@@ -268,6 +273,7 @@ GPU_MEMORY_FRACTION = 0.85
 RF_CPU_FALLBACK = True
 # Opt in to historical sklearn RF fitness/evaluation when cuML is unavailable.
 RF_BACKEND_POLICY = "auto"
+# Keep EXP629 RF compatible with historical EXP627/EXP629 sklearn results.
 # "auto": GPU cuML when usable, sklearn only with RF_CPU_FALLBACK enabled.
 # "sklearn": historical CPU RF even with GPU optimizer kernels.
 # "cuml": require cuML in GPU mode; cached cuML rows need no cuML import.
@@ -507,7 +513,7 @@ def parse_args() -> argparse.Namespace:
         "--compute-device",
         default=COMPUTE_DEVICE,
         choices=["cpu", "gpu", "hybrid"],
-        help="Custom-optimizer math backend; GPU mode also uses cuML for RF when available",
+        help="Custom-optimizer math backend; RF selection is controlled separately by --rf-backend-policy",
     )
     parser.add_argument("--gpu-device-id", type=int, default=GPU_DEVICE_ID)
     parser.add_argument("--gpu-memory-fraction", type=float, default=GPU_MEMORY_FRACTION)
@@ -515,6 +521,13 @@ def parse_args() -> argparse.Namespace:
                         help="Allow sklearn RF on CPU when cuML is unavailable; optimizer GPU kernels remain enabled")
     parser.add_argument("--rf-backend-policy", choices=["auto", "sklearn", "cuml"], default=RF_BACKEND_POLICY,
                         help="Scientific RF backend; CPU mode always uses sklearn. Explicit cuml forbids fallback.")
+    parser.add_argument("--plot-global-estimator", choices=["knn", "svm", "rf"], default=PLOT_GLOBAL_ESTIMATOR,
+                        help="Classifier for the main FULL publication panels; presentation only")
+    parser.add_argument("--plot-global-metric", choices=["accuracy", "f1", "precision", "recall"],
+                        default=PLOT_GLOBAL_METRIC,
+                        help="Metric for main FULL figures 04, 06, 07, 08; presentation only")
+    parser.add_argument("--figure-language", choices=["en", "es"], default=FIGURE_LANGUAGE,
+                        help="Language of main FULL figure text; filenames and science remain unchanged")
     parser.add_argument("--list-optimizers", action="store_true", help="List available optimizers and exit")
     parser.add_argument("--parallel", default="yes" if PARALLEL else "no", choices=["yes", "no"], help="Run independent runs in parallel: yes/no")
     parser.add_argument(
@@ -1019,6 +1032,8 @@ def make_paths(args: argparse.Namespace) -> Paths:
     cache_dir = os.path.join(res_dir, "cache")
     for p in (fig_dir, res_dir, cache_dir):
         os.makedirs(p, exist_ok=True)
+    if args.experiment_mode == "full":
+        full_figure_directories(fig_dir)
     return Paths(exp_tag=exp_tag, mode=args.experiment_mode, fig_dir=fig_dir, res_dir=res_dir, cache_dir=cache_dir)
 
 def make_read_only_source_paths(args: argparse.Namespace) -> Optional[Paths]:
@@ -1565,8 +1580,11 @@ def resolve_rf_backend(args: argparse.Namespace) -> str:
         if policy == "auto" and rf_cpu_fallback_enabled(args):
             try:
                 gpu_random_forest_class()
-            except CuMLUnavailableError:
+            except CuMLUnavailableError as exc:
                 backend = "sklearn"
+                cause = exc.__cause__ or exc
+                print(f"[rf-backend] cuML import failed | interpreter={sys.executable} | "
+                      f"cause={type(cause).__name__}: {cause}", flush=True)
                 print("cuML unavailable; using sklearn RF on CPU while optimizer backend remains GPU.", flush=True)
     args._rf_backend_context, args._rf_selected_backend = context, backend
     return backend
@@ -5363,6 +5381,18 @@ def _draw_ablation_accuracy_boxplot(ax, dataset, run_plot_df, run_opts, run_colo
 
 def generate_seven_global_charts(*args, **kwargs):
     report_args = args[4] if len(args) > 4 else kwargs["args"]
+    if report_args.experiment_mode == "full":
+        from reporting.figures import report_from_results, generate
+        results = args[1] if len(args) > 1 else kwargs["results_struct"]
+        destination = args[2] if len(args) > 2 else kwargs["out_dir"]
+        report = report_from_results(report_args, results)
+        # Retain the historical explicit classifier override for plotting callers.
+        override = args[5] if len(args) > 5 else kwargs.get("estimator_filter")
+        if override is not None:
+            report.args.plot_global_estimator = override
+        generated = []
+        generate(report, destination, generated=generated)
+        return generated
     token = _FULL_REPORT_STYLE.set(report_args.experiment_mode == "full")
     try:
         with plt.rc_context(full_plot_style.STYLE if report_args.experiment_mode == "full" else {}):
@@ -5383,6 +5413,12 @@ def _generate_seven_global_charts(
     if df.empty:
         return []
     os.makedirs(out_dir, exist_ok=True)
+    if args.experiment_mode == "full":
+        directories = full_figure_directories(out_dir)
+        detail_dir = str(directories["individual"])
+        distribution_dir = str(directories["statistics"])
+    else:
+        detail_dir = distribution_dir = out_dir
     saved = []
 
     chart1 = generate_classifier_metric_grid_chart(
@@ -5404,7 +5440,7 @@ def _generate_seven_global_charts(
     datasets = sorted(plot_df["Dataset"].dropna().unique())
     n_rows, n_cols = _grid_shape(len(datasets))
 
-    saved.append(generate_dataset_radar(plot_df, out_dir, opt_order, save_pdf=save_pdf))
+    saved.append(generate_dataset_radar(plot_df, detail_dir, opt_order, save_pdf=save_pdf))
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.8 * n_cols, 4.6 * n_rows), squeeze=False)
     for idx, dataset in enumerate(datasets):
@@ -5413,7 +5449,7 @@ def _generate_seven_global_charts(
     for idx in range(len(datasets), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.tight_layout(rect=[0.0, 0.02, 1.0, 1.0])
-    _save_chart(fig, out_dir, "03_features_runtime_por_dataset_knn.png", save_pdf=save_pdf)
+    _save_chart(fig, detail_dir, "03_features_runtime_por_dataset_knn.png", save_pdf=save_pdf)
     saved.append("03_features_runtime_por_dataset_knn.png")
 
     run_df = build_run_level_dataframe(results_struct, args, estimator_filter)
@@ -5427,11 +5463,11 @@ def _generate_seven_global_charts(
     for idx in range(len(datasets), n_rows * n_cols):
         axes[idx // n_cols, idx % n_cols].set_visible(False)
     fig.tight_layout(rect=[0.0, 0.02, 1.0, 1.0])
-    _save_chart(fig, out_dir, "04_boxplot_accuracy_por_dataset_knn.png", save_pdf=save_pdf)
+    _save_chart(fig, distribution_dir, "04_boxplot_accuracy_por_dataset_knn.png", save_pdf=save_pdf)
     saved.append("04_boxplot_accuracy_por_dataset_knn.png")
 
     saved.append(generate_dataset_convergence(
-        plot_df, results_struct, out_dir, opt_order, args, estimator_filter, save_pdf=save_pdf
+        plot_df, results_struct, detail_dir, opt_order, args, estimator_filter, save_pdf=save_pdf
     ))
 
     pivot = plot_df.groupby(["PlotGroup", "Dataset"])["F1_test"].mean().unstack()
@@ -5469,7 +5505,7 @@ def _generate_seven_global_charts(
             if np.isfinite(value):
                 ax.text(j, i, f"{value:.4f}", ha="center", va="center", color="white" if value > 0.80 else "#222", fontsize=8)
     fig.tight_layout()
-    _save_chart(fig, out_dir, "06_heatmap_f1_knn.png", save_pdf=save_pdf)
+    _save_chart(fig, detail_dir, "06_heatmap_f1_knn.png", save_pdf=save_pdf)
     saved.append("06_heatmap_f1_knn.png")
 
     data_violin = [run_plot_df[run_plot_df["PlotGroup"] == opt]["RS_test"].dropna().values for opt in run_opts]
@@ -5514,12 +5550,12 @@ def _generate_seven_global_charts(
         framealpha=0.9,
     )
     fig.tight_layout()
-    _save_chart(fig, out_dir, "07_violin_recall_knn.png", save_pdf=save_pdf)
+    _save_chart(fig, distribution_dir, "07_violin_recall_knn.png", save_pdf=save_pdf)
     saved.append("07_violin_recall_knn.png")
 
     generate_global_accuracy_boxplot(
         run_plot_df,
-        out_dir,
+        distribution_dir,
         opt_order,
         save_pdf=save_pdf,
     )
@@ -5527,11 +5563,13 @@ def _generate_seven_global_charts(
 
     generate_global_features_runtime(
         plot_df,
-        out_dir,
+        detail_dir,
         opt_order,
         save_pdf=save_pdf,
     )
     saved.append("09_global_features_runtime_tradeoff.png")
+    if args.experiment_mode == "full":
+        return [str(full_figure_path(out_dir, name).relative_to(out_dir)) if name else name for name in saved]
     return saved
 
 def generate_global_accuracy_boxplot(df, out_dir, opt_order, save_pdf=True):
@@ -5828,6 +5866,13 @@ def export_mode_outputs(paths: Paths, args: argparse.Namespace, dataset_names: L
             list(args.optimizers),
             args,
         )
+        if args.experiment_mode == "full":
+            from reporting.figures import report_from_results
+            from reporting.statistics import export as export_report_statistics
+            export_report_statistics(report_from_results(args, results_struct),
+                                     Path(paths.fig_dir) / "statistics", Path(paths.res_dir) / "statistics")
+            generated_charts.extend(str(path.relative_to(paths.fig_dir)) for path in
+                                    sorted((Path(paths.fig_dir) / "statistics").glob("generic_*.png")))
         if args.experiment_mode == "ablation":
             ablation_chart = generate_ablation_main_figure(summary_df, paths.fig_dir, list(args.optimizers))
             if ablation_chart:

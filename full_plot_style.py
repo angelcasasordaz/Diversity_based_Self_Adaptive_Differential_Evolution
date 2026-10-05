@@ -30,10 +30,12 @@ HEADER_STYLES = (('#d8e8f3', '#b8d3e6'), ('#d2efee', '#abd9d7'),
 
 def method_key(name):
     name = str(name).strip().upper()
-    return 'DSADE' if name in {'DSADE', 'DSA-DE', 'DSA_DE'} else name
+    return 'DSADE' if name in {'DSADE', 'DSA-DE', 'DSA_DE', 'MACRO-DE-T'} else name
 
 
 def display_label(name, present_methods=()):
+    if str(name).strip().upper() == 'MACRO-DE-T':
+        return plot_display_label(name, present_methods)
     return 'DSA-DE' if method_key(name) == 'DSADE' else plot_display_label(name, present_methods)
 
 
