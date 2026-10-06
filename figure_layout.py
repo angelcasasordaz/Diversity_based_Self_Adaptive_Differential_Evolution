@@ -55,10 +55,12 @@ def full_figure_category(filename):
     return INDIVIDUAL
 
 
-def full_figure_directories(destination):
+def full_figure_directories(destination, *, generate_individual=True):
     root = Path(destination)
     directories = {ROOT: root, INDIVIDUAL: root / INDIVIDUAL, STATISTICS: root / STATISTICS}
-    for directory in directories.values():
+    for category, directory in directories.items():
+        if category == INDIVIDUAL and not generate_individual:
+            continue
         directory.mkdir(parents=True, exist_ok=True)
     return directories
 

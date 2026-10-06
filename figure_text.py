@@ -1,6 +1,7 @@
 """Figure-visible translations; stored data, identities and filename tokens stay English."""
 from matplotlib.text import Text
 from matplotlib.axes import Axes
+import re
 
 
 SPANISH = {
@@ -15,6 +16,8 @@ SPANISH = {
     'Final stage': 'Etapa final', 'No stored curves': 'Sin curvas en caché',
     'Value per dataset/run': 'Valor por conjunto/corrida',
     'Cached runs across datasets': 'Corridas en caché entre conjuntos',
+    'Average rank (1 = best)': 'Rango promedio (1 = mejor)',
+    'Holm-adjusted p (all algorithm pairs)': 'p ajustado por Holm (todos los pares de algoritmos)',
 }
 
 
@@ -26,6 +29,15 @@ def visible_text(text, language):
         return text
     if text in SPANISH:
         return SPANISH[text]
+    match = re.fullmatch(r'Holm-adjusted p; (\d+)-pair family', text)
+    if match:
+        return f'p ajustado por Holm; familia de {match[1]} pares'
+    suffix = ' versus other algorithms (configured reference)'
+    if text.endswith(suffix):
+        return text[:-len(suffix)] + ' frente a otros algoritmos (referencia configurada)'
+    suffix = ': cached run mean per matched block'
+    if text.endswith(suffix):
+        return visible_text(text[:-len(suffix)], language) + ': media de corridas en caché por bloque emparejado'
     for source, translated in SPANISH.items():
         for suffix, target in (
             (' (test)', ' (prueba)'),

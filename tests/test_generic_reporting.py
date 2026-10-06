@@ -19,11 +19,15 @@ from reporting import core, figures, statistics, paper_tables
 
 
 def arguments(root, mode='full'):
-    with patch.object(sys, 'argv', ['main_best.py', '--report-only', '--experiment-mode', mode,
-                                  '--exp-id', '913', '--output-root', str(root), '--datasets', 'First', 'Second',
+    with patch.object(sys, 'argv', ['main_best.py', '--full-replica-report-only', '--experiment-mode', mode,
+                                  '--exp-id', '913', '--output-root', str(root), '--dataset-source', 'codesmell',
+                                  '--datasets', 'First', 'Second',
                                   '--optimizers', 'DE', 'PSO', 'JADE', '--estimators', 'knn', 'rf',
                                   '--runs', '3', '--epochs', '3']):
         args = m.parse_args()
+        # These fixtures exercise explicitly requested complete English replicas.
+        args.figure_language = 'en'
+        args.generate_individual_figures = True
         # Synthetic historical RF fixtures represent sklearn regardless of GPU availability.
         args.rf_backend_policy = 'sklearn'
         return args

@@ -37,7 +37,7 @@ class HistoricalScientificValuesTests(unittest.TestCase):
         cls.source = cls.root / 'Results/EXP627/full'
         if not (cls.source / 'Paper_Tables_EXP627.xlsx').is_file():
             raise unittest.SkipTest('Saved EXP627 regression workbooks unavailable')
-        with patch.object(sys, 'argv', ['main_best.py', '--report-only', '--exp-id', '627',
+        with patch.object(sys, 'argv', ['main_best.py', '--full-replica-report-only', '--exp-id', '627',
                                        '--experiment-mode', 'full', '--output-root', str(cls.root)]):
             args = m.parse_args()
         # EXP-specific configuration lives only in this regression fixture.
@@ -135,7 +135,7 @@ class HistoricalScientificValuesTests(unittest.TestCase):
             root = Path(folder)
             shutil.copytree(self.source / 'cache', root / 'Results/EXP627/full/cache')
             args = self.report.args
-            argv = ['main_best.py', '--report-only', '--exp-id', '627',
+            argv = ['main_best.py', '--full-replica-report-only', '--exp-id', '627',
                     '--experiment-mode', 'full', '--output-root', folder,
                     '--datasets', *self.report.datasets, '--optimizers', *args.optimizers,
                     '--estimators', *args.estimators, '--runs', str(args.runs),

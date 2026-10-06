@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pickle
 import re
 import shutil
 import sys
@@ -471,6 +472,8 @@ def generate_outputs(report, figures, results):
 
 def run_report(args):
     """Create one complete report version for the user-selected EXP and modes."""
+    if getattr(args, 'report_only', False) or getattr(args, 'figure_language', framework().FIGURE_LANGUAGE) == 'es':
+        return run_figure_report(args)
     # Import exporters/dependencies before the strict mutation guard is active.
     started = time.perf_counter()
     print(f'[report] Starting cache-only EXP{args.exp_id:03d}: {", ".join(args.experiment_modes)}', flush=True)
@@ -485,7 +488,13 @@ def run_report(args):
         for mode in modes:
             local = m.clone_args_for_mode(args, mode)
             studies = m.sensitivity_study_args(local) if mode == 'sensitivity' else [local]
-            reports.extend(load_completed_cache(study) for study in studies)
+            from reporting.experiment_config import read_manifest
+            for study in studies:
+                if read_manifest(study) is not None:
+                    m.apply_experiment_mode(study)
+                    reports.append(load_cached_figure_report(study))
+                else:
+                    reports.append(load_completed_cache(study))
     with report_stage('Hash protected historical outputs'):
         previous = {str(p.relative_to(root)): sha256(p) for kind in ('Figures', 'Results')
                     for p in (root / kind / f'EXP{args.exp_id:03d}').rglob('*') if p.is_file()}
@@ -536,4 +545,315 @@ def run_report(args):
             tempfile.tempdir = old_tempdir
     print(f'[report] Published EXP{args.exp_id:03d} full_rep{version} in {time.perf_counter() - started:.1f}s: '
           f'{finals[0]} and {finals[1]}', flush=True)
+    from reporting.experiment_config import save_report_config
+    for report in reports:
+        save_report_config(report)
     return manifest
+
+
+REPORT_SCIENCE_FIELDS = ('runs', 'epochs', 'pop_size', 'test_size', 'random_state', 'seed_base')
+
+
+def _audit_cache(status, field, requested, stored, evidence=''):
+    print(f'[cache] {status} {field}: requested={requested!r}; stored={stored!r}'
+          + (f'; {evidence}' if evidence else ''), flush=True)
+
+
+def _legacy_report_identity(args, signature, methods):
+    """Verify recorded historical digests, never guess unrecorded numeric settings.
+
+    Pre-revision FULL comparisons used the same numeric fields, but included
+    global DSA/sensitivity settings even for other methods (bcc0cb9 schema).
+    Test only the current and documented historical auxiliary defaults. Neither
+    a matching dataset nor a completed row alone proves pop/split/seed settings.
+    """
+    m = framework()
+    historical = argparse.Namespace(**vars(args))
+    historical.optimizers = methods
+    payload = {key: getattr(args, key) for key in REPORT_SCIENCE_FIELDS}
+    payload.update(experiment_mode=args.experiment_mode, optimizers=methods,
+                   transfer_functions=list(args.transfer_functions), obj_name='AS',
+                   fitness_mode='minimize_metric_loss_plus_feature_ratio_v1')
+    auxiliary = {key: getattr(args, key) for key in ('dsade_beta_min', 'dsade_beta_max',
+        'dsade_pcr', 'dsade_mahal_q', 'sensitivity_parameter', 'sensitivity_values')}
+    contracts = [auxiliary]
+    for low, high in ((.10, .60), (.40, .80)):
+        contracts.append(dict(dsade_beta_min=low, dsade_beta_max=high, dsade_pcr=.10,
+                              dsade_mahal_q=.50, sensitivity_parameter='mahalanobis_q',
+                              sensitivity_values=[.50, .68, .80, .90]))
+    for contract in contracts:
+        for key, value in contract.items():
+            setattr(historical, key, value)
+        # The newer legacy schema includes revisioned optimizer identities.
+        if m.build_legacy_cache_signature(historical) == signature:
+            args.report_legacy_parameters = contract
+            return 'verified legacy digest (revisioned schema)'
+        older = {**payload, **contract}
+        if args.experiment_mode == 'sensitivity_weights':
+            older.update(fitness_alpha=args.fitness_alpha, fitness_beta=args.fitness_beta,
+                         sensitivity_weight_pairs=[list(pair) for pair in args.sensitivity_weight_pairs])
+        digest = hashlib.sha1(json.dumps(older, sort_keys=True).encode()).hexdigest()[:10]
+        if args.experiment_mode == 'sensitivity':
+            digest = f'{args.sensitivity_parameter}_{digest}'
+        if digest == signature:
+            args.report_legacy_parameters = contract
+            return 'verified legacy digest (pre-revision schema)'
+    raise ValueError('CacheIdentity absent; legacy digest cannot verify '
+                     'runs/epochs/pop_size/test_size/random_state/seed_base for the requested configuration')
+
+
+def _report_algorithm(label, classifier):
+    suffix = f'_{classifier.upper()}'
+    group = label[:-len(suffix)] if classifier and label.upper().endswith(suffix) else label
+    method = re.split(r'_(?:[VS]STF_|SENS_|WEIGHTS_A)', group, maxsplit=1, flags=re.I)[0]
+    canonical = framework().resolve_optimizer_name(method)
+    normalized = framework().optimizer_acronym(canonical).upper() + group[len(method):].upper()
+    return normalized, canonical
+
+
+def _validate_report_row(row, args, dataset, classifier, method, legacy_evidence):
+    from reporting.paper_tables import METRICS
+    if str(row.get('Estimator', '')).lower() != classifier:
+        raise ValueError('estimators mismatch in row metadata')
+    if row.get('ExperimentMode', args.experiment_mode) != args.experiment_mode:
+        raise ValueError('experiment_mode mismatch in row metadata')
+    identity = row.get('CacheIdentity')
+    if identity is not None:
+        if not isinstance(identity, dict):
+            raise ValueError('Invalid CacheIdentity')
+        expected = {key: getattr(args, key) for key in REPORT_SCIENCE_FIELDS + ('fitness_alpha', 'fitness_beta')}
+        expected.update(experiment_mode=args.experiment_mode, dataset_name=dataset,
+                        classifier=classifier, optimizer=method)
+        if '--dataset-source' in getattr(args, 'report_explicit_options', ()):
+            expected['dataset_source'] = args.dataset_source
+        for key, value in expected.items():
+            actual = identity.get(key)
+            if actual != value:
+                raise ValueError(f'{key} MISMATCH: requested={value!r}, stored={actual!r} (CacheIdentity)')
+        tf = identity.get('transfer_function')
+        if tf not in args.transfer_functions:
+            raise ValueError(f'transfer_functions MISMATCH: requested={args.transfer_functions}, stored={tf!r}')
+        if getattr(args, 'report_current_science', False):
+            expected_identity = framework().full_cache_identity(args, method, dataset, classifier, tf)
+            if identity != expected_identity:
+                raise ValueError(f'optimizer scientific identity MISMATCH for {method}')
+        parameters = identity.get('optimizer_parameters', {})
+        manifest = getattr(args, 'report_manifest', None)
+        if manifest is not None:
+            stored_parameters = manifest.get('optimizer_parameters', {}).get(method)
+            if stored_parameters is not None and stored_parameters != parameters:
+                raise ValueError(f'optimizer_parameters MISMATCH for {method} against experiment_config.json')
+        for key, field in (('epoch', 'epochs'), ('pop_size', 'pop_size')):
+            if key in parameters and parameters[key] != getattr(args, field):
+                raise ValueError(f'{field} MISMATCH in optimizer_parameters: {parameters[key]!r}')
+    elif not legacy_evidence:
+        raise ValueError('CacheIdentity absent and no verified legacy identity')
+    elif args.fitness_alpha != .9 or args.fitness_beta != .1:
+        raise ValueError('fitness_alpha/fitness_beta MISMATCH: legacy cache requires the historical 0.9/0.1 contract')
+    runs = int(row.get('CompletedRuns', 0))
+    if runs != args.runs or row.get('CompletedRuns') != runs:
+        raise ValueError(f'runs MISMATCH: requested={args.runs}, completed={runs}')
+    for metric in METRICS:
+        if metric.run_key not in row:
+            continue
+        values = np.asarray(row[metric.run_key], dtype=float)
+        if values.shape != (runs,) or not np.isfinite(values).all():
+            raise ValueError(f'Invalid cached runs: {metric.run_key}')
+        mean = row.get(metric.run_key.replace('Runs', 'Mean'), np.nan)
+        if not np.isclose(mean, values.mean(), rtol=1e-12, atol=1e-12):
+            raise ValueError(f'Cached summary disagrees with runs: {metric.run_key}')
+    curve = np.asarray(row.get('Curve', []), dtype=float)
+    if curve.ndim != 1 or not np.isfinite(curve).all():
+        raise ValueError('Invalid cached curve')
+    if curve.size and curve.size != args.epochs:
+        raise ValueError(f'epochs MISMATCH: requested={args.epochs}, curve_length={curve.size}')
+    if 'CurvesAll' in row:
+        curves = [np.asarray(c, dtype=float) for c in row['CurvesAll']]
+        if len(curves) != runs or any(c.ndim != 1 or len(c) > args.epochs or not np.isfinite(c).all()
+                                    for c in curves):
+            raise ValueError('Incomplete or invalid cached convergence runs')
+
+
+def _same_report_observations(left, right):
+    from reporting.paper_tables import METRICS
+    for field in [m.run_key for m in METRICS] + ['Curve']:
+        if (field in left) != (field in right) or not np.array_equal(left.get(field, []), right.get(field, [])):
+            return False
+    a, b = left.get('CurvesAll', []), right.get('CurvesAll', [])
+    return (left.get('CacheIdentity') == right.get('CacheIdentity') and len(a) == len(b)
+            and all(np.array_equal(x, y) for x, y in zip(a, b)))
+
+
+def load_cached_figure_report(args, *, use_manifest=True):
+    """Discover compatible completed caches of any hash, including progress files."""
+    from reporting.paper_tables import METRICS
+    m = framework()
+    local = argparse.Namespace(**vars(args))
+    from reporting.experiment_config import read_manifest, apply_manifest, manifest_path
+    config = read_manifest(local) if use_manifest else None
+    if config is not None:
+        local = apply_manifest(local, config)
+    root = safe_path(local.output_root)
+    tag = f'EXP{local.exp_id:03d}'
+    cache = safe_path(root / 'Results' / tag / local.experiment_mode / 'cache')
+    if not cache.is_dir():
+        raise FileNotFoundError(f'Missing completed cache: {cache}; no recomputation allowed')
+    if local.runs < 1 or local.epochs < 1:
+        raise ValueError('Positive runs and epochs are required')
+    explicit = getattr(local, 'report_explicit_options', ())
+    requested_datasets = [Path(d).stem for d in local.datasets] if local.datasets is not None else None
+    if requested_datasets is None and '--dataset-source' in explicit:
+        requested_datasets = m.configured_dataset_names(local)
+        if requested_datasets is None:
+            requested_datasets = [spec.name for spec in m.resolve_dataset_specs(local)]
+    requested_classifiers = [str(c).lower() for c in local.estimators] if '--estimators' in explicit else None
+    requested_methods = [m.resolve_optimizer_name(o) for o in local.optimizers] if '--optimizers' in explicit else None
+    results, indexed, sources, origins = {}, {}, {}, {}
+    datasets, classifiers, algorithms = [], [], []
+    rejected = []
+    legacy_parameters = None
+    paths = [p for kind in ('results', 'progress') for p in sorted(cache.glob(f'{tag}_*_{kind}.pkl'))]
+    if config is not None:
+        preferred = [safe_path(manifest_path(local).parent / entry['path']) for entry in config['cache_signatures']]
+        if all(path.is_file() for path in preferred):
+            paths = preferred
+        else:
+            print('[config] Some recorded cache paths are missing; discovering compatible existing caches', flush=True)
+    for path in paths:
+        path = safe_path(path)
+        digest = sha256(path)
+        if config is not None:
+            entry = next((entry for entry in config['cache_signatures']
+                          if manifest_path(local).parent / entry['path'] == path), None)
+            if entry is not None and digest != entry['sha256']:
+                raise ValueError(f'Manifest MISMATCH cache SHA256: {path}')
+        try:
+            payload = m.load_cache(str(path))
+            if not isinstance(payload, dict) or not payload or not all(isinstance(r, dict) for r in payload.values()):
+                raise ValueError('Invalid cache payload')
+            estimators = {str(row.get('Estimator', '')).lower() for row in payload.values()}
+            if len(estimators) != 1 or not all(estimators):
+                raise ValueError('Ambiguous estimators in cache')
+            classifier = estimators.pop()
+            stem = path.stem[len(tag) + 1:].rsplit('_', 1)[0]
+            dataset, separator, signature = stem.rpartition(f'_{classifier}_')
+            if not separator or not dataset or not signature:
+                raise ValueError('Invalid cache filename')
+            if ((requested_datasets is not None and dataset not in requested_datasets)
+                    or (requested_classifiers is not None and classifier not in requested_classifiers)):
+                continue
+            groups = {label: _report_algorithm(label, classifier) for label in payload}
+            methods = list(dict.fromkeys(method for group, method in groups.values()))
+            evidence = None
+            if any('CacheIdentity' not in row for row in payload.values()):
+                evidence = _legacy_report_identity(local, signature, methods)
+        except (ValueError, TypeError, EOFError, pickle.UnpicklingError) as exc:
+            rejected.append(f'{path.name}: {exc}')
+            _audit_cache('MISMATCH', path.name, 'compatible completed cache', str(exc))
+            continue
+        accepted = False
+        for label, row in payload.items():
+            algorithm, method = groups[label]
+            if requested_methods is not None and method not in requested_methods:
+                continue
+            try:
+                _validate_report_row(row, local, dataset, classifier, method, evidence)
+            except (ValueError, TypeError) as exc:
+                rejected.append(f'{path.name}/{label}: {exc}')
+                _audit_cache('MISMATCH', f'{path.name}/{label}', 'compatible completed row', str(exc))
+                continue
+            key = dataset, classifier, algorithm
+            if key in indexed:
+                if not _same_report_observations(indexed[key], row):
+                    message = f'Conflicting compatible observations for {key}: {origins[key]} and {path.name}'
+                    _audit_cache('MISMATCH', 'observations', 'identical duplicate', message)
+                    raise ValueError(message)
+                continue
+            indexed[key] = row
+            origins[key] = path.name
+            accepted = True
+            results.setdefault(dataset, {})[label] = row
+            for value, collection in ((dataset, datasets), (classifier, classifiers), (algorithm, algorithms)):
+                if value not in collection:
+                    collection.append(value)
+        if sha256(path) != digest:
+            raise ValueError(f'Cache changed during read: {path}')
+        if accepted:
+            if evidence:
+                contract = local.report_legacy_parameters
+                if legacy_parameters is not None and legacy_parameters != contract:
+                    raise ValueError('MISMATCH: mixed legacy parameter configurations in selected caches')
+                legacy_parameters = contract
+            sources[str(path.relative_to(root))] = digest
+            _audit_cache('MATCH', path.name, f'{dataset}/{classifier}', f'{local.runs} completed runs',
+                         evidence or 'CacheIdentity verified; filename hash ignored')
+    if not indexed:
+        for field, requested in (('datasets', requested_datasets), ('estimators', requested_classifiers),
+                                 ('optimizers', requested_methods)):
+            _audit_cache('MISMATCH', field, requested or 'discover compatible stored selection', [])
+        for field in REPORT_SCIENCE_FIELDS:
+            _audit_cache('MISMATCH', field, getattr(local, field), 'no verified compatible cache')
+        if rejected:
+            raise ValueError('Cache MISMATCH; no compatible completed observations: ' + '; '.join(rejected))
+        raise FileNotFoundError(f'No completed caches in {cache}; no recomputation allowed')
+    checks = [('datasets', requested_datasets or datasets, datasets),
+              ('estimators', requested_classifiers or classifiers, classifiers),
+              ('optimizers', requested_methods or list(dict.fromkeys(_report_algorithm(a, '')[1] for a in algorithms)),
+               list(dict.fromkeys(_report_algorithm(a, '')[1] for a in algorithms)))]
+    mismatches = []
+    for field, requested, stored in checks:
+        match = set(requested) == set(stored)
+        _audit_cache('MATCH' if match else 'MISMATCH', field, requested, stored,
+                     'selected from cache' if field in ('estimators', 'optimizers') and f'--{field}' not in explicit else '')
+        if not match:
+            mismatches.append(f'{field}: missing {sorted(set(requested) - set(stored))}')
+    for field in REPORT_SCIENCE_FIELDS:
+        _audit_cache('MATCH', field, getattr(local, field), getattr(local, field), 'verified metadata/legacy digest')
+    if mismatches or len(indexed) != len(datasets) * len(classifiers) * len(algorithms):
+        _audit_cache('MISMATCH', 'grid', 'complete dataset/estimator/optimizer grid', list(indexed))
+        raise ValueError('Cache MISMATCH: incomplete compatible grid; ' + '; '.join(mismatches + rejected))
+    metrics = [m for m in METRICS if all(m.run_key in row for row in indexed.values())]
+    if not metrics:
+        raise ValueError('No complete cached metrics')
+    if legacy_parameters is not None:
+        local.report_legacy_parameters = legacy_parameters
+    elif hasattr(local, 'report_legacy_parameters'):
+        del local.report_legacy_parameters
+    return CompletedReport(local, results, indexed, datasets, classifiers, algorithms, metrics,
+                           'stored-final-caches', sources)
+
+
+def run_figure_report(args):
+    """Write only figures; cache, numerical results and scientific execution are protected."""
+    from reporting import figures
+    root = safe_path(args.output_root)
+    destination_root = safe_path(getattr(args, 'report_output_root', None) or root)
+    with report_stage('Read stored final caches'), report_guard(()):
+        reports = [load_cached_figure_report(framework().clone_args_for_mode(args, mode))
+                   for mode in dict.fromkeys(args.experiment_modes)]
+    protected = {p: sha256(p) for p in (root / 'Results' / f'EXP{args.exp_id:03d}').rglob('*')
+                 if p.is_file()}
+    destinations = []
+    result_destinations = []
+    for report in reports:
+        language = figures.figure_language(report)
+        mode = report.args.experiment_mode + ('_esp' if language == 'es' else '')
+        destination = safe_path(destination_root / 'Figures' / report.exp_tag / mode)
+        results_destination = safe_path(destination_root / 'Results' / report.exp_tag / mode)
+        print(f'[report] output folder = {mode}', flush=True)
+        # Create ancestors before the guard; all actual exports stay in Figures.
+        destination.mkdir(parents=True, exist_ok=True)
+        results_destination.mkdir(parents=True, exist_ok=True)
+        with report_stage(f'Figures: {destination}'), report_guard((destination,)):
+            figures.generate(report, destination)
+            figures.generate_statistics_figures(report, destination)
+        destinations.append(str(destination))
+        result_destinations.append(str(results_destination))
+    if any(sha256(path) != digest for path, digest in protected.items()):
+        raise ValueError('Protected cache/results changed during figure reporting')
+    from reporting.experiment_config import save_report_config
+    for report in reports:
+        save_report_config(report)
+    print('[report] optimization runs=0', flush=True)
+    return {'figures_destination': destinations, 'results_destination': result_destinations, 'optimization_calls': 0,
+            'protected_files_unchanged': True}

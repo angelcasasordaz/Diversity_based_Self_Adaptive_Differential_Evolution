@@ -57,7 +57,7 @@ from plot_labels import PLOT_LABEL_OVERRIDES, plot_display_label, report_display
 # EXPERIMENT CONFIGURATION
 # ============================================================
 
-DATASET_SOURCE = "codesmell"
+DATASET_SOURCE = "mafese" # "codesmell"
 # FULL_REPLICA_REPORT_ONLY = True
 FULL_REPLICA_REPORT_ONLY = True
 
@@ -66,7 +66,8 @@ FULL_OPTIMIZER_COLORS = full_plot_style.OPTIMIZER_COLORS
 _FULL_REPORT_STYLE = ContextVar("full_report_style", default=False)
 PLOT_GLOBAL_ESTIMATOR = "knn"  # Presentation only: knn, svm, rf; compatible with MAIN_ESTIMATOR.
 PLOT_GLOBAL_METRIC = "accuracy"  # Presentation only: accuracy, f1, precision, recall.
-FIGURE_LANGUAGE = "en"  # Figure-visible text only: en, es.
+FIGURE_LANGUAGE = "es"  # Figure-visible text only: en, es.
+GENERATE_INDIVIDUAL_FIGURES = False  # Presentation only; skip all detail figures.
 
 def full_optimizer_line_style(name):
     return full_plot_style.line_style(optimizer_acronym(name))
@@ -132,30 +133,30 @@ OPTIMIZERS = [
     # "MaCRO-DE",
     "MaCRO-DE-t",
     # "MaCRO-DE-t-v2",
-    "DE",
-    "JADE",
-    "SHADE",
-    "PSO",
-    "WOA",
-    "HHO",
-    "GOA",
-    "SA",
-    "BRO",
-    "RUN",
-    "FOX",
-    # "BRO",
-    # "DBO",
     # "DE",
-    # "DMOA",
-    # "GWO",
-    # "HHO",
-    # "MFO",
-    # "MGO",
-    # "PSO",
-    # "SHADE",
-    # "WOA",
     # "JADE",
-    # "FLA",
+    # "SHADE",
+    # "PSO",
+    # "WOA",
+    # "HHO",
+    # "GOA",
+    # "SA",
+    # "BRO",
+    # "RUN",
+    # "FOX",
+    "BRO",
+    "DBO",
+    "DE",
+    "DMOA",
+    "GWO",
+    "HHO",
+    "MFO",
+    "MGO",
+    "PSO",
+    "SHADE",
+    "WOA",
+    "JADE",
+    "FLA",
 ]
 
 ABLATION_OPTIMIZERS = [
@@ -169,7 +170,7 @@ ABLATION_OPTIMIZERS = [
 ESTIMATORS = [
     "knn",
     "svm",
-    "rf",
+    # "rf",
 ]
 
 TRANSFER_FUNCTIONS = [
@@ -250,8 +251,8 @@ N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
 # Continue the real EXP629; EXP627 is a read-only source for missing rows.
-EXP_ID = 629
-REUSE_CACHE_FROM_EXP_ID = 627
+EXP_ID = 625
+REUSE_CACHE_FROM_EXP_ID = 625
 # None -> do not search another experiment.
 #
 # Example:
@@ -262,8 +263,8 @@ RANDOM_STATE = 2
 SEED_BASE = 1234
 OUTPUT_ROOT = "."
 REUSE_CACHE = True
-FIGURES_ONLY = False
-COMPUTE_DEVICE = "gpu"
+FIGURES_ONLY = True
+COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
 # "gpu"
@@ -302,8 +303,8 @@ DSADE_MAHAL_Q = 0.50
 # clip(1.5-D,.5,1.5),.1,1.5), using MaCRO-DE's delayed normalized diversity D.
 
 SENSITIVITY_OPTIMIZERS = [
-    "DSA-DE",
-    # "MaCRO-DE",
+    # "DSA-DE",
+    "MaCRO-DE",
 ]
 
 SENSITIVITY_CONFIGS = [
@@ -327,8 +328,8 @@ DEFAULT_FITNESS_ALPHA = 0.90
 DEFAULT_FITNESS_BETA = 0.10
 
 SENSITIVITY_WEIGHTS_OPTIMIZERS = [
-    "DSA-DE",
-    # "MaCRO-DE",
+    # "DSA-DE",
+    "MaCRO-DE",
 ]
 
 SENSITIVITY_WEIGHT_PAIRS = [
@@ -340,8 +341,8 @@ SENSITIVITY_WEIGHT_PAIRS = [
 ]
 
 TRANSFER_FUNCTION_OPTIMIZERS = [
-    "DSA-DE",
-    # "MaCRO-DE",
+    # "DSA-DE",
+    "MaCRO-DE",
 ]
 
 TRANSFER_FUNCTION_ESTIMATORS = [
@@ -473,7 +474,11 @@ def validate_sensitivity_weight_pairs(weight_pairs) -> List[Tuple[float, float]]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Feature-selection comparison framework with cache and multi-run support")
-    parser.add_argument("--report-only", "--full-replica-report-only", "--full-rep1-report-only",
+    parser.add_argument("--report-only", action="store_true",
+                        help="Read compatible completed results/progress caches and generate figures; Spanish uses <mode>_esp")
+    parser.add_argument("--check-exp-config", action="store_true",
+                        help="Read-only MATCH/MISMATCH audit of current config versus experiment manifest/cache")
+    parser.add_argument("--full-replica-report-only", "--full-rep1-report-only",
                         dest="full_replica_report_only", action="store_true",
                         help="Cache-only reporting for the selected EXP/modes into the next full_repN")
     supported_modes = ["full", "ablation", "sensitivity", "sensitivity_weights", "transfer_functions"]
@@ -565,9 +570,17 @@ def parse_args() -> argparse.Namespace:
         fitness_beta=DEFAULT_FITNESS_BETA,
     )
     args = parser.parse_args()
+    # Report selection defaults follow the stored comparison. Explicit CLI
+    # selections must be present; numerical settings are always validated.
+    args.report_explicit_options = frozenset(token.split("=", 1)[0] for token in sys.argv[1:]
+                                            if token.startswith("--"))
     explicit_mode = args.experiment_modes is not None or args.experiment_mode is not None
+    explicit_replica = args.full_replica_report_only
+    args.generate_individual_figures = GENERATE_INDIVIDUAL_FIGURES
+    if FULL_REPLICA_REPORT_ONLY and not explicit_mode and not explicit_replica:
+        args.report_only = True
     # The IDE default is safe; an explicit mode opts into the normal framework.
-    args.full_replica_report_only = args.full_replica_report_only or (
+    args.full_replica_report_only = args.report_only or args.full_replica_report_only or (
         FULL_REPLICA_REPORT_ONLY and not explicit_mode
     )
     if args.experiment_modes is None:
@@ -1033,7 +1046,8 @@ def make_paths(args: argparse.Namespace) -> Paths:
     for p in (fig_dir, res_dir, cache_dir):
         os.makedirs(p, exist_ok=True)
     if args.experiment_mode == "full":
-        full_figure_directories(fig_dir)
+        full_figure_directories(fig_dir, generate_individual=getattr(
+            args, 'generate_individual_figures', GENERATE_INDIVIDUAL_FIGURES))
     return Paths(exp_tag=exp_tag, mode=args.experiment_mode, fig_dir=fig_dir, res_dir=res_dir, cache_dir=cache_dir)
 
 def make_read_only_source_paths(args: argparse.Namespace) -> Optional[Paths]:
@@ -5934,6 +5948,9 @@ def clone_args_for_mode(base_args: argparse.Namespace, mode: str) -> argparse.Na
     return mode_args
 
 def run_experiment_mode(args: argparse.Namespace) -> None:
+    if getattr(args, "check_exp_config", False):
+        from reporting.experiment_config import check_exp_config
+        return check_exp_config(args)
     if getattr(args, "full_replica_report_only", False):
         from reporting.core import run_report
         return run_report(args)
@@ -5966,6 +5983,8 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
 
     if args.figures_only:
         exported, summary_csv, generated_charts, statistical_excel, friedman_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
+        from reporting.experiment_config import record_completed_config
+        record_completed_config(args, dataset_names)
         print("Completed figures-only.")
         print(f"Cache dir: {paths.cache_dir}")
         print(f"Figures dir: {paths.fig_dir}")
@@ -5988,6 +6007,8 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
     if mode_cache_is_complete(paths, args, dataset_names, cache_sig, show_tf, show_cls):
         print(f"CACHE HIT | exp={paths.exp_tag} | mode={args.experiment_mode} | all selected runs complete")
         exported, summary_csv, generated_charts, statistical_excel, friedman_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
+        from reporting.experiment_config import record_completed_config
+        record_completed_config(args, dataset_names)
         print(f"[mode-complete] {args.experiment_mode} cache is complete; skipped optimization.")
         print(f"Cache dir: {paths.cache_dir}")
         print(f"Figures dir: {paths.fig_dir}")
@@ -6354,6 +6375,8 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                 results_struct[dataset_name].update(cls_payload)
 
     exported, summary_csv, generated_charts, statistical_excel, friedman_excel = export_mode_outputs(paths, args, dataset_names, results_struct)
+    from reporting.experiment_config import record_completed_config
+    record_completed_config(args, dataset_names)
     chart_dir = paths.fig_dir
 
     print("Completed.")
@@ -6377,6 +6400,12 @@ def main():
     if args.list_optimizers:
         print_available_optimizers()
         return
+    if args.check_exp_config:
+        from reporting.experiment_config import check_exp_config
+        result = check_exp_config(args)
+        if not result['match']:
+            raise SystemExit(1)
+        return result
     if args.full_replica_report_only:
         from reporting.core import run_report
         return run_report(args)

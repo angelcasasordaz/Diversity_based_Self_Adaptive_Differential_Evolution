@@ -4,6 +4,7 @@ from copy import deepcopy
 from io import StringIO
 from pathlib import Path
 import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -16,12 +17,13 @@ import main_best as study
 
 def arguments(root, exp=627, optimizers=("DE", "JADE")):
     argv = ["main_best.py", "--experiment-mode", "full", "--exp-id", str(exp),
-            "--output-root", str(root), "--datasets", "Synthetic", "--estimators", "knn",
+            "--output-root", str(root), "--dataset-source", "codesmell", "--datasets", "Synthetic", "--estimators", "knn",
             "--optimizers", *optimizers, "--runs", "2", "--epochs", "3", "--pop-size", "10",
             "--parallel", "no"]
     with patch.object(sys, "argv", argv):
         args = study.parse_args()
     args.reuse_cache_from_exp_id = None if exp == 627 else 627
+    args.figures_only = False
     return args
 
 
@@ -72,6 +74,23 @@ class FullCacheReuseTests(unittest.TestCase):
         calls, _ = self.run_mocked(args)
         self.assertEqual(calls, [("DE", [0, 1]), ("JADE", [0, 1])])
         return args, self.root / "Results/EXP627"
+
+    def test_completed_experiment_and_cache_hit_record_actual_manifest(self):
+        args, source = self.source()
+        path = source / 'full/experiment_config.json'
+        config = json.loads(path.read_text())
+        self.assertEqual(config['datasets'], ['Synthetic'])
+        self.assertEqual(config['runs'], 2)
+        self.assertEqual(config['epochs'], 3)
+        self.assertEqual(config['pop_size'], 10)
+        self.assertTrue(config['cache_signatures'])
+        for entry in config['cache_signatures']:
+            cache = path.parent / entry['path']
+            self.assertEqual(entry['sha256'], hashlib.sha256(cache.read_bytes()).hexdigest())
+        previous = path.read_bytes()
+        calls, _ = self.run_mocked(args)
+        self.assertEqual(calls, [])
+        self.assertEqual(path.read_bytes(), previous)
 
     def test_comparison_change_imports_baselines_and_only_executes_missing_optimizer(self):
         old, source = self.source()
@@ -306,6 +325,7 @@ class FullCacheReuseTests(unittest.TestCase):
         with patch.object(sys, "argv", ["main_best.py", "--experiment-mode", "full"]):
             args = study.parse_args()
         args.exp_id, args.reuse_cache_from_exp_id, args.output_root = 629, 627, str(root)
+        args.dataset_source = 'codesmell'
         args.rf_backend_policy = "sklearn"  # Historical RF caches predate cuML execution.
         args.optimizers = ["MaCRO-DE-t", "DE", "JADE", "SHADE", "PSO", "WOA", "HHO", "GOA", "SA", "BRO", "RUN", "FOX"]
         args.estimators, args.transfer_functions = ["knn", "svm", "rf"], ["vstf_01"]

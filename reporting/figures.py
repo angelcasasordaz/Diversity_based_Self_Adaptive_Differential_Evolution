@@ -145,7 +145,7 @@ def summary_figure(report, classifier=None):
             ax.tick_params(labelsize=8)
             ax.set_ylim(min(0., float(values.min())*1.2),
                         1.10 if metric.unit == '0–1' else max(1., float(values.max())*1.2))
-            ax.set_ylabel(cls.upper() if classifier is None else f'{metric.name} ({metric.unit})',
+            ax.set_ylabel((cls.upper() if c == 0 else '') if classifier is None else f'{metric.name} ({metric.unit})',
                           fontsize=12 if classifier is None else 10, fontweight='bold', color='black')
             if ci == 0 or classifier is not None:
                 header_index = {'AccRuns': 0, 'PSRuns': 1, 'RSRuns': 2, 'F1Runs': 3}.get(metric.run_key, mi)
@@ -641,10 +641,15 @@ def generate(report, destination, *, generated=None):
     skipped = []
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
+    generate_individual = getattr(report.args, 'generate_individual_figures',
+                                  framework().GENERATE_INDIVIDUAL_FIGURES)
     individual = individual_destination(report, destination)
-    individual.mkdir(parents=True, exist_ok=True)
+    if generate_individual:
+        individual.mkdir(parents=True, exist_ok=True)
+    else:
+        print('[report] individual figures skipped', flush=True)
     if report.args.experiment_mode == 'full':
-        full_figure_directories(destination)
+        full_figure_directories(destination, generate_individual=generate_individual)
     with plt.rc_context(STYLE):
         if report.args.experiment_mode == 'full':
             for stem, fig in base_publication_figures(report, skipped):
@@ -652,19 +657,39 @@ def generate(report, destination, *, generated=None):
                 save_png(fig, target)
                 if generated is not None:
                     generated.append(str(target.relative_to(destination)))
-        for stem, fig in publication_figures(report, skipped):
+        for stem, fig in (publication_figures(report, skipped) if generate_individual
+                          or report.args.experiment_mode != 'full' else ()):
             target = (full_figure_path(destination, f'{stem}.png')
                       if report.args.experiment_mode == 'full' else individual / f'{stem}.png')
             save_png(fig, target)
             if generated is not None:
                 generated.append(str(target.relative_to(destination)))
-        if report.args.experiment_mode == 'full':
+        if report.args.experiment_mode == 'full' and generate_individual:
             for stem, fig in per_dataset_figures(report, skipped):
                 target = individual / f'{stem}.png'
                 save_png(fig, target)
                 if generated is not None:
                     generated.append(str(target.relative_to(destination)))
     return skipped
+
+
+def generate_statistics_figures(report, destination):
+    """Render matched-block statistics from cached observations without result exports."""
+    from reporting.statistics import analyze, matched_block_matrix
+    if len(report.algorithms) < 2 or len(report.datasets) * len(report.classifiers) < 2:
+        return
+    metric = next((m for m in report.metrics if m.run_key == 'F1Runs'), report.metrics[0])
+    _, matrix = matched_block_matrix(report.indexed, report.datasets, report.classifiers,
+                                     report.algorithms, metric)
+    analysis = analyze(matrix, report.algorithms, higher_is_better=metric.best_mode == 'max')
+    if len(analysis['x']) < 2:
+        return
+    destination = statistics_destination(report, destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    with plt.rc_context(STYLE):
+        for stem, fig in statistical_figures(analysis, report.algorithms, metric.name):
+            localize_figure(fig, figure_language(report), protected=report.algorithms)
+            save_png(fig, destination / f'{stem}.png')
 
 
 def statistical_figures(analysis, algorithms, metric):
