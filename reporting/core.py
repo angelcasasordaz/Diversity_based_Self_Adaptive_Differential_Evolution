@@ -150,6 +150,8 @@ def load_completed_cache(args):
     its data. All framework run fields are required by the numerical exporters.
     Unavailable metrics/curves are explicitly omitted; partial metric grids fail.
     """
+    if args.experiment_mode == 'full' and getattr(args, 'report_current_science', False):
+        return load_cached_figure_report(args)
     from reporting.paper_tables import METRICS
     m = framework()
     args = argparse.Namespace(**vars(args))
@@ -203,8 +205,8 @@ def load_completed_cache(args):
                 # FULL updates append snapshots. Keep reporting read-only and
                 # final-only, selecting a complete scientifically matching grid.
                 snapshot_signature = classifier_signature if path.name.startswith(f'{tag}_{dataset}_{classifier}_{classifier_signature}_') else signature
-                snapshots = sorted(cache.glob(f'{tag}_{dataset}_{classifier}_{snapshot_signature}_snapshot_*_results.pkl'))
-                for candidate in (path, *snapshots):
+                finals = sorted(cache.glob(f'{tag}_{dataset}_{classifier}_{snapshot_signature}_final_*_results.pkl'))
+                for candidate in (path, *finals):
                     candidate = safe_path(candidate)
                     stored = m.load_cache(str(candidate))
                     selected = {}
@@ -689,6 +691,35 @@ def load_cached_figure_report(args, *, use_manifest=True):
     from reporting.paper_tables import METRICS
     m = framework()
     local = argparse.Namespace(**vars(args))
+    if local.experiment_mode == 'full' and getattr(local, 'report_current_science', False):
+        paths = m.make_read_only_source_paths(local, include_current=True)
+        datasets = [spec.name for spec in m.resolve_dataset_specs(local)]
+        classifiers = list(local.estimators)
+        results, indexed, sources, algorithms, missing = {}, {}, {}, [], []
+        for dataset in datasets:
+            results[dataset] = {}
+            for classifier in classifiers:
+                payload, _, origins = m.load_compatible_full_cache_payload(
+                    paths, local, dataset, classifier, final_only=True, return_origins=True)
+                expected = m.expected_result_labels(local, classifier,
+                    len(local.transfer_functions) > 1, len(classifiers) > 1)
+                for label, _ in expected:
+                    row = (payload or {}).get(label)
+                    if row is None:
+                        missing.append(f'{dataset}/{classifier}/{label}')
+                        continue
+                    algorithm, _ = _report_algorithm(label, classifier)
+                    results[dataset][label] = row
+                    indexed[dataset, classifier, algorithm] = row
+                    if algorithm not in algorithms:
+                        algorithms.append(algorithm)
+                    path = safe_path(origins[label])
+                    sources[str(path.relative_to(Path(local.output_root).absolute()))] = sha256(path)
+        if missing:
+            raise ValueError('Cache MISMATCH: missing compatible complete final rows: ' + ', '.join(missing))
+        metrics = [metric for metric in METRICS if all(metric.run_key in row for row in indexed.values())]
+        return CompletedReport(local, results, indexed, datasets, classifiers, algorithms, metrics,
+                               'optimizer-local-final-caches', sources)
     from reporting.experiment_config import read_manifest, apply_manifest, manifest_path
     config = read_manifest(local) if use_manifest else None
     if config is not None:
@@ -712,10 +743,14 @@ def load_cached_figure_report(args, *, use_manifest=True):
     datasets, classifiers, algorithms = [], [], []
     rejected = []
     legacy_parameters = None
-    paths = [p for kind in ('results', 'progress') for p in sorted(cache.glob(f'{tag}_*_{kind}.pkl'))]
+    kinds = ('results',) if local.experiment_mode == 'full' else ('results', 'progress')
+    paths = [p for kind in kinds for p in sorted(cache.glob(f'{tag}_*_{kind}.pkl'))
+             if '_snapshot_' not in p.name]
     if config is not None:
-        preferred = [safe_path(manifest_path(local).parent / entry['path']) for entry in config['cache_signatures']]
-        if all(path.is_file() for path in preferred):
+        preferred = [safe_path(manifest_path(local).parent / entry['path']) for entry in config['cache_signatures']
+                     if '_snapshot_' not in entry['path'] and
+                     (local.experiment_mode != 'full' or entry['path'].endswith('_results.pkl'))]
+        if preferred and all(path.is_file() for path in preferred):
             paths = preferred
         else:
             print('[config] Some recorded cache paths are missing; discovering compatible existing caches', flush=True)
@@ -840,9 +875,20 @@ def run_figure_report(args):
         mode = report.args.experiment_mode + ('_esp' if language == 'es' else '')
         destination = safe_path(destination_root / 'Figures' / report.exp_tag / mode)
         results_destination = safe_path(destination_root / 'Results' / report.exp_tag / mode)
-        print(f'[report] output folder = {mode}', flush=True)
         # Create ancestors before the guard; all actual exports stay in Figures.
-        destination.mkdir(parents=True, exist_ok=True)
+        if report.args.experiment_mode == 'full':
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            replica = 0
+            while True:
+                try:
+                    destination.mkdir()
+                    break
+                except FileExistsError:
+                    replica += 1
+                    destination = safe_path(destination.parent / f'{mode}_rep{replica}')
+        else:
+            destination.mkdir(parents=True, exist_ok=True)
+        print(f'[report] output folder = {destination.name}', flush=True)
         results_destination.mkdir(parents=True, exist_ok=True)
         with report_stage(f'Figures: {destination}'), report_guard((destination,)):
             figures.generate(report, destination)

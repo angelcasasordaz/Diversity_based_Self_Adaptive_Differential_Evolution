@@ -64,7 +64,7 @@ FULL_REPLICA_REPORT_ONLY = True
 # Reporting identity only; scientific optimizer configuration is unchanged.
 FULL_OPTIMIZER_COLORS = full_plot_style.OPTIMIZER_COLORS
 _FULL_REPORT_STYLE = ContextVar("full_report_style", default=False)
-PLOT_GLOBAL_ESTIMATOR = "knn"  # Presentation only: knn, svm, rf; compatible with MAIN_ESTIMATOR.
+PLOT_GLOBAL_ESTIMATOR = "svm"  # Presentation only: knn, svm, rf; compatible with MAIN_ESTIMATOR.
 PLOT_GLOBAL_METRIC = "accuracy"  # Presentation only: accuracy, f1, precision, recall.
 FIGURE_LANGUAGE = "es"  # Figure-visible text only: en, es.
 GENERATE_INDIVIDUAL_FIGURES = False  # Presentation only; skip all detail figures.
@@ -474,6 +474,10 @@ def validate_sensitivity_weight_pairs(weight_pairs) -> List[Tuple[float, float]]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Feature-selection comparison framework with cache and multi-run support")
+    parser.add_argument("--audit-cache", action="store_true",
+                        help="Print compatible final-cache coverage and exit without runs, figures or writes")
+    parser.add_argument("--run-missing-cache", action="store_true",
+                        help="Execute only the startup audit's missing FULL units, then audit and report")
     parser.add_argument("--report-only", action="store_true",
                         help="Read compatible completed results/progress caches and generate figures; Spanish uses <mode>_esp")
     parser.add_argument("--check-exp-config", action="store_true",
@@ -1050,10 +1054,10 @@ def make_paths(args: argparse.Namespace) -> Paths:
             args, 'generate_individual_figures', GENERATE_INDIVIDUAL_FIGURES))
     return Paths(exp_tag=exp_tag, mode=args.experiment_mode, fig_dir=fig_dir, res_dir=res_dir, cache_dir=cache_dir)
 
-def make_read_only_source_paths(args: argparse.Namespace) -> Optional[Paths]:
+def make_read_only_source_paths(args: argparse.Namespace, *, include_current=False) -> Optional[Paths]:
     """Describe a source experiment without creating or modifying any directories."""
-    source_exp_id = getattr(args, "reuse_cache_from_exp_id", None)
-    if source_exp_id is None or int(source_exp_id) == int(args.exp_id):
+    source_exp_id = args.exp_id if include_current else getattr(args, "reuse_cache_from_exp_id", None)
+    if source_exp_id is None or (int(source_exp_id) == int(args.exp_id) and not include_current):
         return None
     exp_tag = f"EXP{int(source_exp_id):03d}"
     fig_dir = os.path.join(args.output_root, "Figures", exp_tag, args.experiment_mode)
@@ -1287,6 +1291,17 @@ FULL_EXECUTION_PARAMETER_KEYS = frozenset({
 })
 
 
+def full_scientific_parameters(optimizer_name, parameters):
+    """Exclude adapter kwargs unused by the scientific constructor."""
+    declared = set()
+    for cls in resolve_optimizer(optimizer_name).optimizer_class.__mro__[:-1]:
+        declared.update(name for name, item in inspect.signature(cls.__init__).parameters.items()
+                        if item.kind not in (inspect.Parameter.VAR_POSITIONAL,
+                                             inspect.Parameter.VAR_KEYWORD))
+    return {key: value for key, value in parameters.items()
+            if key in declared and key not in FULL_EXECUTION_PARAMETER_KEYS}
+
+
 def full_cache_identity(args, optimizer_name=None, dataset_name=None,
                         estimator=None, transfer_function=None):
     """Scientific FULL identity; comparison selections are presentation only.
@@ -1317,8 +1332,7 @@ def full_cache_identity(args, optimizer_name=None, dataset_name=None,
                                                    inspect.Parameter.VAR_KEYWORD)):
                     parameters[name] = parameter.default
         parameters.update(optimizer_constructor_kwargs(optimizer_name, args))
-        parameters = {key: value for key, value in parameters.items()
-                      if key not in FULL_EXECUTION_PARAMETER_KEYS}
+        parameters = full_scientific_parameters(optimizer_name, parameters)
         revisioned = optimizer_scientific_identity(optimizer_name, args)
         if revisioned:
             parameters = revisioned["parameters"]
@@ -1385,7 +1399,8 @@ def save_full_cache_snapshot(path, payload, *, primary=True):
     if target.exists() or not primary:
         stem, kind = target.stem.rsplit("_", 1)
         digest = hashlib.sha256(data).hexdigest()[:16]
-        target = target.with_name(f"{stem}_snapshot_{digest}_{kind}.pkl")
+        suffix = "final" if primary and kind == "results" else "snapshot"
+        target = target.with_name(f"{stem}_{suffix}_{digest}_{kind}.pkl")
     base = target
     for index in range(10000):
         try:
@@ -2338,8 +2353,15 @@ def checkpoint_metadata_matches(row: dict, expected_metadata: Optional[dict]) ->
         if reason:
             return False
     if expected_metadata.get("ExperimentMode") == "full":
+        identity = row.get("CacheIdentity") if isinstance(row, dict) else None
+        if not isinstance(identity, dict):
+            return False
+        identity = dict(identity)
+        if identity:
+            identity["optimizer_parameters"] = full_scientific_parameters(
+                expected_metadata["CacheIdentity"]["optimizer"], identity.get("optimizer_parameters", {}))
         return (isinstance(row, dict) and row.get("ExperimentMode") == "full"
-                and row.get("CacheIdentity") == expected_metadata["CacheIdentity"])
+                and identity == expected_metadata["CacheIdentity"])
     if expected_metadata.get("ExperimentMode") == "sensitivity":
         return sensitivity_checkpoint_metadata_matches(row, expected_metadata)
     if expected_metadata.get("ExperimentMode") == "sensitivity_weights":
@@ -2388,11 +2410,13 @@ def load_results_from_cache(paths: Paths, args: argparse.Namespace, dataset_name
                       if args.experiment_mode == "transfer_functions" else args.estimators)
         for estimator in estimators:
             payload = (load_compatible_full_cache_payload(
-                paths, args, dataset_name, estimator, include_legacy_directory=True,
+                paths, args, dataset_name, estimator, include_legacy_directory=True, final_only=True,
             )[0]
                        if args.experiment_mode == "full" else
                        load_mode_cache_payload(paths, args, dataset_name, estimator, cache_sig)[0])
-            if payload is None:
+            if payload is None or (args.experiment_mode == "full" and any(
+                    label not in payload for label, _ in expected_result_labels(
+                        args, estimator, len(args.transfer_functions) > 1, len(args.estimators) > 1))):
                 missing.append(f"{dataset_name}/{estimator}")
                 continue
             if preserve_classifier_labels:
@@ -2515,15 +2539,17 @@ def legacy_full_cache_args(path, payload, args, dataset_name, estimator):
     """Recover old identity only when its complete filename digest is verified.
 
     Old FULL files omitted row identity and dataset source/fitness weights from
-    their digest. Restrict those omissions to the historical code-smell/default
-    fitness contract. Never infer an unrecorded implementation revision.
+    their digest. Verify the historical source/default fitness contract and
+    never infer an unrecorded implementation revision.
     """
-    if (getattr(args, "dataset_source", DATASET_SOURCE) != "codesmell"
+    if (getattr(args, "dataset_source", DATASET_SOURCE) not in {"codesmell", "mafese"}
+            or (args.dataset_source == "mafese" and dataset_name not in TEST_DATASETS_CLASSIFICATION_14)
             or args.fitness_alpha != DEFAULT_FITNESS_ALPHA
             or args.fitness_beta != DEFAULT_FITNESS_BETA):
         return None
     prefix = f"{path.name.split('_', 1)[0]}_{dataset_name}_{estimator.lower()}_"
     digest = path.name[len(prefix):].rsplit("_", 1)[0]
+    digest = digest.split("_snapshot_", 1)[0].split("_final_", 1)[0]
     optimizers = []
     try:
         for label in payload:
@@ -2563,11 +2589,35 @@ def legacy_full_cache_args(path, payload, args, dataset_name, estimator):
     for candidate in candidates:
         if build_legacy_cache_signature(candidate) == digest:
             return candidate
+    # Pre-revision digests use the reporting validator's documented contract.
+    # An interrupted file may omit a method; a sibling with the same digest
+    # supplies the comparison list, which must still pass the digest check.
+    from reporting.core import _legacy_report_identity, _report_algorithm
+    comparisons = [optimizers, configured]
+    for sibling in sorted(path.parent.glob(f"*_{digest}_results.pkl")):
+        stored = load_cache_safe(str(sibling), "legacy comparison identity")
+        if isinstance(stored, dict) and stored:
+            try:
+                classifier = str(next(iter(stored.values()))["Estimator"]).lower()
+                comparisons.append(list(dict.fromkeys(_report_algorithm(label, classifier)[1]
+                                                     for label in stored)))
+            except (KeyError, TypeError, ValueError):
+                continue
+    for methods in comparisons:
+        candidate = argparse.Namespace(**vars(args))
+        try:
+            evidence = _legacy_report_identity(candidate, digest, methods)
+        except ValueError:
+            continue
+        for key, value in candidate.report_legacy_parameters.items():
+            setattr(candidate, key, value)
+        candidate.legacy_unversioned_science = evidence.endswith('(pre-revision schema)')
+        return candidate
     return None
 
 
 def load_compatible_full_cache_payload(paths, args, dataset_name, estimator,
-                                     *, include_legacy_directory=False, return_origins=False):
+                                     *, include_legacy_directory=False, return_origins=False, final_only=False):
     """Select compatible prefixes per optimizer/TF across wildcard signatures.
 
     Source files are opened only for reading. A longer incompatible checkpoint
@@ -2580,8 +2630,12 @@ def load_compatible_full_cache_payload(paths, args, dataset_name, estimator,
     seen = set()
     for directory in directories:
         for kind in ("results", "progress"):
+            if final_only and kind != "results":
+                continue
             pattern = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_*_{kind}.pkl"
             for path in sorted(directory.glob(pattern)):
+                if "_snapshot_" in path.name and kind == "results":
+                    continue
                 if path in seen:
                     continue
                 seen.add(path)
@@ -2618,6 +2672,10 @@ def load_compatible_full_cache_payload(paths, args, dataset_name, estimator,
                         reasons.append(f"{path.name}/{label}: {backend_reason}")
                         continue
                 if isinstance(row, dict) and "CacheIdentity" not in row and legacy_args is not None:
+                    if (getattr(legacy_args, 'legacy_unversioned_science', False)
+                            and optimizer_scientific_identity(method, args)):
+                        reasons.append(f"{path.name}/{label}: unrecorded optimizer implementation revision")
+                        continue
                     inferred = full_checkpoint_metadata(legacy_args, method, dataset_name, estimator, tf)
                     # The legacy digest proves parameters and any revision that
                     # it encoded. Conflicting explicit metadata still rejects it.
@@ -2637,7 +2695,13 @@ def load_compatible_full_cache_payload(paths, args, dataset_name, estimator,
                 if reason is not None:
                     reasons.append(f"{path.name}/{label}: {reason}")
                     continue
-                tier = 0 if path.name.startswith(local_prefix) else 1
+                completed = len(values["AccRuns"])
+                is_final = path.name.endswith("_results.pkl") and completed == args.runs
+                if (final_only and not is_final) or (not is_final and completed == args.runs):
+                    continue
+                identity_signature = hashlib.sha1(json.dumps(row['CacheIdentity'], sort_keys=True).encode()).hexdigest()[:10]
+                recorded_prefix = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{identity_signature}_"
+                tier = (0 if is_final else 2) + (0 if path.name.startswith((local_prefix, recorded_prefix)) else 1)
                 if label in selected and tier != selected_tiers[label]:
                     old = selected[label]
                     short, long = sorted((old, row), key=lambda item: item["CompletedRuns"])
@@ -2653,16 +2717,56 @@ def load_compatible_full_cache_payload(paths, args, dataset_name, estimator,
                     # retain priority, never silently changing stored values.
                     if same_prefix and short["CompletedRuns"] < long["CompletedRuns"]:
                         if long is row:
-                            selected[label], origins[label] = row, str(path)
+                            selected[label], origins[label] = {**row, **expected}, str(path)
                         selected_tiers[label] = min(tier, selected_tiers[label])
                         continue
                 if (label not in selected or tier < selected_tiers[label]
                         or (tier == selected_tiers[label] and len(values["AccRuns"]) >
                             int(selected[label]["CompletedRuns"]))):
-                    selected[label] = row
+                    selected[label] = {**row, **expected}
                     selected_tiers[label], origins[label] = tier, str(path)
     result = selected or None, "; ".join(dict.fromkeys(reasons)) or None
     return (*result, origins) if return_origins else result
+
+
+def audit_startup_cache(args):
+    """Read all selected FULL units before any optimization or output writes."""
+    local = clone_args_for_mode(args, "full")
+    apply_experiment_mode(local)
+    validate_selection_options(local)
+    local.optimizers = resolve_optimizers(local)
+    paths = make_read_only_source_paths(local, include_current=True)
+    sources = [paths]
+    source = make_read_only_source_paths(local)
+    if source is not None:
+        sources.append(source)
+    complete, missing = [], []
+    width = max((len(method) for method in local.optimizers), default=1)
+    show_tf, show_cls = len(local.transfer_functions) > 1, len(local.estimators) > 1
+    print("\nCACHE STARTUP AUDIT", flush=True)
+    for spec in resolve_dataset_specs(local):
+        for classifier in local.estimators:
+            finals, prefixes = {}, {}
+            for location in sources:
+                for final_only, target in ((True, finals), (False, prefixes)):
+                    payload, _ = load_compatible_full_cache_payload(
+                        location, local, spec.name, classifier,
+                        include_legacy_directory=(location is paths), final_only=final_only)
+                    for label, row in (payload or {}).items():
+                        if row['CompletedRuns'] > target.get(label, {}).get('CompletedRuns', -1):
+                            target[label] = row
+            print(f"Dataset {spec.name} / classifier {classifier}", flush=True)
+            for method in local.optimizers:
+                for tf in local.transfer_functions:
+                    label = build_alg_label(method, tf, classifier, show_tf, show_cls)
+                    count = prefixes.get(label, {}).get('CompletedRuns', 0)
+                    unit = (spec.name, classifier, method, tf)
+                    status = "COMPLETE" if label in finals else "MISSING"
+                    (complete if status == "COMPLETE" else missing).append(unit)
+                    display = method + (f" / {tf}" if show_tf else "")
+                    print(f"{display:<{width}} : {count}/{local.runs} cached | {status}", flush=True)
+    print(f"TOTAL: {len(complete)} COMPLETE, {len(missing)} MISSING", flush=True)
+    return {"complete": complete, "missing": missing}
 
 
 def materialize_current_full_cache(paths, args, dataset_names):
@@ -2810,7 +2914,7 @@ def mode_cache_is_complete(
     for dataset_name in dataset_names:
         for estimator in args.estimators:
             payload = (load_compatible_full_cache_payload(
-                paths, args, dataset_name, estimator, include_legacy_directory=True,
+                paths, args, dataset_name, estimator, include_legacy_directory=True, final_only=True,
             )[0] if args.experiment_mode == "full" else
                 load_mode_cache_payload(paths, args, dataset_name, estimator, cache_sig)[0])
             if payload is None:
@@ -5951,7 +6055,11 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
     if getattr(args, "check_exp_config", False):
         from reporting.experiment_config import check_exp_config
         return check_exp_config(args)
+    if args.experiment_mode == "full" and not getattr(args, "startup_cache_audited", False):
+        audit_startup_cache(args)
+        args.startup_cache_audited = True
     if getattr(args, "full_replica_report_only", False):
+        args.report_current_science = True
         from reporting.core import run_report
         return run_report(args)
     apply_experiment_mode(args)
@@ -5963,7 +6071,14 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
     if args.n_workers < 1:
         raise ValueError("--n-workers must be >= 1")
 
-    paths = make_paths(args)
+    execution_plan = getattr(args, "cache_execution_plan", None)
+    if execution_plan is not None:
+        if args.experiment_mode != "full" or execution_plan & args.cache_complete_units:
+            raise RuntimeError("Execution stopped: plan includes COMPLETE units or a non-FULL mode")
+        paths = make_read_only_source_paths(args, include_current=True)
+        os.makedirs(paths.cache_dir, exist_ok=True)
+    else:
+        paths = make_paths(args)
     source_paths = make_read_only_source_paths(args)
     cache_sig = build_cache_signature(args)
     show_tf = len(args.transfer_functions) > 1
@@ -6001,11 +6116,13 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
             print(f"  - {p}")
         return
 
-    if args.experiment_mode == "full":
+    if args.experiment_mode == "full" and execution_plan is None:
         materialize_current_full_cache(paths, args, dataset_names)
 
     if mode_cache_is_complete(paths, args, dataset_names, cache_sig, show_tf, show_cls):
         print(f"CACHE HIT | exp={paths.exp_tag} | mode={args.experiment_mode} | all selected runs complete")
+        if execution_plan is not None:
+            return
         exported, summary_csv, generated_charts, statistical_excel, friedman_excel = regenerate_figures_from_cache(paths, args, dataset_names, cache_sig)
         from reporting.experiment_config import record_completed_config
         record_completed_config(args, dataset_names)
@@ -6027,6 +6144,8 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
 
     results_struct = {}
     for spec in dataset_specs:
+        if execution_plan is not None and not any(unit[0] == spec.name for unit in execution_plan):
+            continue
         dataset_name, X, y = load_dataset(spec)
         results_struct[dataset_name] = {}
         data = Data(X, y)
@@ -6036,6 +6155,9 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
             data.split_train_test(test_size=args.test_size, random_state=args.random_state)
 
         for estimator in args.estimators:
+            if execution_plan is not None and not any(
+                    unit[:2] == (dataset_name, estimator) for unit in execution_plan):
+                continue
             classifier_sig = classifier_cache_signature(args, cache_sig, estimator)
             cache_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{classifier_sig}_results.pkl"
             progress_filename = f"{paths.exp_tag}_{dataset_name}_{estimator.lower()}_{classifier_sig}_progress.pkl"
@@ -6101,6 +6223,9 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                     )
             for method in args.optimizers:
                 for tf in args.transfer_functions:
+                    unit = (dataset_name, estimator, method, tf)
+                    if execution_plan is not None and unit not in execution_plan:
+                        continue
                     for variant_value in experiment_variants(args):
                         run_args = args
                         if args.experiment_mode == "sensitivity" and variant_value is not None:
@@ -6329,6 +6454,13 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
                             if str(args.compute_device).lower() == "gpu" and estimator.lower() == "rf":
                                 display_workers = 1
                             print(f"  Parallel: yes | run workers={display_workers}")
+                        if execution_plan is not None:
+                            if unit not in execution_plan or unit in args.cache_complete_units:
+                                raise RuntimeError(f"Execution stopped: unauthorized or COMPLETE unit {unit}")
+                            final_payload, _ = load_compatible_full_cache_payload(
+                                paths, args, dataset_name, estimator, final_only=True)
+                            if label in (final_payload or {}):
+                                raise RuntimeError(f"Execution stopped: planned unit is now COMPLETE: {unit}")
                         execute_pending_runs(
                             data,
                             estimator,
@@ -6374,6 +6506,9 @@ def run_experiment_mode(args: argparse.Namespace) -> None:
             else:
                 results_struct[dataset_name].update(cls_payload)
 
+    if execution_plan is not None:
+        print("Missing-unit execution finished; figures deferred until the final cache audit.", flush=True)
+        return
     exported, summary_csv, generated_charts, statistical_excel, friedman_excel = export_mode_outputs(paths, args, dataset_names, results_struct)
     from reporting.experiment_config import record_completed_config
     record_completed_config(args, dataset_names)
@@ -6406,7 +6541,33 @@ def main():
         if not result['match']:
             raise SystemExit(1)
         return result
+    if "full" in args.experiment_modes:
+        audit = audit_startup_cache(args)
+        args.startup_cache_audited = True
+    elif args.audit_cache:
+        raise ValueError("--audit-cache requires full mode")
+    if args.audit_cache:
+        return audit
+    if args.experiment_modes == ["full"]:
+        args.run_missing_cache = True
+    if args.run_missing_cache:
+        if args.experiment_modes != ["full"]:
+            raise ValueError("--run-missing-cache requires only full mode")
+        args.cache_execution_plan = frozenset(audit['missing'])
+        args.cache_complete_units = frozenset(audit['complete'])
+        if args.cache_execution_plan & args.cache_complete_units:
+            raise RuntimeError("Execution stopped: the missing plan includes COMPLETE units")
+        print("\nMISSING EXECUTION PLAN", flush=True)
+        for index, unit in enumerate(audit['missing'], 1):
+            print(f"{index:02d}. " + " / ".join(unit), flush=True)
+        print(f"WARNING: Only these {len(audit['missing'])} MISSING units will execute; "
+              "all COMPLETE units are excluded. Figures wait for the final audit.", flush=True)
+        cache = Path(args.output_root) / 'Results' / f'EXP{args.exp_id:03d}' / 'full' / 'cache'
+        protected_caches = {path: hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in cache.glob('*.pkl')}
+        args.report_only = args.full_replica_report_only = args.figures_only = False
     if args.full_replica_report_only:
+        args.report_current_science = True
         from reporting.core import run_report
         return run_report(args)
     logging.disable(logging.INFO)
@@ -6455,6 +6616,18 @@ def main():
                     f"{mode_args.sensitivity_parameter} ---"
                 )
             run_experiment_mode(mode_args)
+    if args.run_missing_cache:
+        final_audit = audit_startup_cache(args)
+        if final_audit['missing'] or len(final_audit['complete']) != 336:
+            raise RuntimeError("Final cache audit is incomplete; figure generation stopped")
+        if any(not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest
+               for path, digest in protected_caches.items()):
+            raise RuntimeError("Existing cache changed; figure generation stopped")
+        print("Existing cache hashes unchanged; starting cache-only final figures.", flush=True)
+        args.report_only = args.full_replica_report_only = args.figures_only = True
+        args.report_current_science = True
+        from reporting.core import run_report
+        return run_report(args)
 
 if __name__ == "__main__":
     main()
