@@ -8,6 +8,14 @@ from plot_labels import plot_display_label
 
 
 STYLE_ID = 'numbered-full-v1-neutral-text'
+PUBLICATION_OPTIMIZER_COLORS = {
+    'MaCRO-DE': '#19365F',
+    'BRO': '#1B9E77', 'DBO': '#D95F02', 'DE': '#E66101',
+    'DMOA': '#7570B3', 'GWO': '#E7298A', 'HHO': '#C51B7D',
+    'MFO': '#66A61E', 'MGO': '#4DAF4A', 'PSO': '#E6AB02',
+    'SHADE': '#A6761D', 'WOA': '#8C510A', 'JADE': '#666666',
+    'FLA': '#999999',
+}
 OPTIMIZER_COLORS = {
     'DSADE': '#0072B2', 'DE': '#009E73', 'JADE': '#E69F00',
     'SHADE': '#CC79A7', 'PSO': '#56B4E9', 'WOA': '#D55E00',
@@ -48,9 +56,31 @@ def method_index(name):
 
 
 def palette(algorithms):
-    fallback = list(OPTIMIZER_COLORS.values())[1:]
-    return {name: OPTIMIZER_COLORS.get(method_key(name), fallback[method_index(name) % len(fallback)])
-            for name in algorithms}
+    """Fixed publication colors by identity, independent of order and language."""
+    colors = {}
+    for name in algorithms:
+        key = publication_key(name)
+        if key in PUBLICATION_OPTIMIZER_COLORS:
+            colors[name] = PUBLICATION_OPTIMIZER_COLORS[key]
+        else:
+            # Generic reports may contain other methods; never cycle known colors.
+            colors[name] = '#' + hashlib.sha256(key.encode()).hexdigest()[:6]
+    return colors
+
+
+def publication_key(name):
+    key = str(name).strip().upper()
+    for prefix in ('ORIGINAL', 'BASE', 'DEV'):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+            break
+    if key in {'MACRO-DE', 'MACRO-DE-T', 'DSADE', 'DSA-DE', 'DSA_DE'}:
+        return 'MaCRO-DE'
+    return key
+
+
+def is_primary(name):
+    return publication_key(name) == 'MaCRO-DE'
 
 
 def line_style(name):
@@ -90,8 +120,8 @@ def style_axes(ax, horizontal=False):
     ax.title.set_color('black')
 
 
-def highlight_patch(patch, method, linewidth=2.2):
-    if method_key(method) == 'DSADE':
+def highlight_patch(patch, method, linewidth=2.8):
+    if is_primary(method):
         patch.set_edgecolor('black')
         patch.set_linewidth(linewidth)
 

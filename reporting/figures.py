@@ -183,13 +183,14 @@ def radar_figure(report, classifier, labels, values):
         for ai in curve_draw_order(report.algorithms):
             algorithm = report.algorithms[ai]
             observed = values[ai, di]
-            highlighted = base_style.method_key(algorithm) == 'DSADE'
+            highlighted = base_style.is_primary(algorithm)
             ax.plot(angles, np.r_[observed, observed[0]], color=colors[algorithm],
                     label=base_style.display_label(algorithm, report.algorithms), **base_style.line_style(algorithm),
-                    markersize=4, linewidth=2.1 if highlighted else 1.2,
-                    zorder=3 if highlighted else 2,
+                    markersize=4, linewidth=2.6 if highlighted else 1.2,
+                    zorder=10 if highlighted else 2,
                     markeredgecolor=colors[algorithm])
-            ax.fill(angles, np.r_[observed, observed[0]], color=colors[algorithm], alpha=.04)
+            ax.fill(angles, np.r_[observed, observed[0]], color=colors[algorithm],
+                    alpha=.08 if highlighted else .04, zorder=1.5 if highlighted else 1)
         ax.set_xticks(angles[:-1], labels, fontsize=8)
         ax.set_ylim(min(0., float(values.min())), max(1., float(values.max())))
         ax.set_title(f'{dataset} / {classifier.upper()}', fontsize=11, fontweight='bold', pad=14)
@@ -212,8 +213,9 @@ def heatmap_figure(report, classifier, metric):
     ax.set_title(f'{classifier.upper()} — {metric.name} ({metric.unit})')
     fig.colorbar(im, ax=ax, label=f'{metric.name} ({metric.unit}): cached run mean', shrink=.8)
     for i, algorithm in enumerate(report.algorithms):
-        if base_style.method_key(algorithm) == 'DSADE':
-            framework().add_heatmap_row_outline(ax, i, len(report.datasets))
+        if base_style.is_primary(algorithm):
+            framework().add_heatmap_row_outline(ax, i, len(report.datasets), linewidth=2.8)
+            ax.patches[-1].set_clip_on(False)
     for i, j in np.ndindex(values.shape):
         ax.text(j, i, f'{values[i,j]:.4f}' if normalized else f'{values[i,j]:.4g}', ha='center', va='center', fontsize=8,
                 color='white' if im.norm(values[i,j]) > .8 else 'black')
@@ -226,7 +228,7 @@ def precision_figure(values, algorithms, classifier):
     colors = palette(algorithms)
     fig, ax = plt.subplots(figsize=(max(7, max(map(len, algorithms)) * .12), max(3, len(algorithms)*.45)), layout='constrained')
     for i, algorithm in enumerate(algorithms):
-        highlighted = base_style.method_key(algorithm) == 'DSADE'
+        highlighted = base_style.is_primary(algorithm)
         ax.errorbar(means[i], i, xerr=None if intervals is None else intervals[i], fmt='o',
                     color=colors[algorithm], markersize=8 if highlighted else 6, capsize=4,
                     markeredgecolor='black' if highlighted else colors[algorithm])
@@ -242,7 +244,7 @@ def precision_figure(values, algorithms, classifier):
 def observations(ax, values, algorithms, *, means=False, points=True):
     colors = palette(algorithms)
     for i, algorithm in enumerate(algorithms):
-        highlighted = base_style.method_key(algorithm) == 'DSADE'
+        highlighted = base_style.is_primary(algorithm)
         if points:
             ax.scatter(i + np.linspace(-.08, .08, values.shape[1]), values[i], s=45 if highlighted else 35,
                        color=colors[algorithm], edgecolor='black' if highlighted else 'white',
@@ -325,7 +327,7 @@ def violin_figure(values, algorithms, classifier, *, show_points=True, metric_na
             parts = ax.violinplot([values[i]], positions=[i], widths=.78, showextrema=False)
             parts['bodies'][0].set_facecolor(color)
             parts['bodies'][0].set_alpha(.22)
-            if base_style.method_key(algorithm) == 'DSADE':
+            if base_style.is_primary(algorithm):
                 parts['bodies'][0].set_edgecolor('black')
                 parts['bodies'][0].set_linewidth(2.4)
         ax.hlines(np.median(values[i]), i-.3, i+.3, colors='black', linestyles='--', linewidth=1.3)
@@ -343,7 +345,7 @@ def violin_figure(values, algorithms, classifier, *, show_points=True, metric_na
 
 def curve_draw_order(algorithms):
     """Paint primary curves last without changing stored algorithm order."""
-    return sorted(range(len(algorithms)), key=lambda i: base_style.method_key(algorithms[i]) == 'DSADE')
+    return sorted(range(len(algorithms)), key=lambda i: base_style.is_primary(algorithms[i]))
 
 
 def final_stage_inset(ax, curves, algorithms, colors, language):
@@ -355,11 +357,11 @@ def final_stage_inset(ax, curves, algorithms, colors, language):
     inset.set_in_layout(False)
     for i in curve_draw_order(algorithms):
         algorithm, curve = algorithms[i], curves[i]
-        highlighted = base_style.method_key(algorithm) == 'DSADE'
+        highlighted = base_style.is_primary(algorithm)
         inset.plot(np.arange(start, len(curve)), curve[start:], color=colors[algorithm],
                    label=base_style.display_label(algorithm, algorithms), **base_style.line_style(algorithm),
                    markersize=3, markevery=max(1, (len(curve)-start)//5),
-                   linewidth=2.4 if highlighted else 1.3, zorder=3 if highlighted else 2)
+                   linewidth=2.4 if highlighted else 1.3, zorder=10 if highlighted else 2)
     # Use the bottom band of final fitness values, capped at the lower half.
     # High methods remain plotted but cannot expand the zoom, including DSA-DE.
     finals = np.asarray([curve[-1] for curve in curves])
@@ -389,11 +391,11 @@ def convergence_figure(report, classifier, datasets, *, skipped=None):
                 missing.append(algorithm)
                 continue
             curves.append((algorithm, curve))
-            highlighted = base_style.method_key(algorithm) == 'DSADE'
+            highlighted = base_style.is_primary(algorithm)
             ax.plot(np.arange(len(curve)), curve, color=colors[algorithm],
                     label=base_style.display_label(algorithm, report.algorithms),
                     **base_style.line_style(algorithm), markersize=4, markevery=max(1, len(curve)//12),
-                    linewidth=2.4 if highlighted else 1.3, zorder=3 if highlighted else 2)
+                    linewidth=2.4 if highlighted else 1.3, zorder=10 if highlighted else 2)
         ax.set_title(f'{ds} / {classifier.upper()}', fontsize=11, fontweight='bold')
         ax.set_xlabel('Iteration', fontsize=9); ax.set_ylabel('Fitness', fontsize=9)
         style_axes(ax)
@@ -411,7 +413,7 @@ def convergence_figure(report, classifier, datasets, *, skipped=None):
                 ax.text(.5, .5, visible_text('No stored curves', language), transform=ax.transAxes, ha='center')
     handles = [Line2D([], [], color=colors[a], label=base_style.display_label(a, report.algorithms),
                      **base_style.line_style(a), markersize=4,
-                     linewidth=2.4 if base_style.method_key(a) == 'DSADE' else 1.3) for a in report.algorithms]
+                     linewidth=2.4 if base_style.is_primary(a) else 1.3) for a in report.algorithms]
     fig.legend(handles=handles, loc='lower center', ncol=min(6, len(handles)), fontsize=9)
     fig.tight_layout(rect=(0, .08, 1, 1))
     return fig
@@ -437,7 +439,7 @@ def draw_tradeoff_axes(ax, features, runtime, algorithms, *, compact_labels=Fals
                           (bar.get_x() + bar.get_width()/2, value), xytext=(0, 3 if compact_labels else 6),
                           textcoords='offset points', ha='center', va='bottom',
                           fontsize=6 if compact_labels else 8, rotation=90 if compact_labels else 0,
-                          fontweight='bold' if base_style.method_key(algorithm) == 'DSADE' else 'normal')
+                          fontweight='bold' if base_style.is_primary(algorithm) else 'normal')
         axis.set_ylim(0, max(1., float(values.max())*(1.4 if compact_labels else 1.2)))
         if compact_labels:
             axis.tick_params(axis='y', labelsize=8)
