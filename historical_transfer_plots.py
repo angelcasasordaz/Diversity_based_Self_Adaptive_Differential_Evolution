@@ -129,14 +129,16 @@ def _force_white_background(fig):
     for ax in fig.get_axes():
         ax.set_facecolor("white")
 
-def _save_chart(fig, out_dir: str, filename: str):
+def _save_chart(fig, out_dir: str, filename: str, *, language="en"):
     path = os.path.join(out_dir, filename)
+    from figure_text import localize_figure
+    localize_figure(fig, language)
     _force_white_background(fig)
     from main_best import _save_figure
     _save_figure(fig, path, bbox_inches="tight")
     plt.close(fig)
 
-def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str]):
+def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_order: List[str], *, filename="09_resultados_clasificador_metrica_todos_datasets.png", language="en"):
     if df.empty:
         return None
 
@@ -235,11 +237,10 @@ def generate_classifier_metric_grid_chart(df: pd.DataFrame, out_dir: str, opt_or
     legend = _plot_legend_patches(opts, color_map, label_map)
     fig.legend(handles=legend, loc="lower center", ncol=min(len(legend), 6), fontsize=9, framealpha=0.95)
     fig.tight_layout(rect=[0.0, 0.04, 1.0, 1.0])
-    filename = "09_resultados_clasificador_metrica_todos_datasets.png"
-    _save_chart(fig, out_dir, filename)
+    _save_chart(fig, out_dir, filename, language=language)
     return filename
 
-def generate_global_features_runtime(df, out_dir, opt_order):
+def generate_global_features_runtime(df, out_dir, opt_order, *, filename="09_global_features_runtime_tradeoff.png", language="en"):
 
     plot_df, opts, color_map, label_map = prepare_plot_groups(df, opt_order)
     method_by_group = plot_df.drop_duplicates("PlotGroup").set_index("PlotGroup")["Optimizer"].to_dict() if not plot_df.empty else {}
@@ -355,7 +356,7 @@ def generate_global_features_runtime(df, out_dir, opt_order):
     _save_chart(
         fig,
         out_dir,
-        "09_global_features_runtime_tradeoff.png"
+        filename, language=language,
     )
 
 

@@ -722,6 +722,14 @@ def load_cached_figure_report(args, *, use_manifest=True):
                                'optimizer-local-final-caches', sources)
     from reporting.experiment_config import read_manifest, apply_manifest, manifest_path
     config = read_manifest(local) if use_manifest else None
+    legacy_transfer = int(local.exp_id) == 626 and local.experiment_mode == 'transfer_functions'
+    if legacy_transfer and config is None:
+        explicit = getattr(local, 'report_explicit_options', ())
+        for field, values in (('optimizers', m.TRANSFER_FUNCTION_OPTIMIZERS),
+                              ('estimators', m.TRANSFER_FUNCTION_ESTIMATORS),
+                              ('transfer_functions', m.TRANSFER_FUNCTION_TESTS)):
+            if '--' + field.replace('_', '-') not in explicit:
+                setattr(local, field, list(values))
     if config is not None:
         local = apply_manifest(local, config)
     root = safe_path(local.output_root)
@@ -739,6 +747,10 @@ def load_cached_figure_report(args, *, use_manifest=True):
             requested_datasets = [spec.name for spec in m.resolve_dataset_specs(local)]
     requested_classifiers = [str(c).lower() for c in local.estimators] if '--estimators' in explicit else None
     requested_methods = [m.resolve_optimizer_name(o) for o in local.optimizers] if '--optimizers' in explicit else None
+    if legacy_transfer:
+        requested_datasets = requested_datasets or m.configured_dataset_names(local)
+        requested_classifiers = [str(c).lower() for c in local.estimators]
+        requested_methods = [m.resolve_optimizer_name(o) for o in local.optimizers]
     results, indexed, sources, origins = {}, {}, {}, {}
     datasets, classifiers, algorithms = [], [], []
     rejected = []
@@ -778,6 +790,12 @@ def load_cached_figure_report(args, *, use_manifest=True):
                     or (requested_classifiers is not None and classifier not in requested_classifiers)):
                 continue
             groups = {label: _report_algorithm(label, classifier) for label in payload}
+            if legacy_transfer:
+                expected = {_report_algorithm(label, classifier)[0] for label, _ in
+                            m.expected_result_labels(local, classifier,
+                                len(local.transfer_functions) > 1, len(local.estimators) > 1)}
+                if {group for group, method in groups.values()} != expected:
+                    raise ValueError('Incomplete or incompatible transfer-function optimizer grid')
             methods = list(dict.fromkeys(method for group, method in groups.values()))
             evidence = None
             if any('CacheIdentity' not in row for row in payload.values()):
@@ -876,18 +894,15 @@ def run_figure_report(args):
         destination = safe_path(destination_root / 'Figures' / report.exp_tag / mode)
         results_destination = safe_path(destination_root / 'Results' / report.exp_tag / mode)
         # Create ancestors before the guard; all actual exports stay in Figures.
-        if report.args.experiment_mode == 'full':
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            replica = 0
-            while True:
-                try:
-                    destination.mkdir()
-                    break
-                except FileExistsError:
-                    replica += 1
-                    destination = safe_path(destination.parent / f'{mode}_rep{replica}')
-        else:
-            destination.mkdir(parents=True, exist_ok=True)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        replica = 0
+        while True:
+            try:
+                destination.mkdir()
+                break
+            except FileExistsError:
+                replica += 1
+                destination = safe_path(destination.parent / f'{mode}_rep{replica}')
         print(f'[report] output folder = {destination.name}', flush=True)
         results_destination.mkdir(parents=True, exist_ok=True)
         with report_stage(f'Figures: {destination}'), report_guard((destination,)):

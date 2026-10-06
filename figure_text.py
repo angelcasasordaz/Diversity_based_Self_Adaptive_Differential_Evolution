@@ -9,6 +9,7 @@ SPANISH = {
     'F1-Score': 'F1-Score', 'Fitness': 'Aptitud', 'Features': 'Características',
     'Time': 'Tiempo', 'Selected features': 'Características seleccionadas',
     'Runtime': 'Tiempo de ejecución', 'Average runtime (s)': 'Tiempo promedio (s)',
+    'Average runtime (sec)': 'Tiempo promedio (s)', 'No data': 'Sin datos',
     'Average selected features': 'Promedio de características seleccionadas',
     'Dataset': 'Conjunto de datos', 'Metaheuristics': 'Metaheurísticas',
     'Iteration': 'Iteración', 'Mean': 'Media', 'Median': 'Mediana',

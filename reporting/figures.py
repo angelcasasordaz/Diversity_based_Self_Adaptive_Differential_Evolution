@@ -653,6 +653,34 @@ def generate(report, destination, *, generated=None):
     if report.args.experiment_mode == 'full':
         full_figure_directories(destination, generate_individual=generate_individual)
     with plt.rc_context(STYLE):
+        if report.args.experiment_mode == 'transfer_functions':
+            figures = [('01_resultados_clasificador_todos_datasets.png', summary_figure(report))]
+            available = {metric.run_key: metric for metric in report.metrics}
+            accuracy = available['AccRuns']
+            for classifier in report.classifiers:
+                labels, values = radar_values(report, classifier)
+                accuracy_runs = run_values(report, classifier, accuracy.run_key, accuracy.scale)
+                figures.extend((
+                    (f'02_radar_por_dataset_{classifier}.png', radar_figure(report, classifier, labels, values)),
+                    (f'03_features_runtime_por_dataset_{classifier}.png', dataset_tradeoff_figure(report, classifier, compact_labels=True)),
+                    (f'04_boxplot_accuracy_por_dataset_{classifier}.png', dataset_boxplot_figure(report, classifier, accuracy)),
+                    (f'05_convergence_por_dataset_{classifier}.png', convergence_figure(report, classifier, report.datasets)),
+                    (f'06_heatmap_accuracy_{classifier}.png', heatmap_figure(report, classifier, accuracy)),
+                    (f'07_violin_accuracy_{classifier}.png', violin_figure(
+                        accuracy_runs, report.algorithms, classifier, show_points=False, metric_name=accuracy.name)),
+                    (f'09_global_features_runtime_tradeoff_{classifier}.png', tradeoff_figure(
+                        metric_matrix(report, classifier, available['FeatRuns']),
+                        metric_matrix(report, classifier, available['TimeRuns']), report.algorithms, classifier)),
+                ))
+            classifier = report.classifiers[0]
+            figures.append(('08_global_accuracy_distribution.png', boxplot_figure(
+                run_values(report, classifier, accuracy.run_key, accuracy.scale),
+                report.algorithms, classifier, show_points=False, metric_name=accuracy.name)))
+            for filename, fig in figures:
+                localize_figure(fig, figure_language(report), protected=[*report.datasets, *report.algorithms])
+                save_png(fig, destination / filename)
+                if generated is not None:
+                    generated.append(filename)
         if report.args.experiment_mode == 'full':
             for stem, fig in base_publication_figures(report, skipped):
                 target = full_figure_path(destination, f'{stem}.png')
@@ -663,6 +691,9 @@ def generate(report, destination, *, generated=None):
                           or report.args.experiment_mode != 'full' else ()):
             target = (full_figure_path(destination, f'{stem}.png')
                       if report.args.experiment_mode == 'full' else individual / f'{stem}.png')
+            if report.args.experiment_mode == 'transfer_functions' and stem.startswith('generic_'):
+                target = destination / INDIVIDUAL_DIRECTORY / f'{stem}.png'
+                target.parent.mkdir(parents=True, exist_ok=True)
             save_png(fig, target)
             if generated is not None:
                 generated.append(str(target.relative_to(destination)))
@@ -672,6 +703,20 @@ def generate(report, destination, *, generated=None):
                 save_png(fig, target)
                 if generated is not None:
                     generated.append(str(target.relative_to(destination)))
+    if report.args.experiment_mode == 'transfer_functions':
+        import historical_transfer_plots as transfer
+        df = framework().generate_summary_dataframe(report.results, report.args)
+        estimators = df['Estimator'].str.lower()
+        classifier = report.classifiers[0]
+        with plt.rc_context(rc=plt.rcParamsDefault):
+            transfer.generate_classifier_metric_grid_chart(
+                df, destination, report.args.optimizers,
+                filename=transfer.METRICS_FILENAME, language=figure_language(report))
+            transfer.generate_global_features_runtime(
+                df[estimators == classifier], destination, report.args.optimizers,
+                filename=transfer.TRADEOFF_FILENAME, language=figure_language(report))
+        if generated is not None:
+            generated.extend((transfer.METRICS_FILENAME, transfer.TRADEOFF_FILENAME))
     return skipped
 
 

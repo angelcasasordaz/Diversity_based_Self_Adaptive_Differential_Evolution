@@ -76,7 +76,7 @@ def full_optimizer_line_style(name):
 # "mafese"
 
 EXPERIMENT_MODES = [
-    "full",
+    "transfer_functions", # "full"
     # "ablation",
     # "sensitivity",
     # "sensitivity_weights",
@@ -120,9 +120,11 @@ SENSITIVITY_WEIGHTS_DATASETS = [
 ]
 
 TRANSFER_FUNCTION_DATASETS = [
-    "FeatureEnvy",
-    "LongMethod",
-    "GodClass",
+    "BreastCancer",
+    "Ionosphere",
+    "Tic-tac-toe",
+    "Wine",
+    "Zoo",
 ]
 
 MAFESE_DATASET_SUITE = "test14"
@@ -251,8 +253,8 @@ N_WORKERS = automatic_worker_count()
 HYBRID_MAX_RUN_WORKERS = 4
 
 # Continue the real EXP629; EXP627 is a read-only source for missing rows.
-EXP_ID = 625
-REUSE_CACHE_FROM_EXP_ID = 625
+EXP_ID = 626
+REUSE_CACHE_FROM_EXP_ID = 626
 # None -> do not search another experiment.
 #
 # Example:
@@ -346,7 +348,7 @@ TRANSFER_FUNCTION_OPTIMIZERS = [
 ]
 
 TRANSFER_FUNCTION_ESTIMATORS = [
-    "svm",
+    "knn",
 ]
 
 TRANSFER_FUNCTION_TESTS = [
